@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="64" height="64" role="img" aria-label="Kiwi Transfer, direction B">
+<title>B: arc from phone to laptop</title>
+<path fill="#2F6249" d="M56.32 0H199.68A56.32 56.32 0 0 1 256 56.32V199.68A56.32 56.32 0 0 1 199.68 256H56.32A56.32 56.32 0 0 1 0 199.68V56.32A56.32 56.32 0 0 1 56.32 0Z"/>
+<path fill="#123B2A" d="M56.32 1H199.68A55.32 55.32 0 0 1 255 56.32V199.68A55.32 55.32 0 0 1 199.68 255H56.32A55.32 55.32 0 0 1 1 199.68V56.32A55.32 55.32 0 0 1 56.32 1Z"/>
+<path fill="#FFC27A" fill-rule="evenodd" d="M46 118H80A10 10 0 0 1 90 128V196A10 10 0 0 1 80 206H46A10 10 0 0 1 36 196V128A10 10 0 0 1 46 118ZM46 130V192H80V130Z"/>
+<path fill="#FFC27A" fill-rule="evenodd" d="M134 128H194A8 8 0 0 1 202 136V184H126V136A8 8 0 0 1 134 128ZM138 140V174H190V140Z"/>
+<path fill="#FFC27A" d="M114 188H214V192A8 8 0 0 1 206 200H122A8 8 0 0 1 114 192Z"/>
+<path fill="none" stroke="#B9F34A" stroke-width="14" stroke-linecap="round" d="M63 104C70 58 140 40 166 96"/>
+<path fill="#B9F34A" d="M148 92L188 82L178 122Z"/>
+<path fill="#B9F34A" d="M228.8 197.69L223.85 223.85L197.69 228.8L202.64 202.64Z"/>
+</svg>

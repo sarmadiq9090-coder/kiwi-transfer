@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="64" height="64" role="img" aria-label="Kiwi Transfer, direction C">
+<title>C: a photo flying from phone to PC</title>
+<path fill="#2F6249" d="M56.32 0H199.68A56.32 56.32 0 0 1 256 56.32V199.68A56.32 56.32 0 0 1 199.68 256H56.32A56.32 56.32 0 0 1 0 199.68V56.32A56.32 56.32 0 0 1 56.32 0Z"/>
+<path fill="#123B2A" d="M56.32 1H199.68A55.32 55.32 0 0 1 255 56.32V199.68A55.32 55.32 0 0 1 199.68 255H56.32A55.32 55.32 0 0 1 1 199.68V56.32A55.32 55.32 0 0 1 56.32 1Z"/>
+<path fill="#FFC27A" fill-rule="evenodd" d="M44 112H74A10 10 0 0 1 84 122V194A10 10 0 0 1 74 204H44A10 10 0 0 1 34 194V122A10 10 0 0 1 44 112ZM44 124V190H74V124Z"/>
+<path fill="#FFC27A" fill-rule="evenodd" d="M148 122H214A10 10 0 0 1 224 132V176A10 10 0 0 1 214 186H148A10 10 0 0 1 138 176V132A10 10 0 0 1 148 122ZM150 134V174H212V134Z"/>
+<path fill="#FFC27A" d="M174 186H188V198H174ZM160 196H202V206H160Z"/>
+<g transform="rotate(-12 110 80)"><path fill="#B9F34A" d="M84 54H136A6 6 0 0 1 142 60V100A6 6 0 0 1 136 106H84A6 6 0 0 1 78 100V60A6 6 0 0 1 84 54Z"/>
+<path fill="#123B2A" d="M88 96L102 76L112 88L118 80L132 96Z"/><circle fill="#123B2A" cx="124" cy="68" r="6"/></g>
+<path fill="none" stroke="#B9F34A" stroke-width="6" stroke-linecap="round" stroke-dasharray="2 14" d="M60 100C66 86 72 80 78 78M146 92C160 98 172 108 180 118"/>
+<path fill="#B9F34A" d="M228.8 197.69L223.85 223.85L197.69 228.8L202.64 202.64Z"/>
+</svg>
