@@ -131,7 +131,7 @@ In both modes the verifier MUST do all of the following, and MUST fail the hands
 Defence in depth: after the handshake, both sides also sign a session transcript bound to the TLS exporter
 with the identity key (5.3). A verifier bug that skipped step 2 is therefore caught at the application layer.
 
-Required negative tests (11.3): (a) correct pinned certificate presented by a peer that signs
+Required negative tests (11.2): (a) correct pinned certificate presented by a peer that signs
 `CertificateVerify` with a different key MUST fail; (b) unknown key in PINNED mode MUST fail; (c) RSA or
 ECDSA certificate MUST fail; (d) two-certificate chain MUST fail; (e) ALPN `kiwi/2` or `h3` MUST fail.
 
@@ -237,7 +237,7 @@ Rules:
 - Addresses are the PC's unicast addresses on eligible interfaces only (4.4), IPv4 first. IPv6 link-local
   addresses are not put in the QR (no scope id can be carried).
 - The QR carries no expiry time: the PC enforces the window with its own monotonic clock.
-- A typical payload (two IPv4 addresses) is 63 bytes, 101 Base32 characters, QR version 6 at level M.
+- A typical payload (two IPv4 addresses) is 63 bytes, 101 Base32 characters, 107 characters with the prefix: QR version 5 at level M.
 - PH MUST accept this content **only from its in-app scanner**. The app MUST NOT register a URI scheme,
   app link or intent filter that starts pairing, and MUST NOT accept a pairing payload from the clipboard,
   a file or another app. (A link on a web page must not be able to pair the phone with an attacker's PC.)
@@ -367,7 +367,7 @@ most 4 paired PCs (configurable; not a wire limit).
 - If the peer is offline it finds out at its next connection: the handshake fails (unknown key). A device
   MUST NOT delete a pin automatically because a handshake failed (that could be a network attacker or a
   transient fault). It marks the link "not accepted by the other device" and lets the user remove it.
-- Unpairing never deletes a file on either device. For final move its effect is defined in 8.9
+- Unpairing never deletes a file on either device. For final move its effect is defined in 8.10
   (purges stop; items in the trash stay there until the user decides).
 - Pairing the same two devices again creates a new link with a new `pairing_id`; no state is inherited.
 
@@ -463,7 +463,7 @@ While a link is `REQUIRED`:
 | After re-confirmation | Everything resumes from where it stopped. No re-pairing is needed. |
 
 Limit that cannot be removed: on Android 11+ the *system* trash deletes its items on its own schedule
-(8.6). The app cannot suspend that; see 8.6(5) for the required warning.
+(8.6). The app cannot suspend that; 8.6 defines the warning the app must give instead.
 
 ### 3.6 Several paired devices
 
@@ -877,7 +877,7 @@ Codes not listed are reserved. Field tables follow; the first column is the map 
 |---|---|---|---|---|
 | 0 | `integrity_block` | bool | R | 8.9. |
 | 1 | `scan_seq` | uint | R | Number of completed full integrity scans. |
-| 2 | `scan_age` | uint | R | Seconds (PC link clock) since the last completed full scan; `0` if none yet and the ledger is empty. |
+| 2 | `scan_age` | uint | R | Seconds (PC link clock) since the last completed full scan; if none has completed yet, since the first file was committed (`0` for an empty ledger). |
 | 3 | `roots` | array of Root | R | Roots this phone may use. |
 | 4 | `outbox` | uint | R | Number of items the PC is waiting to send to this phone (9.1). |
 | 5 | `confirm_state` | uint | R | PC's view: 1 `CONFIRMED`, 2 `REQUIRED`. |
@@ -1325,7 +1325,8 @@ is empty, is `.` or `..`, or contains U+0000 or `/`.
    with `E_NAME`.
 4. PC, before using a suffix: if the ledger of this link already has a record with the same `hash` and
    `size`, the PC re-reads that existing file unbuffered. If it matches, the new temporary file is
-   discarded and the receipt refers to the existing file (level 2: it was just read from disk). If it does
+   discarded and the receipt refers to the existing file (at the level section 7 allows for that volume: it
+   was just read from disk). If it does
    not match or is missing, that is an integrity alert (8.9) and the new file is kept under the next free
    name (this repairs the damage).
 5. The folder layout on the PC (year/month, per phone, custom) is a PC setting. The PC builds the folder
@@ -1603,7 +1604,10 @@ Common rules:
 ### 8.7 Step 4: purge (API 24-29), and the stage-2 check (all versions)
 
 Stage 2 is the same exchange as 8.5 with `stage = 2`; the phone computes its side over the **trashed**
-copy. It is used before every purge on API 24-29, and as the pre-expiry check on API 30+.
+copy. It is used before every purge on API 24-29, and as the pre-expiry check on API 30+. On API 30+, if
+Android does not let the app read an item that is in the system trash, the phone accepts PC status 1
+without comparing proofs: that check only decides whether the user is warned, never whether something is
+deleted (open question Q3).
 
 An item in the app trash folder is permanently deleted only if **all** hold:
 
@@ -1736,4 +1740,379 @@ Two cases where data can be lost, stated honestly (see the threat model, section
 
 ---
 
-<!-- PART-3 -->
+## 9. Other features
+
+All features of this section need a `CONFIRMED` link and the matching capability.
+
+### 9.1 Sending files (PC to phone, and phone to PC)
+
+**PC to phone.**
+
+1. The PC user chooses files and a phone. With an open session the PC sends `OFFER` (purpose 2) at once.
+   Without one, the PC keeps a reference to the files in an **outbox** for up to 7 days (not a copy) and
+   reports the count in `STATUS.outbox`. Because the phone never listens (decision D3) and there is no push
+   service, delivery happens when the phone next opens a session; the PC program says "Open Kiwi Transfer
+   on your phone".
+2. The phone shows a dialog: "<PC name> wants to send N files", with cleaned names, sizes and the save
+   folder. Accept or Decline, for the whole offer. Decline answers every item `declined` (`E_DECLINED`).
+   There is no automatic accept in 1.0. The dialog is only shown while the app is in the foreground.
+3. `Item.name` is the base name only; `path` is absent. The PC as sender follows 6.5 (one read, hash what
+   is streamed, re-check size and modification time).
+4. Phone commit *(platform)*: write into a pending MediaStore entry (API 29+) or a temporary name (API
+   24-28) under `Download/Kiwi Transfer/`; verify every chunk; `fsync`; read the whole file back and compare
+   its `BLAKE3` with `trailer.hash`; publish with create-new semantics (6.9); record it in the phone ledger;
+   send `ITEM_RESULT` with a level-1 receipt.
+5. **Never auto-open.** The phone does not open, preview with another app, or install a received file by
+   itself. "Open" is a user tap and goes through the system chooser. The app never asks the system to
+   install a received APK.
+
+**Phone to PC** ("Send to PC" in the share sheet): `OFFER` with purpose 2. The PC accepts without a prompt
+from a `CONFIRMED` phone, stores the files in that phone's "sent files" folder through the full commit of
+section 7, and lists them in its history. Shared content without a name or date gets a generated name and
+the current time. The PC never opens the files.
+
+### 9.2 Clipboard text and links
+
+1. **Manual only.** Text is sent only by an explicit user action on the sending device, each time. There
+   is no clipboard monitoring, no synchronisation and no background reading.
+2. `CLIP(kind, text, sensitive)`: `kind` 1 text, 2 link (the sender believes the text is one URL; the
+   receiver decides for itself). At most 65 536 bytes; at most one per second.
+3. Receiver: shows "Text from <peer>". The text goes to the system clipboard only when the user taps
+   "Copy". `CLIP_ACK(shown)` reports that it reached the user interface, not that it was copied.
+4. **Links are never opened automatically.** An "Open" button appears only if the whole text parses as one
+   `http` or `https` URL; the full URL is shown (a non-ASCII host also in its punycode form) and the
+   default browser is started only by the tap. Any other scheme (`intent:`, `file:`, `javascript:`, app
+   schemes) is shown as plain text only.
+5. **Sensitive flag.** The sender sets it when the source marked the content as sensitive (Android
+   `EXTRA_IS_SENSITIVE`; Windows clipboard-history exclusion formats) or the user ticked "sensitive".
+   With the flag, the receiver: shows no content preview in notifications or lists; copies with the
+   platform's sensitive markers (Android 13+ `EXTRA_IS_SENSITIVE`; Windows: excluded from clipboard history
+   and cloud clipboard); keeps the text in memory only and drops it after 2 minutes or at session end.
+6. With or without the flag, clipboard content is never written to a log, to history (only "text received,
+   N characters") or to a problem report.
+
+### 9.3 Browsing the PC from the phone (read-only)
+
+1. **Chosen folders only.** The PC user decides which folders each phone may see (roots of kind 2).
+   Default: none. A phone can always browse its own backup folder (kind 1).
+2. **Handles, not paths.** The phone never sends a path. `BROWSE` names a root and, below it, an `entry`
+   handle taken from an earlier reply. Handles are random 16-byte values that the PC maps to canonical
+   paths in a per-session table; an unknown handle is `E_NOT_FOUND`. Path traversal is therefore not
+   expressible.
+3. The PC lists a directory but omits: hidden and system entries; reparse points of any kind (junctions,
+   symbolic links, mount points); online-only cloud placeholder files (reading them would start a download
+   from the internet); the temporary directory; anything whose resolved path is outside the root.
+4. **Read-only.** No message can create, change, rename or delete anything in a browse root.
+5. **Thumbnails** (`THUMB`): made by the PC with the Windows imaging components, as JPEG, longest edge at
+   most 320 px, at most 65 536 bytes, with all metadata removed (no location in thumbnails). The PC limits
+   its own work: image and video types only, source at most 256 MiB and 100 megapixels, 5 s per thumbnail,
+   8 at a time. The phone checks the byte size and the JPEG header dimensions (at most 320 x 320) before
+   decoding, and keeps thumbnails only in its cache directory (cleared on unpair).
+6. **Fetching** (`FETCH`, purpose 3): the PC answers with `OFFER`s of purpose 3; the phone stores the files
+   as in 9.1(4). The user asked for them, so there is no accept dialog; the phone still enforces its free
+   space rule.
+
+### 9.4 Full restore to a new phone
+
+1. A new phone has a new identity. It pairs like any phone and gets a **new link**.
+2. On the PC, the user explicitly attaches an existing backup to the new link ("This phone replaces
+   <old phone>"). This is consent given at the PC; a phone cannot request it. Effects: the old backup is
+   offered to the new link as a root of kind 3 (restore source, read-only), and the PC may adopt the old
+   folder as the new link's destination by copying the ledger records to the new link with
+   `verify_level = 0` (so later backups deduplicate; nothing becomes eligible for final move by this).
+3. The phone sends `FETCH` (purpose 4) for the root or for chosen entries. The PC sends `OFFER`s of purpose
+   4, at most 500 items each, with `hash`, `path`, `mtime` and `media` from the ledger. The phone answers
+   `have` for content it already holds (same hash), `send` otherwise. Resume works as in 6.7.
+4. The PC as sender hashes what it streams (6.5). If the streamed hash differs from the ledger hash, the
+   item fails (`E_CHANGED`) and the PC raises an integrity alert: the stored file is damaged.
+5. Phone commit as in 9.1(4), into a "restored" folder (media under `DCIM/`, other files under
+   `Download/`), with album sub-folders from the cleaned `path`. Modification times are restored where the
+   platform allows; capture dates are inside the untouched files.
+6. Restored items are entered in the phone ledger with their hash and a level-0 receipt: they are not
+   uploaded again, and they become eligible for final move only through the complete flow of section 8.
+7. The dialog on the PC offers to unpair the old phone (a lost phone should not stay paired).
+
+---
+
+## 10. Update check, problem report, and the complete endpoint list
+
+### 10.1 Update check
+
+Builds distributed through a store (F-Droid, Google Play) compile this feature out: the store updates the
+app. For direct downloads:
+
+1. **Request.** `GET https://api.github.com/repos/<owner>/<repo>/releases/latest` (owner and repository are
+   constants in the program; open question Q5). Headers: `Accept: application/vnd.github+json`,
+   `User-Agent: KiwiTransfer` (a constant: no version, no operating system, no identifier). No cookie, no
+   token, no query parameter, no body. HTTPS with the platform trust store. Redirects are not followed.
+   The response is capped at 1 MiB.
+2. **What is disclosed.** GitHub sees the public IP address, the time, and that some Kiwi Transfer program
+   asked. Nothing about files, devices, the installed version or the user.
+3. **When.** When the user taps "Check for updates"; and, if the automatic check is enabled, at most once
+   per 24 hours while the program is open.
+4. **Result.** The tag (`vX.Y.Z`, SemVer) is compared with the installed version. Release notes are shown
+   as plain text (at most 4 KiB).
+5. **Download**, only after "Update now": the release manifest `kiwi-release.json`, its signature
+   `kiwi-release.json.sig`, and the asset for this platform. URLs must be HTTPS on `github.com` under
+   `/<owner>/<repo>/releases/download/`; redirects are followed only to GitHub's own asset hosts
+   (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`).
+6. **Verification.** All of the following, before anything is installed or run:
+   a. `kiwi-release.json.sig` is a valid detached Ed25519 signature (RFC 8032) over the exact bytes of
+      `kiwi-release.json`, under one of the release public keys compiled into the program (an active key
+      and a reserve key for rotation). The release keys are used for nothing else.
+   b. The manifest's `version` equals the tag and is greater than the installed version (no downgrade).
+   c. The downloaded asset's size, SHA-256 and BLAKE3 equal the manifest entry for its file name.
+   d. Android: the system installer also enforces that the APK is signed with the same certificate as the
+      installed app. Windows: there is no Authenticode signature in 1.0 (certificates cost money and the
+      project uses free tools only), so (a)-(c) are the whole check.
+7. A failed check deletes the download and tells the user; the program never offers to "install anyway".
+
+Manifest:
+
+```json
+{
+  "schema": 1,
+  "version": "1.1.0",
+  "protocol": { "major": 1, "minor": 0 },
+  "assets": {
+    "KiwiTransfer-1.1.0-arm64-v8a.apk": { "size": 8812345, "sha256": "<hex>", "blake3": "<hex>" },
+    "KiwiTransfer-1.1.0-x64-setup.exe": { "size": 24117248, "sha256": "<hex>", "blake3": "<hex>" }
+  }
+}
+```
+
+The first installation cannot be checked by the program itself; releases therefore also publish the
+manifest, its signature and build provenance for manual checking.
+
+### 10.2 Problem report
+
+1. Only when the user asks. The program builds a plain-text report and shows **all of it** before anything
+   leaves the device.
+2. The program hands the text to the user's own mail program (`mailto:` / Android `ACTION_SENDTO`), or the
+   user copies it. The user sends it. **The program itself opens no network connection for a report.**
+   There is no crash reporter and no analytics library in the program.
+3. Allowed content: program version; platform, OS version, CPU type, memory class; number of paired
+   devices; number of folders per mode; last error codes; and, if the user leaves the switch on, the last
+   40 lines of the diagnostic log.
+4. Never included: file names, paths, album names, device names, Wi-Fi names, IP or MAC addresses, device
+   ids or fingerprints, keys, pairing or weekly codes, clipboard text, hashes of user files.
+5. Diagnostic log: off by default, stored locally only, at most 1 MiB. The logging interface accepts only
+   allow-listed value types (numbers, enumerations, durations, error codes), so that a name or address
+   cannot be logged by mistake.
+
+### 10.3 Every network endpoint the programs may contact
+
+| # | Endpoint | Protocol | When | Which program |
+|---|---|---|---|---|
+| 1 | The paired device, at an on-link address (4.4) | QUIC over UDP; port from QR, mDNS or cache | Pairing and sessions | Both |
+| 2 | `224.0.0.251:5353` and `[ff02::fb]:5353` (link-local multicast) | mDNS | Discovery | PC advertises; phone browses |
+| 3 | `api.github.com`, TCP 443 | HTTPS | Update check (10.1) | Both, direct-download builds only |
+| 4 | `github.com`, then GitHub asset hosts, TCP 443 | HTTPS | Update download after the user's tap | Both, direct-download builds only |
+
+Nothing else. In particular there is no analytics, crash reporting, advertising, push service, time
+server, connectivity check, remote configuration, web font or web script, link preview, relay, STUN or
+TURN server, and no DNS lookup other than for rows 3 and 4. Rows 1 and 2 never leave the local link.
+
+Things the project does not control, stated for honesty: the address `fastkiwi.app/transfer` shown during
+onboarding is opened by the user in a browser, not fetched by the app; a problem report travels through
+the user's mail program; Android and Windows make their own connections; the WebView2 runtime that draws
+the PC window is a Microsoft component with its own update and reputation services. The PC program loads
+only its own local files into WebView2, blocks every navigation and request to a remote origin, and
+switches off the runtime's optional network features where its API allows (open question Q12).
+
+---
+
+## 11. Versioning, compatibility, test vectors
+
+### 11.1 Versioning rules
+
+1. **Major version = ALPN token.** A change that an existing implementation would misunderstand needs a new
+   token (`kiwi/2`). A later program may offer several tokens; TLS selects one and the selection is covered
+   by the handshake, so it cannot be downgraded by an attacker. Version 1.0 offers `kiwi/1` only.
+2. **Minor version** = `HELLO.minor`; the session uses the smaller of the two. A minor version may add:
+   message types, optional fields, capability ids, error codes, values of enumerations.
+3. Receiver rules that make this safe: unknown map keys are ignored; an unknown request gets
+   `E_UNSUPPORTED`; an unknown error code is treated as `E_INTERNAL`; an unknown enumeration value in a
+   reply means "failed" for that item. The safe reading of anything unknown is always "do not delete".
+4. **Capabilities** gate features. A feature is used only if both sides listed it.
+5. Pairing has its own versions (`qr_version`, `pair_version`). An unknown value is refused with a message
+   asking the user to update.
+6. Within major version 1, safety constants may only become stricter (`FM_DELAY`, `CONFIRM_PERIOD`, attempt
+   limits, trash retention minimum).
+7. Program versions follow SemVer and are independent of the protocol version. Promise: any 1.x phone app
+   works with any 1.y PC program.
+8. Message codes `0x70`-`0x7F` are for experiments and never appear in a release. All other unlisted codes
+   are reserved.
+9. Every context string contains `kiwi/1`; a new major version uses new strings, so hashes, proofs and
+   signatures never carry over between majors.
+
+### 11.2 Test vectors
+
+Structure only; **the byte values are produced by the reference implementation** (the core) with a
+deterministic generator and fixed seeds, and are committed under `docs/test-vectors/kiwi-1/`. A second
+implementation conforms when it reproduces every expected value and rejects every negative case.
+
+File format: JSON, one file per suite:
+
+```json
+{ "schema": 1, "protocol": "kiwi/1", "suite": "pairing",
+  "vectors": [ { "name": "qr-basic", "input": { "nonce_p": "<hex>" }, "expect": { "sas": "482913" } } ] }
+```
+
+Byte strings are lowercase hex. Test file content is generated, not stored: `content(seed, size)` = the
+first `size` bytes of the BLAKE3 extended output of `KDF`-mode hashing with context `kiwi/1 test content`
+over the 8-byte big-endian `seed`.
+
+| Suite | Inputs | Expected |
+|---|---|---|
+| `identity` | Seed | Public key, `SPKI` (44 bytes), device id, display fingerprint, one valid certificate. |
+| `qr` | `pc_id`, `pair_secret`, port, addresses, flags | Payload bytes and QR text. Negative: wrong prefix, unknown flag bit, truncated, `n = 0`, `n = 7`, bad Base32. |
+| `pairing` | `E_pair`, `ID_ph`, `ID_pc`, `m1`, `m2`, `nonce_p`, `pair_secret` | `commit`, `TH`, `SAS`, `K_pair`, `proof_ph`, `proof_pc`. Negative: altered nonce. |
+| `session` | `E_sess`, ids, `h_ph`, `h_pc`, both seeds | `TH_sess`, `sig_ph`, `sig_pc` (Ed25519 is deterministic). |
+| `discovery` | `ID_pc`, instance name | `h`. |
+| `cbor` | One example per message type | Exact frame bytes. Negative list: float, tag, indefinite length, duplicate key, non-minimal integer, unsorted keys, trailing bytes, depth 9, oversize length. |
+| `chunks` | `content(seed, size)` for sizes 0, 1, `CHUNK - 1`, `CHUNK`, `CHUNK + 1`, `3 * CHUNK` | Chunk hashes, file hash, `prefix_hash` for each `k`, BLAKE3 of the complete data-stream bytes. |
+| `fm-proof` | Nonce, ids, stage, size, `content(seed, size)` | `K_v`, `proof`. |
+| `names-windows`, `names-android` | Components such as `..`, `a/b`, `CON`, `nul.txt`, `COM¹`, `x.`, `x `, `a:b`, a name with U+202E, decomposed (NFD) names, 300-unit names, a cut that would split a surrogate pair, `.nomedia` | Cleaned component, or "reject". |
+| `collision` | Existing names and an incoming name | Chosen final name. |
+| `link-clock` | Sequences of checkpoints (wall time, boot id, monotonic reading) | `LC` after each step, anomaly flag. |
+| `confirm-state` | Pairs of (`epoch`, `age`, `anomaly`) | State, adopted epoch and age. |
+| `tls-negative` | The five handshakes of 1.4 | Each must fail. |
+
+### 11.3 Conformance tests beyond vectors
+
+Every row of the failure table in 8.11 is an automated test in the reference implementation (fault
+injection at the named point, then the assertion "nothing is deleted"). The integration suite also covers:
+resume after a kill at every step of section 7; a planted junction; two files that differ only in case; a
+pairing with a wrong QR secret; SAS mismatch; weekly code attempts and lockout; quota and reserve.
+
+### 11.4 Platform independence (iOS later)
+
+iPhone support is deferred, not cancelled. To keep it possible:
+
+- The wire protocol has no field that only Android can fill: `Media` is optional and `platform = 3` is
+  reserved for iOS.
+- The core reaches the system only through adapters: `KeyWrap` (wrap/unwrap the identity seed),
+  `Storage` (durable database, no-backup location), `Clock` (monotonic time including sleep, boot id, wall
+  time), `MediaSource` (enumerate, open original bytes, re-check metadata), `Trash` (trash, read back,
+  restore, purge; a flag says whether retention is system-managed), `Discovery` (candidates in),
+  `NetworkPolicy` (eligible interfaces, on-link prefixes, socket binding), `Prompts` (pairing consent, SAS,
+  accept dialog).
+- The phone is always the QUIC client and never listens, which fits iOS background rules.
+- The trash model of API 30+ (system dialog, system-managed 30-day retention, warn before expiry) is the
+  model an iOS client would use with the Photos "Recently Deleted" album.
+
+---
+
+## 12. Decisions
+
+Each line: the choice, then the alternative that was not taken and why.
+
+| # | Decision | Instead of | Reason |
+|---|---|---|---|
+| D1 | Self-signed X.509 certificate carrying the Ed25519 key | Raw public keys (RFC 7250) | Measured working in the spike with rustls 0.23; raw-key support is newer and uneven across TLS stacks (matters for iOS). Only `SPKI` is evaluated, so the result is the same. |
+| D2 | Device id = BLAKE3 of the 44-byte `SPKI`; pin = full `SPKI` | SHA-256; pinning the hash only | One hash function in the whole protocol; matches the spike. |
+| D3 | Phone is always the QUIC client, PC always the server | Either side may listen | Android (and iOS) background limits; one firewall rule; the phone has no inbound attack surface. Cost: PC-to-phone sending waits for the phone to connect. |
+| D4 | One ALPN and one listener; pairing gated by a user-opened window | A separate pairing port or ALPN | No standing pairing listener; fewer states to get wrong. UNPAIRED connections are never upgraded. |
+| D5 | QR with a one-time 128-bit secret, plus a 6-digit SAS with commitment | A typed short code with a PAKE | No audited PAKE crate exists (spike section 5). |
+| D6 | The SAS is always shown; comparing it is mandatory only without the QR | SAS only as a hidden fallback | Matches the approved screens; one message sequence for both methods. |
+| D7 | CBOR, deterministic, integer keys, length-prefixed frames | Protobuf, JSON, postcard, MessagePack | See 5.2. |
+| D8 | Fixed 4 MiB chunks with independent BLAKE3 chunk hashes, plus a whole-file BLAKE3 | BLAKE3 verified streaming (Bao) | No stable, audited Bao crate; 4 MiB matches the unbuffered verify buffer of the spike. |
+| D9 | The file hash is computed in the same pass that streams the bytes; pre-hashing only on `need_hash` | Always hash first, then send | No double read of large videos, and "hash exactly what was streamed". |
+| D10 | Deduplication per link only | Across all phones of a PC | One phone's sole copy must not depend on another phone's folder. |
+| D11 | Never overwrite; `name (n).ext`; create-new rename | Replace when the hash differs; ask the user | No destructive write can be triggered from the network. |
+| D12 | No TLS session tickets or resumption (and no 0-RTT) | Resumption without 0-RTT | Unpairing must take effect on the next connection; resumption would skip the pin check. |
+| D13 | QUIC Retry for every new connection | Retry only under load | One extra round trip on a LAN is negligible; simpler and deterministic. |
+| D14 | Weekly check measured by a link clock (monotonic, the larger of both devices) and an epoch counter | Wall-clock timestamps | Wall clocks can be set back. |
+| D15 | A weekly code exists only while a person at the PC is shown it; 3 attempts; a new code needs a PC click | Code always available to guess | Makes a 2-digit code a sound presence check. |
+| D16 | An expired weekly check pauses every data-plane request | Pausing only final move | The brief asks that automatic backup pauses. See open question Q2. |
+| D17 | Second verification by a keyed proof computed on both sides with a fresh nonce | The PC stating "hash matches" | Makes "never trust the ledger" a property of the protocol: the PC cannot pass without reading the bytes. |
+| D18 | Trash, never direct deletion; a third verification before purge; no `MANAGE_MEDIA`, no `createDeleteRequest` | Silent deletion | The user keeps an undo and sees the system dialog. |
+| D19 | An integrity problem blocks final moves for all phones of that PC | Per file or per phone | A damaged file suggests a failing disk. |
+| D20 | Browse by opaque handles | Relative path strings | Traversal cannot be expressed. |
+| D21 | Thumbnails and listings on the control stream | Extra stream types | Fewer stream states; 64 KiB cap keeps head-of-line delay small. |
+| D22 | Update: detached Ed25519 signature over a manifest, verified by the core | minisign format; Sigstore; Authenticode | No new cryptographic code (the core already has Ed25519); free tools only. |
+| D23 | Problem report through the user's mail program | An HTTPS endpoint | The program sends nothing; the user sees everything. |
+| D24 | "LAN only" enforced by an on-link address rule (and hop limit 1) | Trusting the UI or private address ranges | Works for IPv6 and odd subnets; defeats port-forwarding. |
+| D25 | No deep link or URI scheme for pairing | `kiwi://pair?...` | A web page must not be able to start a pairing. |
+| D26 | PC ledger in the user's local application data, not in the destination folder | Next to the files | Users browse and reorganise the destination. Ledger loss is handled by 8.10. |
+| D27 | ring as the TLS crypto provider; X25519 | aws-lc-rs with a hybrid post-quantum group | Smaller, no cmake (spike section 1). See open question Q10. |
+| D28 | No in-app "empty trash now" in 1.0 | A manual purge that bypasses the checks | Every deletion by the app follows 8.7. A file manager remains available to the user. |
+
+---
+
+## 13. Open questions
+
+Flagged for the manager; nothing below was guessed into the normative text beyond the stated default.
+
+| # | Question | Default written in this document |
+|---|---|---|
+| Q1 | Windows marks most new networks (home Wi-Fi, phone hotspot, USB tethering) as **Public**. With "Private profile only", many users cannot connect until they change the network type in Windows Settings (which may need administrator rights). How should the PC program guide this, and is Private-only final? | Private only; the program explains and opens the Windows settings page. |
+| Q2 | Scope of an expired weekly check. The brief says automatic backup pauses; the approved screens say the code is asked "before final moves" and "normal copying continues". | Everything on the data plane pauses (D16). Narrowing it to final move is a one-line change in 3.5. |
+| Q3 | Android 11+ system trash: retention is fixed by the system, cannot be suspended, and the "trash period" setting cannot apply. Is the warning-and-restore rule (8.6) acceptable, and should the setting be hidden on those versions? Also to verify on a device: whether the app can list trashed items it does not own. | As written in 8.6. |
+| Q4 | Default destination: the design uses the largest fixed drive. If that folder is inside OneDrive or another sync client, final move is refused (8.2) and files are uploaded to a cloud by that client. Should the PC warn, or refuse such a destination even for copying? | Copy allowed with a warning; final move refused. |
+| Q5 | Release signing: who holds the Ed25519 release keys, where (offline or CI secret), and how the reserve key is kept. Repository owner/name for the update check. Support e-mail address for reports. Is the automatic update check on or off by default? | Not decided; automatic check assumed on, at most daily. |
+| Q6 | "Allowed Wi-Fi networks" (advanced setting): reading the Wi-Fi name on Android needs the location permission. Alternative without it: treat a network as allowed when a paired PC answers on it. | Not specified in `kiwi/1` (local policy). |
+| Q7 | Does `NsdManager` find the PC when the phone itself is the hotspot or shares over USB? Not tested (no device in the spike). Fallbacks: cached address, QR, or mDNS from the core. | Candidates from any source are accepted (4.3). |
+| Q8 | Android 17 local-network permission: exact name, group and behaviour at the chosen target SDK. | 4.7, to be verified. |
+| Q9 | Hop limit 1 on QUIC sockets breaks routed home networks (some mesh systems in router mode). Keep as SHOULD, make it a setting, or drop? Also: confirm that UDP port 47474 is unassigned and unblocked. | SHOULD; port 47474 preferred, any port accepted. |
+| Q10 | Post-quantum key exchange (X25519MLKEM768) needs aws-lc-rs (larger library, cmake). Traffic recorded on the LAN today could be decrypted by a future quantum computer. | Not in 1.0. |
+| Q11 | PC-to-phone sending when the phone app is closed: there is no push without a cloud. Is "open the app on your phone" acceptable, or is a foreground service wanted? | Outbox, delivered at the next session. |
+| Q12 | WebView2: which runtime network features (SmartScreen, autofill, updates) can and should be disabled, and how to word "nothing else leaves the device" given the runtime is Microsoft's. | 10.3 note. |
+| Q13 | Android 10 (API 29): the trash folder relies on legacy external storage; the spike could not verify this on a device. If it does not work, Android 10 becomes copy-only. | Assumed to work. |
+| Q14 | Batch size for `createTrashRequest` (500 items per system dialog) must be verified on devices. | 500. |
+| Q15 | Should the PC user have to approve final move per phone (a PC-side switch), in addition to the notice? | Notice only. |
+| Q16 | Mark-of-the-Web on files received by the PC: none (current), or on executable and script types from "Send to PC". | None. |
+| Q17 | Limits: 8 phones per PC, 4 PCs per phone; one final-move target PC per folder. | As written. |
+
+---
+
+## Appendix A. Constants
+
+| Name | Value | Used in |
+|---|---|---|
+| `ALPN` | `kiwi/1` | 1.3 |
+| `MAX_FRAME` | 262 144 bytes | 5.1 |
+| `MAX_FRAME_UNPAIRED` | 4 096 bytes | 2.1 |
+| `MAX_DATA_STREAMS` | 4 per direction | 5.5 |
+| `CHUNK` | 4 194 304 bytes | 6.4 |
+| `PAIR_WINDOW` | 180 s (allowed 120-300 s) | 2.1 |
+| `PAIR_SECRET_LEN` | 16 bytes | 2.1 |
+| Pairing attempts per window | 3 | 2.1 |
+| Provisional pin lifetime | 600 s | 2.4 |
+| `CONFIRM_PERIOD` | 604 800 s (7 days) | 3.3 |
+| `RECONFIRM_TTL` | 300 s | 3.4 |
+| Weekly code attempts | 3 per challenge; lock 900 s doubling to 86 400 s after 3 dead challenges | 3.4 |
+| Link clock checkpoint | Every 300 s at most | 3.2 |
+| `SETTLE_TIME` | 120 s | 6.2 |
+| Partial file lifetime | 7 days without progress | 5.10, 6.7 |
+| `FM_DELAY` | 86 400 s (24 h) | 8.2, 8.5 |
+| `FM_VERIFY_VALIDITY` | 900 s | 8.5 |
+| Final-move batch | 500 items | 8.6 |
+| `TRASH_RETENTION` | 2 592 000 s (30 days); minimum 604 800 s | 8.6, 8.7 |
+| `SCAN_PERIOD` | 604 800 s (7 days) | 8.9 |
+| `SCAN_MAX_AGE` | 1 209 600 s (14 days) | 8.2, 8.5 |
+| Idle timeout / keep-alive | 30 s / 10 s | 1.3 |
+| Outbox lifetime | 7 days | 9.1 |
+| Preferred UDP port | 47474 | 4.5 |
+
+## Appendix B. Context strings and labels
+
+Exactly these ASCII strings, without quotes and without a terminator.
+
+| Use | String |
+|---|---|
+| TLS exporter label, pairing | `EXPORTER-kiwi-1-pairing` |
+| TLS exporter label, session | `EXPORTER-kiwi-1-session` |
+| `KDF` context | `kiwi/1 pairing commit` |
+| `KDF` context | `kiwi/1 pairing transcript` |
+| `KDF` context | `kiwi/1 pairing sas` |
+| `KDF` context | `kiwi/1 pairing key` |
+| `KDF` context | `kiwi/1 session transcript` |
+| `KDF` context | `kiwi/1 discovery hint` |
+| `KDF` context | `kiwi/1 item key` |
+| `KDF` context | `kiwi/1 fm verify` |
+| `KDF` context (tests only) | `kiwi/1 test content` |
+| Signature prefix | `kiwi/1 session auth` followed by one role byte (`0x01` phone, `0x02` PC) |
+| `MAC` prefix bytes | `0x01` for `proof_ph`, `0x02` for `proof_pc` |
+| Key-wrap associated data / DPAPI entropy | `kiwi/1 identity seed` |
