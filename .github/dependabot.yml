@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad)
+# SPDX-License-Identifier: Apache-2.0
+# Weekly, grouped update PRs. Review action bumps before merging: release.yml signs and publishes.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7 # let a bad or hijacked release be caught before we adopt it
+    open-pull-requests-limit: 5
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      android-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

@@ -1,0 +1,287 @@
+# SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad)
+# SPDX-License-Identifier: Apache-2.0
+# Release pipeline: pushing a tag vMAJOR.MINOR.PATCH[-pre] builds the Windows exe and the Android APK,
+# makes SHA256SUMS and CycloneDX SBOMs, signs the APK, attests build provenance (SLSA, Sigstore) and
+# publishes a GitHub release.
+#
+#   meta       checks the tag against Cargo.toml and the Android versionName, extracts the release notes.
+#   windows    test + release build of the exe (no secrets, no cache).
+#   android    release build (R8) and Maven SBOM (no secrets, no cache).
+#   sbom       Rust crates SBOM.
+#   publish    bound to the protected `release` Environment (required reviewer; deployment rule: v* tags).
+#              Holds the signing secrets and runs NO repository code. It REFUSES to continue when any
+#              signing secret is missing, so an unsigned or debug-signed APK is never published.
+#
+# Environment `release` secrets: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
+# ANDROID_KEY_PASSWORD. The Windows exe has no Authenticode certificate (certificates are not free):
+# it is protected by SHA256SUMS and the build-provenance attestation, which the release notes say.
+#
+# Every `uses:` is pinned to a full commit SHA (Dependabot keeps them current).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# One release at a time, never cancelled half-way (for example while waiting for approval).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    name: check the tag and extract the notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the tag, Cargo.toml and the Android versionName agree
+        id: check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag $TAG must look like vMAJOR.MINOR.PATCH[-pre] (SemVer, no leading zeros, no +build)"
+            exit 1
+          fi
+          version="${TAG#v}"
+          cargo_version=$(awk '/^\[workspace.package\]/{on=1;next} /^\[/{on=0} on && /^version *=/{gsub(/.*= *"|".*/,""); print; exit}' Cargo.toml)
+          android_version=$(sed -nE 's/^ *versionName = "([^"]+)".*/\1/p' android/app/build.gradle.kts | head -n 1)
+          if [ "$cargo_version" != "$version" ]; then
+            echo "::error::Cargo.toml version $cargo_version does not match tag $TAG"
+            exit 1
+          fi
+          if [ "$android_version" != "$version" ]; then
+            echo "::error::Android versionName $android_version does not match tag $TAG"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            case "$version" in *-*) echo "prerelease=true" ;; *) echo "prerelease=false" ;; esac
+          } >> "$GITHUB_OUTPUT"
+          # Release notes: the "## [version]" section of CHANGELOG.md, up to the next "## ".
+          mkdir notes
+          awk -v h="## [$version]" 'index($0, h) == 1 { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > notes/notes.md
+          if [ -z "$(tr -d '[:space:]' < notes/notes.md)" ]; then
+            echo "::error::CHANGELOG.md has no section for version $version"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: notes/notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: windows exe
+    needs: meta
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: "1.100.0" # keep equal to rust-toolchain.toml
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Build release (reproducible settings, docs-build/REPRODUCIBLE.md)
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export RUSTFLAGS="--remap-path-prefix=$(pwd -W)=/build --remap-path-prefix=$(cygpath -m "${CARGO_HOME:-$USERPROFILE/.cargo}")=/cargo -C link-arg=/Brepro"
+          cargo build --release --locked -p kiwi-transfer
+          mkdir dist
+          cp target/release/kiwi-transfer.exe "dist/KiwiTransfer-${VERSION}-windows-x64.exe"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-windows
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  android:
+    name: android apk (input for signing) and maven sbom
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-disabled: true # release builds neither read nor write a cache
+      - name: Unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+      - name: Build release APK (no keystore here: it is signed in the publish job)
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          ./gradlew --no-daemon :app:assembleRelease
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/app-release.apk "../dist/KiwiTransfer-${VERSION}-android-unsigned.apk"
+      - name: Maven SBOM (CycloneDX)
+        run: |
+          ./gradlew --no-daemon --init-script tools/sbom.init.gradle :app:cyclonedxDirectBom
+          cp app/build/reports/sbom/kiwi-transfer-android.cdx.json ../dist/kiwi-transfer-android.cdx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-android
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: rust sbom
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: "1.100.0" # keep equal to rust-toolchain.toml
+      - name: Install cargo-cyclonedx (pinned)
+        run: cargo install cargo-cyclonedx --version 0.5.10 --locked
+      - name: Write the CycloneDX SBOM of the workspace
+        run: |
+          cargo cyclonedx --format json
+          mkdir dist
+          find . -path ./target -prune -o -name '*.cdx.json' -print | sort | while read -r f; do
+            cp "$f" "dist/rust-$(basename "$(dirname "$f")").cdx.json"
+          done
+          ls dist
+          [ -n "$(ls dist)" ] || { echo "::error::no Rust SBOM was produced"; exit 1; }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sbom-rust
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: sign, attest and publish
+    needs: [meta, windows, android, sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Required reviewer, the v* deployment rule and the signing secrets live here.
+    environment: release
+    permissions:
+      contents: write     # create the release
+      id-token: write     # attestation (Sigstore OIDC)
+      attestations: write # attestation
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - name: Refuse to continue without signing material
+        run: |
+          missing=""
+          [ -n "$KEYSTORE_B64" ] || missing="$missing ANDROID_KEYSTORE_BASE64"
+          [ -n "$KEYSTORE_PASSWORD" ] || missing="$missing ANDROID_KEYSTORE_PASSWORD"
+          [ -n "$KEY_ALIAS" ] || missing="$missing ANDROID_KEY_ALIAS"
+          [ -n "$KEY_PASSWORD" ] || missing="$missing ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Release signing secrets missing in the release environment:$missing. Nothing was published: an unsigned or debug-signed APK is never released."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Sign the APK and check the signature
+        run: |
+          umask 077
+          ks="$RUNNER_TEMP/release.keystore"
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$ks"
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)apksigner
+          unsigned="dist/KiwiTransfer-${VERSION}-android-unsigned.apk"
+          signed="dist/KiwiTransfer-${VERSION}-android.apk"
+          "$apksigner" sign --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --out "$signed" "$unsigned"
+          rm -f "$unsigned" "${signed}.idsig"
+          "$apksigner" verify --verbose --print-certs "$signed" | tee "$RUNNER_TEMP/verify.txt"
+          if grep -qi 'Android Debug' "$RUNNER_TEMP/verify.txt"; then
+            echo "::error::The APK is signed with a debug certificate"
+            exit 1
+          fi
+
+      - name: Check the files and write SHA256SUMS
+        run: |
+          for f in "KiwiTransfer-${VERSION}-windows-x64.exe" "KiwiTransfer-${VERSION}-android.apk" notes.md; do
+            [ -s "dist/$f" ] || { echo "::error::missing $f"; exit 1; }
+          done
+          mv dist/notes.md notes.md
+          (cd dist && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS")
+          mv "$RUNNER_TEMP/SHA256SUMS" dist/SHA256SUMS
+          cat dist/SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Create the draft release, check its assets, publish
+        run: |
+          {
+            cat notes.md
+            printf '\n---\n\nVerify: sha256sum -c SHA256SUMS, and gh attestation verify FILE --repo %s\n' "$GITHUB_REPOSITORY"
+            printf 'The Windows exe is not Authenticode-signed (certificates are not free); its integrity rests on SHA256SUMS and the build-provenance attestation.\n'
+          } > release-notes.md
+          args=(--repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" --notes-file release-notes.md)
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "$TAG" "${args[@]}" dist/*
+          names=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | select(.size > 0) | .name] | sort | join(",")')
+          expected=$(ls dist | LC_ALL=C sort | paste -sd, -)
+          if [ "$names" != "$expected" ]; then
+            echo "::error::Draft assets are $names, expected $expected. The draft was left unpublished."
+            exit 1
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
