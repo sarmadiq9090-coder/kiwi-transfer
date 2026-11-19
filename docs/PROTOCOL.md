@@ -165,9 +165,9 @@ In every mode the verifier MUST do all of the following, and MUST fail the hands
    a. The chain has exactly one certificate, at most 1024 bytes, and it parses as X.509.
    b. Its `SPKI` is exactly 44 bytes with the prefix in 1.1 (algorithm Ed25519, no parameters), and the
       public key passes the strict checks of section 0 (canonical, not of small order).
-   c. PINNED mode: `SPKI` equals a pinned (or, on the PC, tombstoned) `SPKI` byte for byte. (Only during QR
-      pairing the phone knows the PC by its id alone; the check is then `BLAKE3(SPKI) == pc_id`.)
-      PAIRING mode: no further check.
+   c. PINNED mode: `SPKI` equals a pinned `SPKI` byte for byte or, on the PC only, `BLAKE3(SPKI)` is in
+      the tombstone list. (Only during QR pairing the phone knows the PC by its id alone; the check is then
+      `BLAKE3(SPKI) == pc_id`.) PAIRING mode: no further check.
    d. Names, validity dates, extensions, key usage and the certificate's self-signature are NOT evaluated
       (clocks on phones are unreliable and a self-signed validity period proves nothing).
 2. **Handshake signature step** (`verify_tls13_signature`): verify the TLS 1.3 `CertificateVerify` signature
@@ -259,40 +259,53 @@ is shown to whichever host answered (2.4; threat model C2).
 ## 2. Pairing (first link)
 
 Pairing creates the two pins of a link. It is always started by a person at the PC. There is **no standing
-pairing listener**: unknown keys are accepted only while a user-opened pairing window is open.
+pairing listener**: unknown keys are accepted only while a user-opened pairing window is open. A PC pairs any
+number of phones (up to its limit, 2.6), one at a time; each pairing creates an independent link with its
+own namespace.
 
-There are two methods. Both run the same message sequence.
+There are two methods. Both run the same message sequence, and in both **the person at the PC types the
+6-digit number that the phone shows** (decision D6, KT-06). The PC never displays that number and never
+offers an "Allow" button: a click can be given to the wrong device, a typed number cannot.
 
-| Method | Authentication comes from | When |
-|---|---|---|
-| `QR` (1) | The PC device id and a one-time secret carried in the QR, plus the Allow click on the PC. | Default. |
-| `SAS` (2) | A 6-digit short authentication string compared by the user on both screens, protected by a commitment, plus confirmation on both devices. | When the camera cannot be used. |
+| Method | Authentication comes from | When | Networks (4.4) |
+|---|---|---|---|
+| `QR` (1) | The PC device id and a one-time secret carried in the QR, **and** the typed number. | Default. | Private, and Public networks the PC user has enabled. |
+| `SAS` (2) | The typed number alone, protected by a commitment, plus a confirmation on the phone. | When the camera cannot be used. | Private networks only. |
 
 There is no typed short-code PAKE in `kiwi/1` (no audited PAKE crate exists; spike section 5, decision D5).
 
 ### 2.1 Pairing window (PC)
 
 1. The user clicks "Pair a phone". The PC opens a window of `PAIR_WINDOW` (default 180 s; configurable only
-   within 120-300 s), measured with a monotonic clock. Only one window can be open at a time.
+   within 120-300 s), measured with a monotonic clock. Only one window can be open at a time. A window can
+   be opened only while at least one interface is eligible (4.4).
 2. The PC generates `pair_secret = RAND(16)` (128 bits) and shows the QR (2.2). By default only method `QR`
-   is accepted. If the user chooses "I can't scan", the window also accepts method `SAS` and the PC
-   advertises `pm=1` in mDNS (section 4) until the window closes.
+   is accepted. If the user chooses "I can't scan", the window also accepts method `SAS` **on Private
+   interfaces only**, and the PC advertises `pm=1` in mDNS on those interfaces (section 4) until the window
+   closes. A `PAIR_HELLO` with method 2 that arrives on a Public interface, or while method 2 is not
+   enabled, is refused (`E_NOT_PERMITTED`).
 3. While the window is open, the PC verifier runs in PAIRING mode **for unknown keys only**: a client whose
-   `SPKI` is pinned gets a normal session; a client whose `SPKI` is unknown gets an **UNPAIRED** connection.
-   When no window is open, unknown keys fail the handshake.
-4. The window closes, and `pair_secret` is destroyed, at the first of: timeout; user cancel; a valid
-   `PAIR_REVEAL` proof (the secret is single use, whatever the user then answers); 3 failed attempts
-   (bad proof, bad commitment, protocol error, or a declined SAS); program exit. "Closes" means that no
-   further unknown key is accepted; a pairing whose `PAIR_REVEAL` was already verified continues until the
-   user answers, for at most 120 s. Only one consent dialog is shown at a time: while it is pending, any
-   other `PAIR_HELLO` is answered `E_BUSY`.
-5. If no device is paired and no window is open, the PC MUST NOT bind any UDP socket and MUST NOT advertise.
+   `SPKI` is pinned gets a normal session; a tombstoned key is closed with code `3` (2.7); a client whose
+   `SPKI` is unknown gets an **UNPAIRED** connection. When no window is open, unknown keys fail the handshake.
+4. A **candidate** is an UNPAIRED connection whose `PAIR_REVEAL` has passed every check of 2.4 rule 4. At
+   most 2 UNPAIRED connections exist at a time, so at most 2 candidates; with method `QR` at most one,
+   because the secret is single use. A further unknown-key connection is given `ERROR(E_BUSY)` in answer to
+   its `PAIR_HELLO` and closed.
+5. A **failed attempt** is: a bad proof, a bad commitment, a protocol error on an UNPAIRED connection, a
+   `PAIR_REVEAL` that arrives after the secret was consumed, or a typed number that matches no candidate.
+   The window allows `PAIR_ATTEMPTS` (3) failed attempts.
+6. The window closes, and `pair_secret` is destroyed, at the first of: timeout; user cancel; a typed number
+   that matches (success); the third failed attempt; program exit. The secret is also destroyed at the first
+   valid `PAIR_REVEAL` proof (single use), whatever happens afterwards. "Closes" means that no further
+   unknown key is accepted; if a candidate exists when the time runs out, the number can still be typed for
+   at most `PAIR_ENTRY_TIME` (120 s) after that candidate was verified.
+7. If no device is paired and no window is open, the PC MUST NOT bind any UDP socket and MUST NOT advertise.
 
 An UNPAIRED connection is restricted: one bidirectional stream; only the messages `PAIR_*`, `ERROR`;
-frames of at most `MAX_FRAME_UNPAIRED` (4096 bytes); no unidirectional streams; at most 2 UNPAIRED
-connections at a time; `PAIR_HELLO` within 10 s of the handshake; `PAIR_REVEAL` within 10 s of
-`PAIR_CHALLENGE`. An UNPAIRED connection is never upgraded: after pairing, both sides close it and PH
-opens a new, normal connection.
+frames of at most `MAX_FRAME_UNPAIRED` (4096 bytes); no unidirectional streams; `PAIR_HELLO` within 10 s of
+the handshake; `PAIR_REVEAL` within 10 s of `PAIR_CHALLENGE`. An UNPAIRED connection is never upgraded:
+after pairing, both sides close it and PH opens a new, normal connection. No device name travels on an
+UNPAIRED connection before the typed number has matched (KT-23).
 
 ### 2.2 QR code
 
@@ -319,6 +332,8 @@ Rules:
   app link or intent filter that starts pairing, and MUST NOT accept a pairing payload from the clipboard,
   a file or another app. (A link on a web page must not be able to pair the phone with an attacker's PC.)
 - PH applies the address filter of 4.4 to the QR addresses before dialling.
+- The QR is shown only inside the PC program's own window, and is removed from the screen as soon as a
+  candidate exists or the window closes.
 
 ### 2.3 Derived values
 
@@ -327,7 +342,7 @@ Both sides compute, for the pairing connection they are on:
 ```
 E_pair   = TLS exporter, label "EXPORTER-kiwi-1-pairing", empty context, 32 bytes
 ID_ph    = BLAKE3(SPKI of the phone)      ID_pc = BLAKE3(SPKI of the PC)
-           (own SPKI from the own key; peer SPKI from the certificate of THIS TLS connection)
+           (own SPKI from the own key; peer SPKI from the certificate of THIS connection object, 1.4)
 commit   = KDF("kiwi/1 pairing commit",     E_pair || ID_ph || ID_pc || nonce_p)
 TH       = KDF("kiwi/1 pairing transcript", E_pair || ID_ph || ID_pc || BLAKE3(m1) || BLAKE3(m2) || nonce_p)
 SAS      = u64be( KDF("kiwi/1 pairing sas", TH)[0..8] ) mod 1000000      (shown as 6 digits, "482 913")
@@ -339,6 +354,10 @@ proof_pc = MAC(K_pair, 0x02 || TH)                                       (method
 `m1` is the exact payload bytes of the `PAIR_HELLO` frame and `m2` the exact payload bytes of the
 `PAIR_CHALLENGE` frame (the CBOR envelope, without the 4-byte length prefix; see 5.1). `nonce_p = RAND(32)`
 is chosen by PH; `nonce_c = RAND(32)` is chosen by PC and is inside `m2`. All inputs have fixed lengths.
+
+The PC computes `proof_pc` at the moment it verifies `PAIR_REVEAL`, keeps only that 32-byte value for the
+candidate, and destroys `pair_secret` and `K_pair` then (KT-22). The SAS of a candidate is kept in memory
+only, for comparison with the typed number; it is never rendered, logged or sent.
 
 ### 2.4 Message sequence
 
@@ -353,100 +372,150 @@ sequenceDiagram
     U->>PH: scans the QR with the in-app scanner
     PH->>PC: QUIC + TLS 1.3, ALPN kiwi/1. PH verifies PC id from the QR
     Note over PC: unknown client key accepted only because the window is open. Connection is UNPAIRED
-    PH->>PC: PAIR_HELLO (method, phone name, commit)
-    PC->>PH: PAIR_CHALLENGE (nonce_c, PC name)
+    PH->>PC: PAIR_HELLO (method, commit)
+    PC->>PH: PAIR_CHALLENGE (nonce_c)
     PH->>PC: PAIR_REVEAL (nonce_p, proof_ph)
-    Note over PC: check commit, check proof_ph, destroy pair_secret
-    Note over PC,PH: both screens show the same 6-digit SAS
-    PC->>U: Phone NAME wants to pair. Allow? (shows SAS)
-    U->>PC: Allow
-    PC->>PH: PAIR_RESULT (accepted, proof_pc, pairing_id)
-    Note over PH: check proof_pc, store PC pin
-    PH->>PC: PAIR_DONE
-    Note over PC: store phone pin (provisional), close window, close connection
-    PH->>PC: new connection, PINNED mode both sides, normal session (section 5)
+    Note over PC: check commit, check proof_ph, keep proof_pc, destroy pair_secret. Connection is a candidate
+    Note over PH: shows the 6-digit number: Type this number on the PC
+    Note over PC: shows an empty field: Type the 6 digits shown on your phone
+    U->>PC: types the 6 digits
+    Note over PC: typed number equals the SAS of exactly one candidate
+    PC->>PH: PAIR_RESULT (accepted, proof_pc, pairing_id, PC name, discovery_key)
+    Note over PH: check proof_pc, store PC pin (provisional)
+    PH->>PC: PAIR_DONE (ok, phone name)
+    Note over PC: phone pin (provisional) kept, show Phone NAME is paired, close window and connection
+    PH->>PC: new connection, PINNED mode both sides, HELLO_AUTH: both pins become permanent
 ```
 
 Method SAS differs in three places (ASCII view):
 
 ```
 PH                                              PC
- |  finds a PC with pm=1 (mDNS) or typed addr    |   window open, "I can't scan" chosen
+ |  finds a PC with pm=1 (mDNS) or typed addr    |   window open, "I can't scan" chosen, Private network
  |== TLS: both verifiers in PAIRING mode =======>|   (signatures verified, nothing pinned yet)
- |-- PAIR_HELLO (method=2, name, commit) ------->|
- |<------------- PAIR_CHALLENGE (nonce_c, name) -|
- |-- PAIR_REVEAL (nonce_p) --------------------->|   check commit
- |  shows SAS + "Do the numbers match?"          |   shows SAS + "Phone NAME wants to pair - Allow?"
- |-- PAIR_CONFIRM (match=true) ----------------->|   user compared and tapped on the phone
- |                                               |   user compared and clicked Allow on the PC
- |<----------------- PAIR_RESULT (accepted, id) -|   PC pins (provisional)
- |  PH pins                                      |
- |-- PAIR_DONE --------------------------------->|
+ |-- PAIR_HELLO (method=2, commit) ------------->|
+ |<------------------- PAIR_CHALLENGE (nonce_c) -|
+ |-- PAIR_REVEAL (nonce_p) --------------------->|   check commit; connection is a candidate
+ |  shows the number: "Type this on the PC"      |   shows the field "Type the 6 digits shown on your phone"
+ |                                               |   user types; equal to this candidate's SAS
+ |                                               |   shows "Number correct. Now confirm on your phone."
+ |<-- PAIR_RESULT (accepted, id, name, key) -----|   PC pins (provisional)
+ |  asks "Did the PC say the number was correct?"|
+ |-- PAIR_DONE (ok = the user's answer, name) -->|   ok=false: PC deletes the provisional pin and warns
+ |  PH pins (provisional) only on Yes            |
 ```
 
 Processing rules:
 
 1. **PH, start.** Method QR: PH dials the QR addresses with the verifier in PINNED mode for `pc_id`
    (the handshake fails unless the server key hashes to `pc_id`). Method SAS: PH dials with the verifier in
-   PAIRING mode. In both cases PH then sends `PAIR_HELLO` with `commit`.
-2. **PC, on `PAIR_HELLO`.** Reject (`E_NOT_PERMITTED`) if the method is not allowed by the window. Sanitise
-   the phone name for display (5.8). Reply `PAIR_CHALLENGE` with a fresh `nonce_c`.
-3. **PH, on `PAIR_CHALLENGE`.** Send `PAIR_REVEAL` with `nonce_p` and, for method QR, `proof_ph`.
-4. **PC, on `PAIR_REVEAL`.** Recompute `commit` from `nonce_p`; if `ct_eq` fails, abort (`E_VERIFY`, counts
-   as a failed attempt). Method QR: recompute `proof_ph`; if `ct_eq` fails, abort (failed attempt; the secret
-   is not consumed). If it succeeds, the secret is consumed now. Then show the consent dialog:
-   **"Phone <name> wants to pair - Allow?"** with the SAS. The PC MUST NOT pin, and MUST NOT show the dialog
-   in method QR, before these checks pass.
-5. **PH, after `PAIR_REVEAL`.** Show the SAS. Method QR: show "Check that the PC shows the same number, then
-   click Allow there" (comparison is an extra check; authentication already comes from the QR). Method SAS:
-   show "Do the numbers match?" with two buttons; send `PAIR_CONFIRM(match)`.
-6. **PC, decision.** Method QR: on Allow, send `PAIR_RESULT(accepted)`. Method SAS: send
-   `PAIR_RESULT(accepted)` only when it has both the local Allow click and `PAIR_CONFIRM(match=true)`. On
-   Deny, timeout, or `match=false`: send `PAIR_RESULT(declined)`, close; on `match=false` also warn the user
-   that someone on the network may be interfering.
-7. **PH, on `PAIR_RESULT(accepted)`.** Method QR: verify `proof_pc` (`ct_eq`), else abort and pin nothing.
-   Method SAS: require that the local user already tapped "match". Then store the PC pin with `pairing_id`,
-   send `PAIR_DONE`, close, and reconnect normally.
-8. **PC pin is provisional** until the first normal session from that phone passes `HELLO_AUTH` (5.3). If
-   that does not happen within 10 minutes the PC MUST delete the provisional pin.
-9. Each device pins **only after its own user-facing condition is met**: PC after the Allow click; PH after
-   the QR proof (method QR) or the local "match" tap (method SAS). A confirmation received from the network
-   is never a substitute for the local one.
+   PAIRING mode. In both cases PH then sends `PAIR_HELLO` with `commit`. It sends no name.
+2. **PC, on `PAIR_HELLO`.** Reject (`E_NOT_PERMITTED`) if the method is not allowed by the window or by the
+   network the connection arrived on (2.1 rule 2). Reply `PAIR_CHALLENGE` with a fresh `nonce_c`.
+3. **PH, on `PAIR_CHALLENGE`.** Send `PAIR_REVEAL` with `nonce_p` and, for method QR, `proof_ph`. Then show
+   the SAS with the text "Type this number on the PC". PH MUST NOT show the SAS before it has sent
+   `PAIR_REVEAL`.
+4. **PC, on `PAIR_REVEAL`.** All values are computed from the connection object the message arrived on.
+   Recompute `commit` from `nonce_p`; if `ct_eq` fails, abort (`E_VERIFY`, a failed attempt). Method QR:
+   recompute `proof_ph`; if `ct_eq` fails, or the secret was already consumed, abort (`E_VERIFY`, a failed
+   attempt; a wrong proof does not consume the secret) and, if the secret had been consumed, show "A second
+   device tried to use this QR code". On success the secret is consumed now, `proof_pc` is kept, and the
+   connection becomes a candidate. The PC then shows the field **"Type the 6 digits shown on your phone"**.
+   It MUST NOT show the SAS, a device name, or an Allow button.
+5. **PC, on a typed number** (6 digits; spaces ignored). Compare it with the SAS of each candidate using
+   `ct_eq`.
+   - Exactly one candidate matches: that candidate is accepted. The PC stores the provisional pin for the
+     `SPKI` **of that connection object**, creates the link state (2.6), sends `PAIR_RESULT(accepted)` on
+     it, and closes every other UNPAIRED connection with `PAIR_RESULT(declined, E_DECLINED)`.
+   - No candidate matches: a failed attempt. The candidates stay; the PC shows "That number does not match.
+     Check your phone and type it again." After the third failed attempt every candidate gets
+     `PAIR_RESULT(declined, E_ATTEMPTS)`, the window closes, and the PC shows "Pairing was stopped. If you
+     did not mistype, another device may be trying to pair."
+   - Both candidates match (probability 10^-6): decline both, a failed attempt.
+6. **PH, on `PAIR_RESULT(accepted)`.** Method QR: verify `proof_pc` (`ct_eq`); on failure send
+   `PAIR_DONE(ok=false)` and pin nothing. Method SAS: ask the user **"Did the PC say the number was
+   correct?"**; only "Yes" continues, "No" sends `PAIR_DONE(ok=false)` and warns that someone on the network
+   may be interfering. Then store the PC pin, `pairing_id` and `discovery_key` as **provisional**, send
+   `PAIR_DONE(ok=true)` with the phone's display name, close, and reconnect normally.
+7. **PC, on `PAIR_DONE`.** `ok=true`: sanitise the phone name (5.8), show "Phone <name> is now paired",
+   close the window. `ok=false`, or no `PAIR_DONE` within 120 s: delete the provisional pin and the link
+   state, and show that pairing did not finish.
+8. **Both pins are provisional** until the first normal session of the link passes `HELLO_AUTH` (5.3). A
+   provisional pin allows the handshake and `HELLO`/`HELLO_AUTH` only. If that session does not happen
+   within `PROVISIONAL_PIN_LIFETIME` (600 s; PC: monotonic clock; PH: link clock), the device MUST delete
+   its provisional pin and tell its user that pairing did not finish. The PC then keeps a tombstone for
+   that key (2.7), so that the phone learns it by an authenticated close code instead of a bare failure.
+9. Each device pins **only after its own user-facing condition is met**: PC after the typed number matched;
+   PH after the QR proof (method QR) or the local "Yes" (method SAS). A confirmation received from the
+   network is never a substitute for the local one.
+10. **PH, on `ERROR(E_BUSY)`**: show "Another device is pairing with this PC right now. On the PC, type
+    only a number that your own phone is showing." On `E_VERIFY` after a QR scan: "This QR code was already
+    used. Someone else may have scanned it. Open a new pairing window on the PC."
 
-### 2.5 Why the SAS cannot be ground (commitment scheme)
+### 2.5 Why the number cannot be ground, and why it is typed
 
 A man in the middle (M) holds two TLS connections, PH-M and M-PC, with different exporters and keys, and
-wants the two 6-digit values to be equal. The SAS depends on `nonce_p` and `nonce_c`:
+wants the number PH shows to be the SAS of the M-PC connection. The SAS depends on `nonce_p` and `nonce_c`:
 
 - Towards PC, M must send a `commit` (binding: it fixes M's `nonce_p'`) **before** it learns PC's `nonce_c`.
 - Towards PH, M must send its `nonce_c'` **before** PH reveals `nonce_p` (hiding: `commit` reveals nothing
   about the 256-bit `nonce_p`).
 
 Whatever the order, one of the two SAS values still depends on a random value M has not seen when M makes
-its last choice. M therefore gets one guess per attempt: success probability 10^-6. The window allows 3
-attempts. Requirements that make this hold: `nonce_p` and `nonce_c` are fresh `RAND(32)` per attempt; PC
-MUST NOT send `nonce_c` before it has `commit`; PH MUST NOT send `nonce_p` before it has `nonce_c`; PC MUST
-verify `commit`; neither side shows the SAS before `PAIR_REVEAL` has been sent/verified.
+its last choice. M therefore gets one guess per candidate: success probability 10^-6. A window holds at
+most 2 candidates and allows 3 typed numbers. Requirements that make this hold: `nonce_p` and `nonce_c` are
+fresh `RAND(32)` per attempt; PC MUST NOT send `nonce_c` before it has `commit`; PH MUST NOT send `nonce_p`
+before it has `nonce_c`; PC MUST verify `commit`; PH does not show the SAS before `PAIR_REVEAL` is sent.
+
+Why typing closes the human gap (KT-06): the number travels only from the phone's screen, through the
+user's eyes and hands, into the PC. A device that is not the user's own phone (a bystander who photographed
+the QR, an attacker who answered first) is a candidate too, but its SAS is not the number on the user's
+phone, so the typed number selects the right connection or none. The user never has to notice that
+"something is different"; doing nothing wrong is enough. What remains is an attacker who can read the
+attacker's own number **and** type it on the PC keyboard (threat model R10).
 
 ### 2.6 State created by pairing
 
 Both sides store for the link: peer `SPKI` and `ID`, peer display name, `pairing_id` (16 random bytes chosen
-by PC, sent in `PAIR_RESULT`), `confirm_epoch = 1`, confirmation age 0 (pairing counts as the first weekly
-confirmation), `last_session_seq = 0`. Local policy limits: a PC accepts at most 8 paired phones, a phone at
-most 4 paired PCs (configurable; not a wire limit).
+by PC, sent in `PAIR_RESULT`), `discovery_key` (32 random bytes chosen by PC for this link, 4.2),
+`confirm_epoch = 1`, confirmation age 0 with `need_confirm = false` (pairing counts as the first weekly
+confirmation), `last_session_seq = 0`.
+
+The PC also creates, per link: the namespace folder (one new directory under the chosen destination, used
+by no other link), the per-phone settings (folder layout, quota (5.10), "Allow this phone to free up space
+using this PC" = **off** (8.2), shared folders = none (9.3)), and registers the phone with the store.
+
+Limits, enforced at pairing with `PAIR_RESULT(declined, E_LIMIT)`: a PC accepts at most `MAX_PHONES` (8)
+paired phones, a phone at most `MAX_PCS` (4) paired PCs. These are local policy, not wire limits.
 
 ### 2.7 Unpairing
 
 - Either side can unpair at any time, without the other being present. The local effect is immediate:
-  delete the pin and link state, close any connection with QUIC application code `3` (unpaired).
+  delete the pin, the `discovery_key` and the session state of the link (confirmation state, challenge,
+  session counters), and close any connection with QUIC application code `3` (unpaired).
+- **Unpairing never deletes a file or a ledger record on either device** (KT-07). On the PC the namespace of
+  that phone becomes **unlinked**: its records stay in the ledger, its files stay where they are, they are
+  still scanned (8.9), still mirrored (8.13), still marked and shown as "only copy" where they are, and the
+  PC keeps warning about their trash expiry (8.10). An unlinked namespace is removed from the PC program
+  only by an explicit action of the PC user, on a screen that first lists how many of its files are sole
+  copies. On the phone the effect on trashed items is defined in 8.10 (purges stop; items stay in the trash
+  until the user decides).
 - If a session is open, the side that unpairs first sends `UNPAIR`; the peer answers `UNPAIR_ACK`, shows
   "unpaired by the other device", and deletes its pin.
-- If the peer is offline it finds out at its next connection: the handshake fails (unknown key). A device
-  MUST NOT delete a pin automatically because a handshake failed (that could be a network attacker or a
-  transient fault). It marks the link "not accepted by the other device" and lets the user remove it.
-- Unpairing never deletes a file on either device. For final move its effect is defined in 8.10
-  (purges stop; items in the trash stay there until the user decides).
-- Pairing the same two devices again creates a new link with a new `pairing_id`; no state is inherited.
+- **Tombstone (PC).** When the PC unpairs a phone, or deletes an expired provisional pin, it keeps the `ID`
+  of that phone's key in a tombstone list for `TOMBSTONE_LIFETIME` (90 days; at most 64 entries, oldest
+  dropped first). A connection from a tombstoned key completes the TLS handshake and is then closed with
+  code `3` at once; no stream is read. Because the handshake authenticated the PC to the phone, this close
+  code is an authenticated statement "you are unpaired": the phone treats it exactly like `UNPAIR`.
+- **Farewell (phone).** When the phone unpairs while the PC is not connected, it SHOULD keep the PC pin in a
+  state `UNPAIRING` for up to 90 days, in which the only thing it does with it is: when that PC is next
+  found, connect, complete `HELLO`/`HELLO_AUTH`, send `UNPAIR`, and delete the pin. No other message is sent
+  or accepted in that state.
+- A handshake that merely fails proves nothing. A device MUST NOT delete a pin automatically because a
+  handshake failed (that could be a network attacker or a transient fault). It marks the link "cannot
+  reach, or not accepted by, the other device" and lets the user remove it.
+- Pairing the same two devices again creates a new link with a new `pairing_id`. No state is inherited by
+  the protocol; the PC user may hand the unlinked namespace over to the new link (9.4).
 
 ---
 
