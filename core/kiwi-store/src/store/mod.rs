@@ -188,6 +188,8 @@ pub(crate) struct Inner {
     pub(crate) dir_names: Mutex<HashMap<String, HashMap<String, String>>>,
     /// Serialises "choose a name and rename into place".
     pub(crate) commit_lock: Mutex<()>,
+    /// One integrity scan at a time: its progress record is a single row.
+    pub(crate) scan_lock: Mutex<()>,
     temp_counter: AtomicU64,
     temp_salt: u64,
     recovery: Mutex<Option<RecoveryReport>>,
@@ -416,6 +418,7 @@ impl Store {
                 in_flight: Mutex::new(InFlight::default()),
                 dir_names: Mutex::new(HashMap::new()),
                 commit_lock: Mutex::new(()),
+                scan_lock: Mutex::new(()),
                 temp_counter: AtomicU64::new(0),
                 temp_salt: random_u64(),
                 recovery: Mutex::new(None),
@@ -767,4 +770,71 @@ pub(crate) fn random_u64() -> u64 {
         h.write_u128(d.as_nanos());
     }
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_handles_can_cross_threads() {
+        fn send_and_sync<T: Send + Sync>() {}
+        fn send<T: Send>() {}
+        send_and_sync::<Store>();
+        send_and_sync::<CancelToken>();
+        send::<IncomingFile>();
+    }
+
+    #[test]
+    fn device_ids_are_plain() {
+        assert!(DeviceId::new("abc-DEF_0.9").is_ok());
+        for bad in ["", " ", "a b", "a/b", "a:b", "a%b", "a@b"] {
+            assert!(DeviceId::new(bad).is_err(), "{bad:?}");
+        }
+        assert!(DeviceId::new(&"a".repeat(128)).is_ok());
+        assert!(DeviceId::new(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn markers_are_validated() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("unit-tmp")
+            .join("marker");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("id");
+        assert_eq!(read_marker(&path), None);
+        let id = new_destination_id();
+        assert_eq!(id.len(), 32);
+        assert_ne!(id, new_destination_id());
+        write_marker(&path, &id).unwrap();
+        assert_eq!(read_marker(&path), Some(id.clone()));
+        // Rewriting replaces the old marker in one step.
+        let other = new_destination_id();
+        write_marker(&path, &other).unwrap();
+        assert_eq!(read_marker(&path), Some(other));
+        // Anything that is not 32 hex digits is "no marker".
+        for junk in ["", "xyz", "0123", &"g".repeat(32), &"a".repeat(33)] {
+            std::fs::write(&path, junk).unwrap();
+            assert_eq!(read_marker(&path), None, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn temp_names_are_recognised_and_unique() {
+        use super::incoming::is_temp_name;
+        assert!(is_temp_name(".kiwi-tmp-1-0-0123456789abcdef.part"));
+        for not in [
+            ".kiwi-tmp-.part",
+            ".kiwi-tmp-x",
+            "x.kiwi-tmp-1.part",
+            "a.part",
+            ".KIWI-TMP-1.part",
+            "",
+        ] {
+            assert!(!is_temp_name(not), "{not:?}");
+        }
+        assert_ne!(random_u64(), random_u64());
+    }
 }

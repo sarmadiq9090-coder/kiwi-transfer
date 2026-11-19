@@ -362,6 +362,7 @@ impl Store {
     ) -> Result<ScanReport, StoreError> {
         let inner = &self.inner;
         let ledger = &inner.ledger;
+        let _one_at_a_time = super::lock(&inner.scan_lock);
 
         let saved = if opts.restart {
             None
