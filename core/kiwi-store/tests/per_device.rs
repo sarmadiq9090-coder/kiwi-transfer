@@ -284,13 +284,12 @@ fn a_commit_number_the_ledger_never_issued_is_a_rollback() {
 fn rolled_back_world(name: &str, keep_destination_note: bool) -> (World, Vec<u8>, String) {
     let w = World::new(name);
     let third = data(33, 9_000);
-    let snapshot;
     {
         let store = w.open();
         put(&store, NAME, &bytes());
         put(&store, "DCIM/b.jpg", &data(32, 8_000));
     }
-    snapshot = LedgerSnapshot::take(&w);
+    let snapshot = LedgerSnapshot::take(&w);
     let ledger_id = {
         let store = w.open();
         assert_eq!(put(&store, "DCIM/c.jpg", &third).seq, 3);
@@ -481,7 +480,7 @@ fn final_move_states_follow_what_the_phone_reports() {
     let store = stored_yesterday(&w);
     let state = |store: &Store| store.records(&phone(), &hash()).unwrap().remove(0).fm;
     assert_eq!(state(&store), FmState::None);
-    verify(&store, &hash(), 1).unwrap();
+    let _proof = verify(&store, &hash(), 1).unwrap();
     assert_eq!(state(&store), FmState::Reverified);
 
     let expires = T0 + 30 * 24 * HOUR;
@@ -494,7 +493,7 @@ fn final_move_states_follow_what_the_phone_reports() {
     );
     assert_eq!(state(&store), FmState::SoleCopy);
     // A later confirmation (the check before the trash lets go) keeps it.
-    verify(&store, &hash(), 1).unwrap();
+    let _proof = verify(&store, &hash(), 1).unwrap();
     assert_eq!(state(&store), FmState::SoleCopy);
     // Wrong key, wrong content: nothing is marked.
     assert_eq!(

@@ -36,8 +36,8 @@ pub struct World {
     /// default: nowhere above the test's own directory, so the machine the
     /// tests run on cannot change their outcome.
     pub hazards: HazardEnv,
-    /// Volume serial numbers of the stand-in disks (see [`World::disk`]).
-    pub serials: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    /// What the "platform" says about the stand-in disks (see [`World::disk`]).
+    pub volumes: Arc<Mutex<HashMap<PathBuf, VolumeInfo>>>,
 }
 
 fn no_change(_: &mut StoreConfig) {}
@@ -73,29 +73,39 @@ impl World {
                 ceiling: Some(std::fs::canonicalize(&base).unwrap()),
                 ..HazardEnv::default()
             },
-            serials: Arc::new(Mutex::new(HashMap::new())),
+            volumes: Arc::new(Mutex::new(HashMap::new())),
             base,
         }
     }
 
-    /// A directory that stands in for a second disk: `<base>/<name>`, with
-    /// its own volume serial number. Created if absent.
+    /// A directory that stands in for a second disk: `<base>/<name>`, an
+    /// external USB disk with its own volume serial number and its own
+    /// device number. Created if absent.
     pub fn disk(&self, name: &str) -> PathBuf {
         let dir = self.base.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = std::fs::canonicalize(&dir).unwrap();
-        let mut serials = self.serials.lock().unwrap();
-        let next = 0xD15C_0000 + serials.len() as u64;
-        serials.entry(dir.clone()).or_insert(next);
+        let mut volumes = self.volumes.lock().unwrap();
+        let next = usb_ntfs(0xD15C_0000 + volumes.len() as u64);
+        volumes.entry(dir.clone()).or_insert(next);
         dir
     }
 
     /// Pretends the volume behind a stand-in disk was exchanged for another.
     pub fn set_serial(&self, disk: &Path, serial: u64) {
-        self.serials
+        let mut volumes = self.volumes.lock().unwrap();
+        let volume = volumes
+            .entry(disk.to_path_buf())
+            .or_insert_with(|| usb_ntfs(serial));
+        volume.serial = Some(serial);
+    }
+
+    /// Replaces everything the "platform" says about a stand-in disk.
+    pub fn set_volume(&self, disk: &Path, volume: VolumeInfo) {
+        self.volumes
             .lock()
             .unwrap()
-            .insert(disk.to_path_buf(), serial);
+            .insert(disk.to_path_buf(), volume);
     }
 
     pub fn config(&self) -> StoreConfig {
@@ -115,19 +125,17 @@ impl World {
         }
     }
 
-    /// What the "platform" says about the volume of a mirror: an external
-    /// USB disk whose serial number is the one registered for the stand-in
-    /// disk the path lies on.
+    /// What the "platform" says about the volume of a mirror: whatever was
+    /// registered for the stand-in disk the path lies on.
     pub fn volume_probe(&self) -> kiwi_store::VolumeProbe {
-        let serials = Arc::clone(&self.serials);
+        let volumes = Arc::clone(&self.volumes);
         Arc::new(move |path: &Path| {
-            let serials = serials.lock().unwrap();
-            let serial = serials
+            let volumes = volumes.lock().unwrap();
+            Ok(volumes
                 .iter()
                 .find(|(disk, _)| path.starts_with(disk))
-                .map(|(_, serial)| *serial)
-                .unwrap_or(0x0BAD_D15C);
-            Ok(usb_ntfs(serial))
+                .map(|(_, volume)| volume.clone())
+                .unwrap_or_else(|| usb_ntfs(0x0BAD_D15C)))
         })
     }
 
@@ -165,10 +173,7 @@ impl World {
     /// All files under the root (not the bookkeeping directory), as sorted
     /// `/`-separated relative paths. Links are listed, not followed.
     pub fn files(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        collect(&self.root, String::new(), &mut out, true);
-        out.sort();
-        out
+        tree(&self.root)
     }
 
     /// Temp files anywhere under the root.
