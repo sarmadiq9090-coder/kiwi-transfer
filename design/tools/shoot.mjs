@@ -3,7 +3,7 @@
 import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const pwDir = process.argv[2] && process.argv[2] !== "-" ? process.argv[2] : join(root, '../../site-wt/shots');
@@ -29,12 +29,26 @@ for (const [file, sel, prefix] of [['phone.html', '.device', 'phone'], ['pc.html
 }
 // icon sheet
 const svg = f => readFileSync(join(root, f), 'utf8');
-const cell = (f, s, bg) => `<div style="background:${bg};padding:12px;display:grid;place-items:center"><img src="data:image/svg+xml;base64,${Buffer.from(svg(f)).toString('base64')}" width="${s}" height="${s}"></div>`;
+// the mono icon is a template (Android themed icon / Windows tray): shown in its own colour on light and in white on dark
+const cell = (f, s, bg) => `<div style="background:${bg};padding:12px;display:grid;place-items:center"><img src="data:image/svg+xml;base64,${Buffer.from(svg(f)).toString('base64')}" width="${s}" height="${s}" style="${f.includes('mono') && bg !== '#FBFDF8' ? 'filter:brightness(0) invert(1)' : ''}"></div>`;
 const files = ['icon.svg', 'icon-mono.svg', 'icon-alternatives/a-side-by-side.svg', 'icon-alternatives/b-arc.svg', 'icon-alternatives/c-photo-flight.svg'];
 let html = '<body style="margin:0;font:14px system-ui;background:#fff"><div id=s style="display:inline-grid;grid-template-columns:auto repeat(9,auto);gap:4px;align-items:center;padding:12px">';
 for (const f of files) { html += `<div style="padding:0 8px">${f}</div>`; for (const bg of ['#FBFDF8', '#202020']) for (const s of [192, 48, 32, 24]) html += cell(f, s, bg); html += `<div></div>`; }
 html += '</div>';
 await page.setContent(html); await page.waitForTimeout(200);
-if (!only || only === 'icons') await page.locator('#s').screenshot({ path: join(root, 'review', 'icons.png') });
+if (!only || only === 'icons') await page.locator('#s').screenshot({ path: join(root, 'review', 'contact-icons.png') });
+// contact sheets: every Arabic-light screen plus the English-dark home, one PNG per device
+for (const [prefix, w, cols] of [['phone', 220, 8], ['pc', 520, 4]]) {
+  if (only && only !== 'contact' && !(only === prefix + '.html')) continue;
+  const files = readdirSync(join(root, 'review')).filter(f => f.startsWith(prefix + '-') && f.endsWith('.png'));
+  const order = (await (async () => { await page.goto(pathToFileURL(join(root, prefix + '.html')).href); return page.evaluate(() => window.SCREEN_IDS); })());
+  const list = order.map(id => `${prefix}-${id}-ar-light.png`).filter(f => files.includes(f)).concat(files.filter(f => f.includes('-en-dark')));
+  let h = `<body style="margin:0;background:#EEF2EA;font:600 13px system-ui;color:#4A5A42"><div id=c style="display:inline-grid;grid-template-columns:repeat(${cols},${w}px);gap:28px 20px;padding:28px">`;
+  for (const f of list) h += `<figure style="margin:0"><img src="data:image/png;base64,${readFileSync(join(root, 'review', f)).toString('base64')}" style="width:${w}px;display:block"><figcaption style="margin-top:6px">${f.replace(prefix + '-', '').replace('.png', '')}</figcaption></figure>`;
+  await page.setViewportSize({ width: cols * (w + 20) + 80, height: 1000 });
+  await page.setContent(h + '</div>'); await page.waitForTimeout(300);
+  await page.locator('#c').screenshot({ path: join(root, 'review', `contact-${prefix}.png`), scale: 'css' });
+  await page.setViewportSize({ width: 1500, height: 1000 });
+}
 await browser.close();
 console.log('done');
