@@ -184,6 +184,45 @@ impl World {
     }
 }
 
+/// All files under `dir` (not its bookkeeping directory), as sorted
+/// `/`-separated relative paths. Links are listed, not followed.
+pub fn tree(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    collect(dir, String::new(), &mut out, true);
+    out.sort();
+    out
+}
+
+/// Copies the ledger database (as it is after a clean close) and the
+/// destination's commit note aside, and puts them back: the state an older
+/// backup, or a power failure that lost the last writes, leaves behind.
+pub struct LedgerSnapshot {
+    ledger: Vec<u8>,
+    witness: Option<Vec<u8>>,
+}
+
+impl LedgerSnapshot {
+    pub fn take(w: &World) -> LedgerSnapshot {
+        LedgerSnapshot {
+            ledger: std::fs::read(w.ledger_file()).unwrap(),
+            witness: std::fs::read(w.root.join(STORE_DIR).join("commits")).ok(),
+        }
+    }
+
+    /// Puts the ledger back. `with_witness` also puts the destination's note
+    /// back (a power failure loses both; a restored backup of the program's
+    /// data only loses the ledger).
+    pub fn restore(&self, w: &World, with_witness: bool) {
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(w.ledger_dir.join(format!("ledger.db{suffix}")));
+        }
+        std::fs::write(w.ledger_file(), &self.ledger).unwrap();
+        if let (true, Some(witness)) = (with_witness, &self.witness) {
+            std::fs::write(w.root.join(STORE_DIR).join("commits"), witness).unwrap();
+        }
+    }
+}
+
 fn collect(dir: &Path, rel: String, out: &mut Vec<String>, top: bool) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let entry = entry.unwrap();
