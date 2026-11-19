@@ -218,6 +218,40 @@ fn a_temp_file_is_hashed_before_it_is_deleted_while_a_file_of_its_size_is_missin
 }
 
 #[test]
+fn a_temp_file_holding_the_bytes_of_a_missing_file_is_kept() {
+    // The committed file is gone. A later transfer of the very same content
+    // into another folder died before it was finished off. That temp file is
+    // not a lost rename (it is not next to the missing file's name), but it
+    // holds bytes the PC has nowhere else: it is not deleted.
+    let w = World::new("keep-missing-content");
+    let (receipt, temp) = {
+        let store = w.open();
+        let receipt = put(&store, NAME, &bytes());
+        let mut incoming = store
+            .begin_file(request(&phone(), "Other/again.jpg", &bytes()))
+            .unwrap();
+        incoming.write(&bytes()).unwrap();
+        (receipt, incoming.simulate_crash().unwrap())
+    };
+    std::fs::remove_file(&receipt.abs_path).unwrap();
+
+    let store = w.open();
+    let report = store.recovery_report().unwrap();
+    assert_eq!(report.orphan_temps_removed, 0);
+    assert!(report.renames_recreated.is_empty());
+    assert_eq!(report.orphan_temps_left.len(), 1);
+    assert_eq!(std::fs::read(&temp).unwrap(), bytes());
+    assert_eq!(report.newly_missing, 1);
+    // Once the phone has sent the file again, the temp file is plain debris.
+    store.clear_final_move_block("test").unwrap();
+    assert_eq!(put(&store, NAME, &bytes()).outcome, CommitOutcome::Stored);
+    drop(store);
+    let store = w.open();
+    assert_eq!(store.recovery_report().unwrap().orphan_temps_removed, 1);
+    assert!(!temp.exists());
+}
+
+#[test]
 fn every_file_the_engine_ever_deletes_is_one_of_its_own_temp_files() {
     let w = World::new("only-temps");
     let disk = w.disk("usb");

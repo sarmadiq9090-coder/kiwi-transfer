@@ -531,11 +531,10 @@ fn is_where_expected(root: &Path, resolved: &Path, rel: &SafeRelPath) -> bool {
 impl Store {
     /// Deduplication: has this device already stored a file with this content?
     ///
-    /// Only the device's own records count: the files it committed and its
-    /// claims on shared files. What another device stored is not a duplicate
-    /// for this one; it sends the file, and if the same bytes land on the
-    /// same path they are not stored twice (see
-    /// [`CommitOutcome::AlreadyPresent`](super::CommitOutcome::AlreadyPresent)).
+    /// Only the device's own records count. What another device stored is
+    /// not a duplicate for this one, even if it is the very same content:
+    /// this device sends its file, and it is stored as a file of its own in
+    /// its own folder. There is no deduplication across devices.
     ///
     /// A ledger hit is only a hint. The candidate file is re-read from disk
     /// and re-hashed; `Some` is returned only if that hash matches. A

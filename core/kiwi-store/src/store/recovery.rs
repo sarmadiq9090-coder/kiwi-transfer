@@ -25,11 +25,12 @@
 //! * it is a plain file, reached through plain directories, inside the root;
 //! * it does not belong to a transfer in progress;
 //! * **it is not a committed file whose rename was lost.** If a record of the
-//!   same size, in the same directory, is without its file, the temp file is
-//!   read and hashed first. If it has that record's hash it *is* that file
-//!   (a drive acknowledged a flush it had not done, and the rename did not
-//!   survive the power failure): it is given its final name again, never
-//!   deleted.
+//!   same size is without its file, the temp file is read and hashed first.
+//!   If it has the hash of such a record in its own directory it *is* that
+//!   file (a drive acknowledged a flush it had not done, and the rename did
+//!   not survive the power failure): it is given its final name again. If it
+//!   has the hash of a missing file elsewhere, it is kept. Only a temp file
+//!   that holds no missing committed content is deleted.
 //!
 //! A file that merely looks like a temp file (unknown tag) is reported in
 //! [`RecoveryReport::unowned_temps`] and left alone.
@@ -230,15 +231,15 @@ impl Inner {
         true
     }
 
-    /// The records at `location` whose file has this size, should be in this
-    /// directory, and is not there.
-    fn lost_in_dir(
+    /// The records at `location` whose file has this size and is not where
+    /// it should be; with each, whether it should be in this directory.
+    fn lost_with_size(
         &self,
         location: i64,
         root: &Path,
         dir_key: &str,
         size: u64,
-    ) -> Result<Vec<Lost>, StoreError> {
+    ) -> Result<Vec<(Lost, bool)>, StoreError> {
         let mut candidates = Vec::new();
         if location == PRIMARY {
             for rec in self.ledger.files_with_size(size)? {
@@ -251,15 +252,18 @@ impl Inner {
                 }
             }
         }
-        candidates.retain(|lost| {
-            let Some(rel) = SafeRelPath::from_stored(lost.rel_path()) else {
-                return false;
+        let mut lost = Vec::new();
+        for candidate in candidates {
+            let Some(rel) = SafeRelPath::from_stored(candidate.rel_path()) else {
+                continue;
             };
             // "Without its file": anything but a positive "it is there".
-            rel.parent().collision_key() == dir_key
-                && !matches!(self.fs.stat(&rel.under(root)), Ok(Some(_)))
-        });
-        Ok(candidates)
+            if !matches!(self.fs.stat(&rel.under(root)), Ok(Some(_))) {
+                let here = rel.parent().collision_key() == dir_key;
+                lost.push((candidate, here));
+            }
+        }
+        Ok(lost)
     }
 
     /// Applies the deletion rule (see the module documentation) to one
@@ -289,7 +293,7 @@ impl Inner {
         // Never delete while a record of this size is without its file:
         // read and hash the temp file first.
         let dir_key = path_key(&dir_rel.join("/"));
-        let lost = self.lost_in_dir(location, root, &dir_key, size)?;
+        let lost = self.lost_with_size(location, root, &dir_key, size)?;
         if !lost.is_empty() {
             let mut hasher = blake3::Hasher::new();
             let read = self.fs.read_verify(&path, &mut |chunk| {
@@ -301,7 +305,8 @@ impl Inner {
                 // It cannot be judged now; it is certainly not deleted.
                 _ => return Ok(TempFate::Left),
             };
-            if let Some(found) = lost.iter().find(|l| *l.hash() == hash) {
+            let matching = || lost.iter().filter(|(l, _)| *l.hash() == hash);
+            if let Some((found, _)) = matching().find(|(_, here)| *here) {
                 // It is that committed file. Give it its final name again:
                 // create-new, flushed, and confirmed under that name.
                 let Some(rel) = SafeRelPath::from_stored(found.rel_path()) else {
@@ -346,6 +351,12 @@ impl Inner {
                     }
                 }
                 return Ok(TempFate::Recreated(found.rel_path().to_owned()));
+            }
+            // The bytes of a committed file that is missing somewhere else:
+            // not a lost rename (a temp file lies next to its final name),
+            // but not something to throw away either. It stays.
+            if matching().next().is_some() {
+                return Ok(TempFate::Left);
             }
         }
 

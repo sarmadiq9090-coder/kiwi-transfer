@@ -63,9 +63,10 @@ before it returns; see [Batched ledger commits](#batched-ledger-commits).
   its tag is one this ledger recorded, it is a plain file reached through
   plain directories, it does not belong to a transfer in progress, **and it
   is not a committed file whose rename was lost**: if a record of the same
-  size, in the same directory, is without its file, the temp file is read and
-  hashed first, and if it is that file it is given its final name again. A
-  look-alike with an unknown tag is reported (`unowned_temps`) and left alone.
+  size is without its file, the temp file is read and hashed first. If it is
+  the missing file of its own directory, it is given its final name again; if
+  it holds the bytes of a file missing elsewhere, it is kept. A look-alike
+  with an unknown tag is reported (`unowned_temps`) and left alone.
   There is one function in the crate that calls "delete", and it refuses any
   other name.
 * **A file never has its final name before it has been verified.**
