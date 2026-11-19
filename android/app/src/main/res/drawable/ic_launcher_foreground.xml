@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad) -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Placeholder icon: two arrows (send / receive). Replaced by the real design. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M30,42h36v-9l16,14l-16,14v-9H30z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M78,66H42v-9L26,71l16,14v-9h36z" />
+</vector>

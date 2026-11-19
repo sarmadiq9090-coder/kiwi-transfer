@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad)
+# SPDX-License-Identifier: Apache-2.0
+# REUSE policy: source files carry SPDX headers; this file covers everything that cannot
+# (images, lock files, docs, generated files). See CONTRIBUTING.md, "Licence headers".
+version = 1
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 FastKiwi (Sarmad)"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["android/gradle/wrapper/**", "android/gradlew", "android/gradlew.bat"]
+precedence = "override"
+SPDX-FileCopyrightText = "Gradle, Inc."
+SPDX-License-Identifier = "Apache-2.0"

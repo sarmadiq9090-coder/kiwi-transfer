@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad)
+// SPDX-License-Identifier: Apache-2.0
+// Writes a CycloneDX SBOM of the Maven dependencies shipped in the release APK.
+// Used by the release workflow only (it needs the network for the plugin), so the
+// normal build stays buildable offline:
+//   ./gradlew --init-script tools/sbom.init.gradle :app:cyclonedxDirectBom
+// Output: app/build/reports/sbom/kiwi-transfer-android.cdx.json
+initscript {
+    repositories { gradlePluginPortal(); mavenCentral() }
+    dependencies { classpath("org.cyclonedx:cyclonedx-gradle-plugin:3.6.1") }
+}
+allprojects {
+    if (path == ":app") {
+        apply plugin: 'org.cyclonedx.bom'
+        afterEvaluate {
+            tasks.named("cyclonedxDirectBom") {
+                includeConfigs.set(["releaseRuntimeClasspath"])
+                componentGroup.set("app.fastkiwi")
+                componentName.set("kiwi-transfer-android")
+                jsonOutput.set(layout.buildDirectory.file("reports/sbom/kiwi-transfer-android.cdx.json"))
+            }
+        }
+    }
+}

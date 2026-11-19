@@ -1,0 +1,33 @@
+# Rust
+/target/
+**/*.rs.bk
+# Gradle / Android
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+*.iml
+.idea/
+captures/
+# Per-ABI Rust libraries are built, never committed
+android/app/src/main/jniLibs/**/*.so
+# Generated UniFFI bindings are built, never committed
+android/app/src/main/java/uniffi/
+# Signing material: NEVER commit
+android/keystore/
+*.jks
+*.keystore
+keystore.properties
+*.pfx
+*.p12
+*.key
+*.minisig.key
+# Local toolchain and scratch
+.tools/
+.env
+.env.*
+dist/
+*.log
+__pycache__/

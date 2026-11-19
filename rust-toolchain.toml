@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad)
+# SPDX-License-Identifier: Apache-2.0
+# Pinned so every build (CI, F-Droid, a contributor's PC) uses the same compiler.
+# Bump together with Cargo.toml `rust-version`, and note it in CHANGELOG.md.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"]
+profile = "minimal"

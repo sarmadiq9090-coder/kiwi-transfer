@@ -1,0 +1,7 @@
+// SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad)
+// SPDX-License-Identifier: Apache-2.0
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.android) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+}

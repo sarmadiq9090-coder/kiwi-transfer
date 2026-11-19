@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad) -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<resources>
+    <color name="kiwi_bg">#F9FAEF</color>
+    <color name="ic_launcher_background">#356A1E</color>
+    <!-- Window theme only; all UI is Compose Material 3. -->
+    <style name="Theme.KiwiTransfer" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/kiwi_bg</item>
+    </style>
+</resources>
