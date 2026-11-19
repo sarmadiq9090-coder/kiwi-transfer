@@ -118,7 +118,7 @@ Rules:
 - Icons always sit beside a text label, except universally known ones in the app bar (back, settings, history), which carry an accessible label.
 - Directional icons (back, chevrons) mirror in Arabic; media, clock and check icons do not.
 
-**App icon** (`icon.svg`, 256 grid, adaptive-icon safe zone respected): a phone in front of a monitor with a lime arrow going into the screen, on FastKiwi forest green, plus the small lime FastKiwi leaf in the corner. Readable at 48, 32 and 24 px (see `review/contact-icons.png`). `icon-mono.svg` is the single-colour template for the Android 13 themed icon and the Windows tray (tinted by the system; white on dark). Three rejected alternatives are kept in `icon-alternatives/` for comparison.
+**App icon** (`icon.svg`, chosen by the owner; 256 grid, adaptive-icon safe zone respected): a phone, a lime arrow and a computer side by side on one line, on FastKiwi forest green, plus the small lime FastKiwi leaf in the corner. It reads left to right in every language (it is a picture, not text, so it does not mirror). Readable at 48, 32 and 24 px (see `review/contact-icons.png`). `icon-mono.svg` is the same drawing in one colour, without the tile and leaf, enlarged to the safe zone: the template for the Android 13 themed icon, notifications and the Windows tray (tinted by the system; white on dark). The mock-ups use `icon.svg` wherever the app icon appears (About, title bar, tray). The rejected directions are kept in `icon-alternatives/` for comparison.
 
 ## 7. Wording
 
