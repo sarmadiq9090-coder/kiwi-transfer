@@ -1,0 +1,39 @@
+[package]
+name = "kiwi-store"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Durable, verified on-disk storage engine for Kiwi Transfer (PC side)"
+publish = false
+
+[lib]
+name = "kiwi_store"
+
+[features]
+# Exposes the fault-injection seams (filesystem, clock, forced volume class).
+# Never enable this in a shipping build: it lets the caller replace the very
+# operations the safety guarantees rest on.
+test-util = []
+
+[dependencies]
+blake3 = "1.8"
+rusqlite = { version = "0.43", features = ["bundled"] }
+thiserror = "2"
+unicode-normalization = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+kiwi-store = { path = ".", features = ["test-util"] }
