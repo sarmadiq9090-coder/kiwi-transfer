@@ -9,6 +9,7 @@ activityCompose = "1.11.0"
 coreKtx = "1.17.0"
 junit = "4.13.2"
 coroutines = "1.10.2"
+lifecycle = "2.9.4"
 # Added when the Rust core is wired in (spike): jna = "5.17.0" (use its Apache-2.0 option); UniFFI 0.32.2 is on the Rust side.
 
 [libraries]
@@ -19,6 +20,8 @@ androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
 junit = { module = "junit:junit", version.ref = "junit" }
 
 [plugins]
