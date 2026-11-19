@@ -890,20 +890,26 @@ Profile (normative):
    duplicate map keys, nesting deeper than 8.
 3. Senders MUST use deterministic encoding (RFC 8949 section 4.2.1): shortest integer and length forms, map
    keys in ascending order.
-4. Receivers MUST reject (`E_MALFORMED`) anything in rule 2 and any invalid UTF-8. Receivers SHOULD reject
-   non-shortest forms and unsorted keys.
+4. Receivers MUST reject (`E_MALFORMED`) anything in rule 2, any invalid UTF-8, **any integer or length that
+   is not in its shortest form, and any map whose keys are not in ascending order** (KT-19: the canonical
+   form is enforced, not merely recommended; the negative vectors of 11.2 test it).
 5. **Hashes and signatures are always computed over the bytes as received**, never over a re-encoding.
 6. Unknown map keys in a known message MUST be ignored. A missing required key is `E_MALFORMED`.
 7. Optional fields are omitted when absent; `null` is not used as "absent".
+8. **No allocation from a declared size.** A decoder MUST check every declared array or map count, and
+   every byte-string or text-string length, against the number of bytes that remain in the frame *before*
+   it allocates or reserves anything; a count or length that cannot fit is `E_MALFORMED`. (A CBOR header
+   can announce 2^64 elements in 9 bytes.)
+9. Every integer is checked against its range in 5.7 before it is used.
 
 Common field types used in 5.11:
 
 | Type | Encoding |
 |---|---|
-| `Hash`, `DeviceId`, `Nonce`, `Proof` | Byte string, exactly 32 bytes. |
+| `Hash`, `DeviceId`, `Nonce`, `Proof`, `Key32` | Byte string, exactly 32 bytes. |
 | `Id16` | Byte string, exactly 16 bytes. |
 | `ItemKey` | `Id16` chosen by the sender of an item; opaque to the receiver (6.2). |
-| `Time` | Integer, milliseconds since the Unix epoch (may be negative). |
+| `Time` | Integer, milliseconds since the Unix epoch (may be negative); range in 5.7. |
 | `Path` | Array of 0 to 32 text strings (path components, 6.8). Never a string with separators. |
 | `Name` | Text string, 1 to 1024 bytes of UTF-8. |
 
@@ -919,11 +925,14 @@ PH                                                         PC
  |<---------------------------------------- HELLO (h_pc) --|
  |-- HELLO_AUTH (sig_ph) --------------------------------->|   PC verifies sig_ph
  |<---------------------------------- HELLO_AUTH (sig_pc) -|   PH verifies sig_pc
+ |<----------------------------------------------- STATUS -|   only after sig_ph verified
+ |-- PHONE_STATUS ---------------------------------------->|   only after sig_pc verified
  |                 session established                     |
 ```
 
 1. PH opens the first client-initiated bidirectional stream. It is the **control stream** and stays open for
-   the life of the connection. PH sends `HELLO`; PC answers `HELLO`.
+   the life of the connection. PH sends `HELLO`; PC answers `HELLO`. `HELLO` carries protocol and link
+   counters only: no device name, no folder labels, no status (KT-26).
 2. Both compute, with `h_ph` and `h_pc` the exact payload bytes of the two `HELLO` frames:
 
    ```
@@ -936,33 +945,47 @@ PH                                                         PC
 
    The signed message starts with the ASCII bytes `kiwi/1 session auth`, so it can never be confused with a
    TLS 1.3 `CertificateVerify` input (which starts with 64 bytes `0x20`).
-3. PH sends `HELLO_AUTH(sig_ph)`. PC verifies it with the **pinned** phone key, then sends
-   `HELLO_AUTH(sig_pc)`. PH verifies it with the pinned PC key. A failed verification closes the connection
-   with code `2`. This is the **signed transcript**: it covers the protocol version, the capability lists and
-   every link counter in both `HELLO` messages, and binds them to this TLS connection.
+3. PH sends `HELLO_AUTH(sig_ph)`. PC takes the peer `SPKI` from the connection object, **looks it up in its
+   pin store again**, verifies the signature (strict, section 0) with that pinned key, then sends
+   `HELLO_AUTH(sig_pc)`. PH does the same with the pinned PC key. A failed lookup or verification closes
+   the connection with code `2`. This is the **signed transcript**: it covers the protocol version, the
+   capability lists and every link counter in both `HELLO` messages, and binds them to this TLS connection.
+   A provisional pin (2.4) becomes permanent at this point.
 4. Checks after authentication, in this order:
    a. `pairing_id` equal on both sides; otherwise close with code `3` (stale pairing).
    b. Version: `minor = min(minor_ph, minor_pc)` (11.1).
    c. Capabilities: the active set is the intersection of both `caps` lists. Capability `1` is mandatory.
-   d. Session number: `session_seq = max(last_session_seq_ph, last_session_seq_pc) + 1`. Both sides store it
-      durably **before** sending any data-plane request.
+   d. Session number: both `last_session_seq` values must be at most 2^53 - 1 (otherwise close with code
+      `1` and store nothing). `session_seq = max(last_session_seq_ph, last_session_seq_pc) + 1`. Both sides
+      store it durably **before** sending any data-plane request.
    e. Confirmation state (3.3).
    f. Each side compares the peer's `ledger_id` with the one it stored last time (8.10).
-5. Deadlines: `HELLO` within 5 s of handshake completion; the whole exchange within 10 s; else close code `1`.
-6. Before step 3 has succeeded, only `HELLO`, `HELLO_AUTH`, `ERROR` and `BYE` are accepted, and neither side
+5. The PC then sends `STATUS` and the phone `PHONE_STATUS`. The session is **established** when each side
+   has received the other's. The phone then compares `STATUS.commit_hwm` with its own records and the PC
+   compares `PHONE_STATUS.receipt_hwm` with its own (ledger rollback, 8.10). No data-plane request is sent
+   before the session is established.
+6. Deadlines: `HELLO` within 5 s of handshake completion; steps 1-5 within 10 s; else close code `1`.
+7. Before step 3 has succeeded, only `HELLO`, `HELLO_AUTH`, `ERROR` and `BYE` are accepted, and neither side
    may open a file, start a database transaction, accept a unidirectional stream, or show UI for the peer.
+
+**What a "session" is.** For every rule of section 8 that says "a later session", a session is one
+established connection of one link, identified by that link's `session_seq`. It begins at step 4(d). The
+PC program is a long-running tray application: starting the process, opening the store, or another phone
+connecting is **not** a new session for this phone. The store is told explicitly (`new_session` for this
+phone) at step 4(d), and only there.
 
 Capabilities:
 
 | Id | Name | Meaning |
 |---|---|---|
-| 1 | `xfer` | Offers, data streams, receipts (section 6). Mandatory. |
+| 1 | `xfer` | Offers, data streams, receipts, `AUDIT` (section 6). Mandatory. |
 | 2 | `send` | Ad-hoc sending in both directions (9.1). |
 | 3 | `clipboard` | `CLIP` (9.2). |
 | 4 | `browse` | `BROWSE`, `THUMB`, `FETCH` (9.3). |
-| 5 | `restore` | Restore sources and `FETCH` with purpose restore (9.4). |
+| 5 | `restore` | `FETCH` with purpose restore (9.4). |
 | 6 | `final_move` | `FM_*` (section 8). |
 | 7 | `repair` | `REPAIR_REQUEST` (8.9). |
+| 8 | `data` | Item kinds 3 to 7: contacts, calendar, app list, APK files, app backup files (9.6). |
 
 A request for a capability that is not active is answered with `E_UNSUPPORTED`.
 
@@ -972,6 +995,13 @@ A request for a capability that is not active is answered with `E_UNSUPPORTED`.
   sender per connection. The response carries the same `id` and the response type listed in 5.11, or `ERROR`.
 - A notification has `id = 0` and gets no response.
 - At most 32 requests may be outstanding per direction; more is `E_LIMIT`.
+- **Responses in parts (KT-27).** `FM_VERIFY_RESULT` and `AUDIT_RESULT` may be sent in several frames with
+  the same `id`. The request stays outstanding, and counts towards the limit of 32, until the part with
+  `more = false` has arrived. While it works on such a request the responder MUST send a part at least every
+  30 s (a part may carry zero results); the requester treats 60 s without a part as a failure of every item
+  not yet answered.
+- Every other request fails if no response arrives within `REQUEST_TIMEOUT` (60 s). A failed or timed-out
+  request never counts as a positive answer.
 - An unknown message type with `id > 0` is answered with `ERROR(E_UNSUPPORTED)`; with `id = 0` it is ignored.
 - A message that is not allowed in the current state is answered with `ERROR(E_STATE)`.
 
@@ -979,13 +1009,13 @@ Error codes (`ERROR.code`, and every `code` field):
 
 | Code | Name | Meaning |
 |---|---|---|
-| 1 | `E_UNSUPPORTED` | Unknown message, or capability not active. |
-| 2 | `E_MALFORMED` | Violates 5.1 / 5.2 or a field rule. |
+| 1 | `E_UNSUPPORTED` | Unknown message, unknown item kind, or capability not active. |
+| 2 | `E_MALFORMED` | Violates 5.1 / 5.2, a field rule, or a range of 5.7. |
 | 3 | `E_LIMIT` | A limit of 5.7 was exceeded. |
 | 4 | `E_BUSY` | Try again later (`retry_after`). |
-| 5 | `E_CONFIRM_REQUIRED` | The link needs the weekly check (3.5). |
-| 6 | `E_NOT_PERMITTED` | Not allowed by local settings or by the user. |
-| 7 | `E_QUOTA` | Per-peer quota reached (5.10). |
+| 5 | `E_CONFIRM_REQUIRED` | The link needs the weekly check and this request is of a paused class (3.5). |
+| 6 | `E_NOT_PERMITTED` | Not allowed by local settings, by the network, or by the user. |
+| 7 | `E_QUOTA` | Per-phone quota reached (5.10). |
 | 8 | `E_NO_SPACE` | Not enough free space. |
 | 9 | `E_NAME` | A name or path cannot be accepted (6.8). |
 | 10 | `E_VERIFY` | A hash, proof or commitment did not match. |
@@ -1003,9 +1033,10 @@ Error codes (`ERROR.code`, and every `code` field):
 | 22 | `E_ATTEMPTS` | No attempts left. |
 | 23 | `E_INTERNAL` | Anything else. |
 
-QUIC application close codes: `0` normal, `1` protocol violation or deadline, `2` session authentication
-failed, `3` unpaired or stale pairing, `4` superseded by a newer connection from the same device, `5`
-shutting down, `6` limit exceeded, `7` pairing finished.
+QUIC application close codes: `0` normal, `1` protocol violation, range violation in `HELLO`, or deadline,
+`2` session authentication failed, `3` unpaired or stale pairing (also sent to a tombstoned key, 2.7), `4`
+superseded by a newer connection from the same device, `5` shutting down, `6` limit exceeded, `7` pairing
+finished.
 
 ### 5.5 Streams
 
@@ -1025,7 +1056,7 @@ on the control stream.
 - QUIC connection migration (the phone changing Wi-Fi access point) is allowed; the new path's addresses must
   pass 4.4, otherwise the connection is closed.
 
-### 5.7 Limits
+### 5.7 Limits and value ranges
 
 | Limit | Value |
 |---|---|
@@ -1034,9 +1065,9 @@ on the control stream.
 | Bidirectional streams per connection | 1 |
 | Open data streams per direction (`MAX_DATA_STREAMS`) | 4 |
 | Connections per paired device | 1 (a new authenticated one supersedes the old one, close code `4`) |
-| Sessions on a PC at one time | One per paired phone (at most 8 by default) |
+| Sessions on a PC at one time | One per paired phone (at most `MAX_PHONES`, 8) |
 | Outstanding requests per direction | 32 |
-| Items per `OFFER`, `FM_VERIFY`, `FM_STATE`, `FETCH`, `REPAIR_REQUEST` | 500, and the message must still fit `MAX_FRAME` (senders split) |
+| Items per `OFFER`, `FM_VERIFY`, `FM_STATE`, `FETCH`, `REPAIR_REQUEST`, `AUDIT` | 500, and the message must still fit `MAX_FRAME` (senders split) |
 | Open (unfinished) transfers per direction | 8 |
 | Entries per `BROWSE_REPLY` | 200 |
 | Outstanding `THUMB` requests | 8 |
@@ -1044,7 +1075,24 @@ on the control stream.
 | Clipboard text | 65 536 bytes of UTF-8 |
 | Display name of a device | 64 bytes of UTF-8 |
 | `Name` / path component on the wire | 1 024 bytes; path depth 32 |
-| Rates (per session) | `BROWSE` 20/s, `THUMB` 50/s, `CLIP` 1/s, `OFFER` 10/s; excess is `E_RATE` |
+| Rates (per session) | `BROWSE` 20/s, `THUMB` 50/s, `CLIP` 1/s, `OFFER` 10/s, `FM_VERIFY` 2/s, `AUDIT` 2/s, `PHONE_STATUS` and `STATUS` 1 per 10 s; excess is `E_RATE` |
+| `REPAIR_REQUEST` (enforced by the phone) | 1 request per minute, 2 000 items per hour |
+
+**Value ranges (KT-19, KT-01).** Every unsigned integer on the wire is a CBOR `uint` (up to 2^64 - 1 in the
+encoding); the protocol accepts less. A receiver applies this table before it uses a value; all arithmetic
+on these values is checked (section 0).
+
+| Value | Accepted range | A value outside the range |
+|---|---|---|
+| File sizes: `Item.size`, `Receipt.size`, `STREAM_*.size`, `FmItem.size`, `Entry.size` | 0 .. `MAX_FILE_SIZE` (2^42 bytes, 4 TiB) | In an `OFFER`: that item is `declined` with `E_LIMIT`. Anywhere else: `E_MALFORMED`. |
+| Offsets: `STREAM_HEADER.offset`, `OfferResult.resume_offset` | 0 .. `size`, and a multiple of `CHUNK` | Receiver of a header: reset the stream, `E_STATE`. Sender that is granted a bad `resume_offset`: ignore it and send from 0 (6.7). |
+| Counters and ids: `commit_seq`, `commit_hwm`, `receipt_hwm`, `session_seq`, `confirm_epoch`, `scan_seq`, `xfer_id`, `batch_id`, `challenge_id`, the envelope `id`, `root_id`, `media_id`, `generation`, every item count | 0 .. 2^53 (`last_session_seq`: 0 .. 2^53 - 1; `confirm_epoch`: 1 .. 2^53) | `E_MALFORMED`. In `HELLO`: close code `1`, and nothing from that `HELLO` is stored. |
+| Durations in seconds: `confirm_age`, `scan_age`, `retry_after`, `ttl`, `lock_remaining`, `min_age`, `keep_period`, `trash_retention`, `mirror_seen_age` | 0 .. 2^32 | Read as 2^32 (saturating). Never an error, never a wrap. |
+| `Time` | -2^53 .. 2^53 ms | "Unknown": the value is stored as absent and is not applied to a file. Never an error. A `Time` that the file system cannot represent (before 1601 on NTFS) is also "unknown". |
+| `total_items`, `total_bytes`, `free_bytes`, `quota_left`, `pending_bytes`, the fields of `Counts` and `Copies` | 0 .. 2^63 - 1 | Display only: read as the maximum. |
+| Array counts; byte-string and text-string lengths | The limit of the field, and never more than the bytes left in the frame (5.2 rule 8) | `E_MALFORMED`, before any allocation. |
+| Number of `path` components | 0 .. 32 on the wire; the receiver's own limit is in 6.8 | Over 32: `E_MALFORMED`. Over the receiver's limit: that item is `declined` with `E_NAME` (never truncated). |
+| Enumerations | The values listed | 11.1 rule 3. |
 
 ### 5.8 Peer-supplied text
 
@@ -1058,8 +1106,9 @@ paths, addresses or device names.
 ### 5.9 Denial-of-service protections (PC listener)
 
 1. **Source filter first**: packets from addresses that are not on-link are dropped before parsing (4.4).
-2. **QUIC Retry**: the PC answers every Initial packet that has no valid token with a Retry packet and keeps
-   no connection state for it. Handshake state is created only for a validated source address.
+2. **QUIC Retry**: the PC answers every Initial packet that has no valid Retry token with a Retry packet and
+   keeps no connection state for it. Handshake state is created only for a validated source address. There
+   are no `NEW_TOKEN` tokens that could skip this (1.3).
 3. **Handshake limits**: at most 16 handshakes in progress in total and 4 per source address; a token bucket
    of 8 handshakes, refilled at 1 per 5 s, per source address; handshake deadline 10 s.
 4. **Unknown keys**: when no pairing window is open, an unknown client key is rejected inside the handshake
@@ -1067,25 +1116,29 @@ paths, addresses or device names.
    10 minutes, that address is ignored for 10 minutes.
 5. **Nothing is allocated for a peer before its key is confirmed pinned**: until the handshake has completed
    with a pinned client key and `HELLO_AUTH` has verified, the PC holds only bounded QUIC/TLS state: no
-   application buffers, file handles, database work or UI. RECOMMENDED implementation: initial transport
-   parameters allow one bidirectional stream, zero unidirectional streams and a 64 KiB connection window;
-   the PC raises them (4 unidirectional streams, larger windows) only after `HELLO_AUTH`.
+   application buffers, file handles, database work or UI, and it has sent nothing about itself beyond the
+   counters in `HELLO`. RECOMMENDED implementation: initial transport parameters allow one bidirectional
+   stream, zero unidirectional streams and a 64 KiB connection window; the PC raises them (4 unidirectional
+   streams, larger windows) only after `HELLO_AUTH`.
 6. **UNPAIRED connections** exist only inside a user-opened pairing window and are bounded by 2.1.
 7. **Authenticated peers** are bounded by 5.7 and by the quota of 5.10.
 8. The phone has no listener, so it has no inbound attack surface; it applies the same frame, item and rate
    limits to what a PC sends.
+9. On a Public network (4.4) rules 1-5 are the whole exposure: no pairing by SAS, no `pm=1`, no name.
 
-### 5.10 Per-peer disk quota
+### 5.10 Per-phone disk quota
 
-1. The PC accounts, per paired phone, all bytes it stores for that phone: committed files plus partial files.
+1. The PC accounts, **per paired phone**, all bytes it stores in that phone's namespace on the primary
+   destination: committed files plus unfinished temporary files. Second copies (8.13) are not counted.
 2. Two limits apply; the smaller wins:
    - **Reserve** (always on): the PC refuses data that would bring the free space of the destination volume
      below `max(10 GiB, 5 % of the volume)`.
-   - **Per-phone quota** (set by the PC user per phone; default: none).
+   - **Per-phone quota** (set by the PC user for each phone; default: none).
 3. The limits are checked when an `OFFER` arrives, using the declared sizes (items that do not fit are
    answered `declined` with `E_QUOTA` or `E_NO_SPACE`), and again while data arrives. A stream that delivers
    more bytes than the declared size is reset (`E_LIMIT`).
-4. Partial files that have not progressed for 7 days are deleted and their bytes released.
+4. Unfinished temporary files that have not progressed for 7 days are deleted and their bytes released, under
+   the rule of section 7 that says which files the PC may delete at all (KT-13).
 5. `STATUS.roots[].free_bytes` and `quota_left` tell the phone what is left, so that it can stop offering.
 6. The phone, when it receives, keeps at least 1 GiB of free space and answers `E_NO_SPACE` otherwise.
 
@@ -1106,10 +1159,10 @@ Direction: `PH>PC`, `PC>PH`, or `both`. Kind: `req` (request), `resp` (response 
 | 0x07 | `BYE` | both | note |
 | 0x08 | `UNPAIR` | both | req |
 | 0x09 | `UNPAIR_ACK` | both | resp to `UNPAIR` |
+| 0x0A | `PHONE_STATUS` | PH>PC | note |
 | 0x10 | `PAIR_HELLO` | PH>PC | note (UNPAIRED only) |
 | 0x11 | `PAIR_CHALLENGE` | PC>PH | note (UNPAIRED only) |
 | 0x12 | `PAIR_REVEAL` | PH>PC | note (UNPAIRED only) |
-| 0x13 | `PAIR_CONFIRM` | PH>PC | note (UNPAIRED only) |
 | 0x14 | `PAIR_RESULT` | PC>PH | note (UNPAIRED only) |
 | 0x15 | `PAIR_DONE` | PH>PC | note (UNPAIRED only) |
 | 0x20 | `RECONFIRM_BEGIN` | PH>PC | req |
@@ -1132,6 +1185,8 @@ Direction: `PH>PC`, `PC>PH`, or `both`. Kind: `req` (request), `resp` (response 
 | 0x43 | `FM_STATE_ACK` | PC>PH | resp to `FM_STATE` |
 | 0x44 | `REPAIR_REQUEST` | PC>PH | req |
 | 0x45 | `REPAIR_REPLY` | PH>PC | resp to `REPAIR_REQUEST` |
+| 0x46 | `AUDIT` | PH>PC | req |
+| 0x47 | `AUDIT_RESULT` | PC>PH | resp to `AUDIT` (one or more parts) |
 | 0x50 | `BROWSE` | PH>PC | req |
 | 0x51 | `BROWSE_REPLY` | PC>PH | resp to `BROWSE` |
 | 0x52 | `THUMB` | PH>PC | req |
@@ -1141,7 +1196,9 @@ Direction: `PH>PC`, `PC>PH`, or `both`. Kind: `req` (request), `resp` (response 
 | 0x60 | `CLIP` | both | req |
 | 0x61 | `CLIP_ACK` | both | resp to `CLIP` |
 
-Codes not listed are reserved. Field tables follow; the first column is the map key.
+Codes not listed are reserved. `0x13` was `PAIR_CONFIRM` in Draft 1; it is not used and MUST NOT be
+reassigned. Field tables follow; the first column is the map key. Map keys marked "not used" were assigned
+in Draft 1 and MUST NOT be reassigned.
 
 **`HELLO` (0x01)**
 
@@ -1151,40 +1208,60 @@ Codes not listed are reserved. Field tables follow; the first column is the map 
 | 1 | `app_version` | text | R | SemVer of the program, at most 32 bytes. Informational. |
 | 2 | `platform` | uint | R | 1 Android, 2 Windows, 3 iOS (reserved). |
 | 3 | `caps` | array of uint | R | Supported capability ids, ascending. |
-| 4 | `device_name` | text | R | User-visible name, at most 64 bytes. Only ever sent inside the authenticated channel. |
+| 4 | - | | | Not used (was `device_name`; now in `STATUS` / `PHONE_STATUS`). |
 | 5 | `pairing_id` | Id16 | R | From `PAIR_RESULT`. |
-| 6 | `confirm_epoch` | uint | R | 3.2. |
-| 7 | `confirm_age` | uint | R | Seconds on the sender's link clock since its last confirmation. |
+| 6 | `confirm_epoch` | uint | R | 3.2. Range 1 .. 2^53. |
+| 7 | `confirm_age` | uint | R | Seconds on the sender's link clock since its last confirmation; the sender caps it at `AGE_CAP` (2^32), the receiver reads anything larger as `AGE_CAP` (3.3). |
 | 8 | `clock_anomaly` | bool | R | 3.2. |
-| 9 | `last_session_seq` | uint | R | Highest session number this side has stored for the link. |
+| 9 | `last_session_seq` | uint | R | Highest session number this side has stored for the link. Range 0 .. 2^53 - 1. |
 | 10 | `ledger_id` | Id16 | R | Random id of this side's ledger database, created with the database (8.10). |
-| 11 | `wall_time` | Time | R | Informational (display, diagnostics). Never used for a decision. |
-| 12 | `status` | Status | O | PC only, R for PC. |
-| 13 | `fm_in_use` | bool | O | PH only: at least one folder uses final move with this PC. The PC shows a permanent notice. |
+| 11 | `wall_time` | Time | R | The sender's wall clock. Used for display and to **refuse** trashing when the two clocks disagree (8.6). Never sufficient to permit anything. |
+| 12 | - | | | Not used (was `status`). |
+| 13 | - | | | Not used (was `fm_in_use`; now in `PHONE_STATUS`). |
+| 14 | `need_confirm` | bool | R | 3.2: this side's durable "weekly check required" flag for the link. |
 
-**`Status`** (in `HELLO.status` and as the body of `STATUS` (0x03))
+**`Status`** (the body of `STATUS` (0x03)). Sent by the PC after it has verified `sig_ph`, and again
+whenever a value changes.
 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
 | 0 | `integrity_block` | bool | R | 8.9. |
 | 1 | `scan_seq` | uint | R | Number of completed full integrity scans. |
 | 2 | `scan_age` | uint | R | Seconds (PC link clock) since the last completed full scan; if none has completed yet, since the first file was committed (`0` for an empty ledger). |
-| 3 | `roots` | array of Root | R | Roots this phone may use. |
+| 3 | `roots` | array of Root | R | Roots this phone may use. At most 16. |
 | 4 | `outbox` | uint | R | Number of items the PC is waiting to send to this phone (9.1). |
 | 5 | `confirm_state` | uint | R | PC's view: 1 `CONFIRMED`, 2 `REQUIRED`. |
 | 6 | `lock_remaining` | uint | O | Seconds of weekly-check lockout left (3.4). |
+| 7 | `commit_hwm` | uint | R | The highest `commit_seq` the PC has ever issued for this link under its current `ledger_id`; 0 if none. Durable; never decreases while the `ledger_id` is the same (8.10). |
+| 8 | `device_name` | text | R | The PC's display name, at most 64 bytes. |
+| 9 | `copies` | Copies | R | How many of this phone's files have one or two verified copies (8.13). |
+| 10 | `block_reason` | uint | O | With `integrity_block`: 1 file changed, 2 file missing, 3 link or junction found, 4 many files changed at once, 5 ledger damaged or reset, 6 ledger rollback suspected, 7 destination marker lost, 8 a disk reports errors, 9 set by the PC user. |
+| 11 | `sole_copies` | uint | R | Number of files the PC records as `SOLE_COPY` for this phone (8.3). |
+| 12 | `fm_allowed` | bool | R | The PC user's per-phone switch "Allow this phone to free up space using this PC" (8.2). |
+
+**`Copies`**
+
+| Key | Field | Type | R/O | Notes |
+|---|---|---|---|---|
+| 0 | `mirror` | uint | R | State of the second copy for this phone's files: 0 no second disk configured, 1 up to date, 2 catching up, 3 no second disk connected, 4 problem (a disk is failing or a copy is damaged). |
+| 1 | `one_copy` | uint | R | Committed files of this phone that have one verified copy (on the primary destination only). |
+| 2 | `two_copies` | uint | R | Committed files of this phone that also have a verified copy on at least one second disk. |
+| 3 | `sole_one_copy` | uint | R | Of the files counted in `Status.sole_copies`, how many are in `one_copy`: files that are no longer in place on the phone **and** exist on one disk only. |
+| 4 | `mirror_seen_age` | uint | O | Seconds (PC link clock) since a second disk was last connected and verified. Absent when `mirror` is 0. |
+| 5 | `pending_bytes` | uint | O | Bytes of this phone's files still to be copied to a second disk. |
 
 **`Root`**
 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
 | 0 | `root_id` | uint | R | Stable per link. |
-| 1 | `kind` | uint | R | 1 backup destination of this phone, 2 browse folder (read-only), 3 restore source (read-only, 9.4). |
+| 1 | `kind` | uint | R | 1 backup destination: this phone's own namespace. 2 shared folder (read-only, 9.3). 3 inherited backup: the namespace of a replaced phone that the PC user handed over to this link (read-only, 9.4). |
 | 2 | `label` | text | R | Display name chosen on the PC (not a path). |
-| 3 | `fm_capable` | bool | R | Kind 1 only: the volume qualifies for final move now (8.2). |
-| 4 | `fm_reason` | uint | O | Why not: 1 removable, 2 network, 3 file system, 4 cloud-synchronised folder, 5 unbuffered verify unavailable, 6 unknown. |
+| 3 | `fm_capable` | bool | R | Kind 1 only: final move is possible with this root now (8.2). |
+| 4 | `fm_reason` | uint | O | Why not: 1 external, removable or hot-pluggable disk, 2 network location, 3 file system, 4 cloud-synchronised folder, 5 unbuffered verify unavailable, 6 unknown disk type, 7 folder writable by other Windows accounts, 8 managed or temporary location (Downloads, temp, Recycle Bin, Storage Sense), 9 volume changed or rebuild in progress: a full scan must pass first, 10 not allowed for this phone by the PC user. |
 | 5 | `free_bytes` | uint | O | Kind 1: free space minus reserve. |
 | 6 | `quota_left` | uint | O | Kind 1: bytes left in the per-phone quota, if one is set. |
+| 7 | `sync_warning` | bool | O | Kind 1: the folder is inside a cloud-synchronised folder; copying works, the phone shows a lasting warning (8.2). |
 
 **`HELLO_AUTH` (0x02)**: `0 sig` (byte string, 64 bytes, R).
 
@@ -1197,32 +1274,55 @@ seconds, O).
 
 **`UNPAIR` (0x08)**: empty body. **`UNPAIR_ACK` (0x09)**: empty body.
 
+**`PHONE_STATUS` (0x0A)**. Sent by the phone after it has verified `sig_pc`, and again whenever a value
+changes. Everything in it is for display and for reminders on the PC; **the PC MUST NOT use any of it to
+confirm a deletion**, with one exception that can only make the PC more careful: `receipt_hwm`.
+
+| Key | Field | Type | R/O | Notes |
+|---|---|---|---|---|
+| 0 | `device_name` | text | R | The phone's display name, at most 64 bytes. |
+| 1 | `fm_in_use` | bool | R | At least one folder uses final move with this PC. The PC then shows a permanent notice. |
+| 2 | `receipt_hwm` | uint | R | The highest `commit_seq` for which the phone holds a receipt under the PC's current `ledger_id`; 0 if none (8.10). |
+| 3 | `keep_period` | uint | O | Seconds: the phone's default keep-on-phone period (8.12). R when `fm_in_use`. |
+| 4 | `keep_overrides` | uint | O | Number of folders with a period of their own. |
+| 5 | `trash` | uint | R | 0 final move never used, 1 system trash (Android 11+), 2 app trash folder (Android 7-10). |
+| 6 | `trash_retention` | uint | O | Seconds: the trash period. With `trash = 2` the user's setting; with `trash = 1` the system's period (normally 30 days). |
+| 7 | `counts` | Counts | O | Items of this link by state. |
+| 8 | `auto_accept` | bool | R | The phone accepts files sent from this PC without asking each time (9.1). |
+| 9 | `free_bytes` | uint | O | Free space on the phone. |
+| 10 | `fm_block` | uint | O | The phone's own final-move block (8.8): 1 integrity alert from the PC, 2 ledger changed or rolled back, 3 media permission, 4 clocks disagree, 5 proof mismatch seen, 6 another reason. |
+
+**`Counts`**: `0 local` (uint), `1 committed` (uint), `2 waiting` (uint: verified, keep-on-phone period not
+over), `3 kept` (uint: favourites and items marked "keep on phone"), `4 trashed` (uint), `5 purged` (uint).
+All optional.
+
 **`PAIR_HELLO` (0x10)**
 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
 | 0 | `pair_version` | uint | R | `1`. |
 | 1 | `method` | uint | R | 1 QR, 2 SAS. |
-| 2 | `device_name` | text | R | At most 64 bytes. |
+| 2 | - | | | Not used (was `device_name`; names are sent after the number matched, KT-23). |
 | 3 | `platform` | uint | R | As in `HELLO`. |
 | 4 | `commit` | Hash | R | 2.3. |
 
-**`PAIR_CHALLENGE` (0x11)**: `0 nonce_c` (Nonce, R); `1 device_name` (text, at most 64 bytes, R).
+**`PAIR_CHALLENGE` (0x11)**: `0 nonce_c` (Nonce, R). Key 1 is not used (was `device_name`).
 
 **`PAIR_REVEAL` (0x12)**: `0 nonce_p` (Nonce, R); `1 proof_ph` (Proof; R for method 1, absent for method 2).
-
-**`PAIR_CONFIRM` (0x13)**: `0 match` (bool, R). Method 2 only.
 
 **`PAIR_RESULT` (0x14)**
 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
-| 0 | `accepted` | bool | R | |
-| 1 | `code` | uint | O | When not accepted: `E_DECLINED`, `E_EXPIRED`, `E_ATTEMPTS`, `E_VERIFY`, `E_LIMIT` (too many paired devices). |
+| 0 | `accepted` | bool | R | True only after the typed number matched this connection (2.4). |
+| 1 | `code` | uint | O | When not accepted: `E_DECLINED`, `E_EXPIRED`, `E_ATTEMPTS`, `E_VERIFY`, `E_LIMIT` (too many paired devices), `E_NOT_PERMITTED`. |
 | 2 | `proof_pc` | Proof | O | R when accepted with method 1. |
 | 3 | `pairing_id` | Id16 | O | R when accepted. |
+| 4 | `device_name` | text | O | The PC's display name, at most 64 bytes. R when accepted. |
+| 5 | `discovery_key` | Key32 | O | 4.2. R when accepted. |
 
-**`PAIR_DONE` (0x15)**: empty body.
+**`PAIR_DONE` (0x15)**: `0 ok` (bool, R: the phone stored its provisional pin); `1 device_name` (text, at
+most 64 bytes; R when `ok`).
 
 **`RECONFIRM_BEGIN` (0x20)**: empty body.
 
@@ -1240,10 +1340,10 @@ The code itself is never in any message from the PC.
 
 **`RECONFIRM_ANSWER` (0x22)**: `0 challenge_id` (uint, R); `1 code` (uint 0..99, R).
 
-**`RECONFIRM_RESULT` (0x23)**: `0 ok` (bool, R); `1 attempts_left` (uint, R); `2 new_epoch` (uint, R when ok);
-`3 code` (uint, O: `E_ATTEMPTS`, `E_EXPIRED`, `E_STATE`, `E_NOT_FOUND`).
+**`RECONFIRM_RESULT` (0x23)**: `0 ok` (bool, R); `1 attempts_left` (uint, R); `2 new_epoch` (uint, R when ok:
+the value both sides store, 3.4); `3 code` (uint, O: `E_ATTEMPTS`, `E_EXPIRED`, `E_STATE`, `E_NOT_FOUND`).
 
-**`RECONFIRM_ACK` (0x24)**: `0 epoch` (uint, R).
+**`RECONFIRM_ACK` (0x24)**: `0 epoch` (uint, R: the `new_epoch` the phone stored).
 
 **`OFFER` (0x30)**
 
@@ -1261,25 +1361,29 @@ The code itself is never in any message from the PC.
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
 | 0 | `key` | ItemKey | R | 6.2. |
-| 1 | `name` | Name | R | File name as the sender knows it. Untrusted; 6.8. |
+| 1 | `name` | Name | R | File name as the sender knows it (for a versioned item: with the snapshot time, 9.6). Untrusted; 6.8. |
 | 2 | `path` | Path | O | Relative folder as components (album / folder). Untrusted; 6.8. |
 | 3 | `size` | uint | R | Bytes. |
 | 4 | `mtime` | Time | R | Last-modified time of the source. |
 | 5 | `hash` | Hash | O | `BLAKE3` of the content, if the sender already knows it for exactly this version. |
 | 6 | `mime` | text | O | At most 127 bytes. A hint only. |
 | 7 | `media` | Media | O | Android MediaStore identity. |
-| 8 | `flags` | uint | O | Bit 0 `redacted` (6.2); bit 1 `from_trash` (the bytes come from the phone's trash, purpose 5). |
+| 8 | `flags` | uint | O | Bit 0 `redacted` (6.2); bit 1 `from_trash` (the bytes come from the phone's trash, purpose 5). Other bits 0. |
+| 9 | `kind` | uint | R | Item kind (9.6): 1 media, 2 file, 3 contacts, 4 calendar, 5 app list, 6 APK file, 7 app backup file. An unknown kind is `declined` with `E_UNSUPPORTED`. |
+| 10 | `orig_name` | Name | O | The name at the source, when `name` was changed by the sender (versioned items, 9.6). Stored in the ledger; used to restore the original name. |
+| 11 | `snapshot_time` | Time | O | Kinds 3, 4, 5 and versioned kind-7 items: when the snapshot was taken. |
 
 **`Media`**
 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
-| 0 | `volume` | text | R | MediaStore volume name (`external_primary`, or an SD-card volume id). |
+| 0 | `volume` | text | R | MediaStore volume name (`external_primary`, or an SD-card volume id). At most 64 bytes. |
 | 1 | `media_id` | uint | R | MediaStore `_ID`. |
-| 2 | `generation` | uint | O | `GENERATION_MODIFIED` (API 30+). |
-| 3 | `date_taken` | Time | O | |
-| 4 | `relative_path` | text | O | As reported by MediaStore. Informational; never used as a path by the receiver. |
-| 5 | `bucket` | text | O | Album display name. |
+| 2 | `generation` | uint | O | `GENERATION_MODIFIED` (API 30+). Informational: it changes on any metadata update and is never compared for a decision (KT-10). |
+| 3 | `date_taken` | Time | O | Capture time. |
+| 4 | `relative_path` | text | O | As reported by MediaStore. Informational; never used as a path by the receiver. At most 1 024 bytes. |
+| 5 | `bucket` | text | O | Album display name. At most 1 024 bytes. |
+| 6 | `date_added` | Time | O | When the item appeared on this phone (8.12). |
 
 **`OFFER_REPLY` (0x31)**: `0 xfer_id` (uint, R); `1 results` (array of OfferResult, R, same length and order
 as `items`).
@@ -1289,7 +1393,7 @@ as `items`).
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
 | 0 | `action` | uint | R | 1 `send`, 2 `have`, 3 `need_hash`, 4 `declined`. |
-| 1 | `resume_offset` | uint | O | Action 1: multiple of `CHUNK`; default 0. |
+| 1 | `resume_offset` | uint | O | Action 1: multiple of `CHUNK`, at most `size`; default 0. |
 | 2 | `prefix_hash` | Hash | O | R when `resume_offset > 0` (6.7). |
 | 3 | `receipt` | Receipt | O | R for action 2. |
 | 4 | `code` | uint | O | R for action 4. |
@@ -1301,7 +1405,7 @@ as `items`).
 | 0 | `hash` | Hash | R | Content hash the receiver vouches for. |
 | 1 | `size` | uint | R | |
 | 2 | `verify_level` | uint | R | 0 ledger entry plus existence check only; 1 buffered re-read after flush; 2 unbuffered re-read after flush on a volume that qualifies for final move (section 7). |
-| 3 | `commit_seq` | uint | O | PC: per-link, strictly increasing commit number. R for PC receipts. |
+| 3 | `commit_seq` | uint | O | PC: strictly increasing commit number of this link. R for PC receipts. |
 | 4 | `session_seq` | uint | O | PC: session in which this receipt (at this level) was produced. R for PC receipts. |
 | 5 | `ledger_id` | Id16 | O | PC ledger that holds the record. R for PC receipts. |
 | 6 | `root_id` | uint | O | PC: root that holds the file. R for PC receipts. |
@@ -1309,6 +1413,7 @@ as `items`).
 **`ITEM_RESULT` (0x32)**: `0 xfer_id` (uint, R); `1 key` (ItemKey, R); `2 committed` (bool, R);
 `3 receipt` (Receipt, R when committed); `4 code` (uint, R when not committed). The PC also uses it, with the
 original `xfer_id` or with `xfer_id = 0`, to upgrade an earlier receipt to a higher `verify_level` (6.3).
+The receiver of a receipt validates it (6.5 rule 6).
 
 **`XFER_CANCEL` (0x33)**: `0 xfer_id` (uint, R); `1 key` (ItemKey, O: absent = the whole transfer);
 `2 code` (uint, R).
@@ -1344,35 +1449,62 @@ The ack is sent after every item of the transfer has had its `ITEM_RESULT`.
 | 3 | `items` | array of FmItem | R | 1 to 500. |
 | 4 | `min_age` | uint | O | Stage 2 before a purge: seconds that must have passed on the PC's link clock since the PC recorded these items as trashed; otherwise status 5 (8.7). |
 
-**`FmItem`**: `0 key` (ItemKey, R); `1 hash` (Hash, R); `2 size` (uint, R); `3 commit_seq` (uint, R).
+**`FmItem`**: `0 key` (ItemKey, R); `1 hash` (Hash, R); `2 size` (uint, R); `3 commit_seq` (uint; R in
+stage 1; in stage 2 it MAY be absent, which asks the PC to re-anchor the item, 8.7).
 
 **`FM_VERIFY_RESULT` (0x41)**
 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
 | 0 | `batch_id` | uint | R | |
-| 1 | `results` | array of FmResult | R | Any subset of the batch, any order; each item appears exactly once over all parts. |
-| 2 | `more` | bool | R | True if another part with the same `id` follows. |
+| 1 | `results` | array of FmResult | R | Any subset of the batch (possibly empty), any order; each item appears exactly once over all parts. |
+| 2 | `more` | bool | R | True if another part with the same `id` follows (5.4). |
 | 3 | `ledger_id` | Id16 | R | |
-| 4 | `integrity_block` | bool | R | |
+| 4 | `integrity_block` | bool | R | The PC's flag at the moment this part was sent. |
 
-**`FmResult`**: `0 key` (ItemKey, R); `1 status` (uint, R: 1 ok, 2 missing, 3 mismatch, 4 not capable,
-5 too early, 6 unknown item, 7 read error, 8 blocked, 9 scan overdue); `2 proof` (Proof, R when status 1).
+**`FmResult`**
 
-**`FM_STATE` (0x42)**: `0 events` (array of FmEvent, R, 1 to 500). **`FmEvent`**: `0 key` (ItemKey, R);
-`1 hash` (Hash, R); `2 state` (uint, R: 1 trashed, 2 restored to the phone, 3 purged from the phone);
-`3 session_seq` (uint, R: session in which it happened); `4 expires` (Time, O: when the trash is expected
-to delete it; display only). **`FM_STATE_ACK` (0x43)**: `0 count` (uint, R).
+| Key | Field | Type | R/O | Notes |
+|---|---|---|---|---|
+| 0 | `key` | ItemKey | R | |
+| 1 | `status` | uint | R | 1 ok, 2 missing, 3 mismatch, 4 not capable, 5 too early, 6 unknown item, 7 read error, 8 blocked, 9 scan overdue, 10 removed by the PC user. |
+| 2 | `proof` | Proof | O | R when status 1. |
+| 3 | `copies` | uint | O | With status 1: number of verified copies the PC holds of this file, 1 or 2 (8.13). |
+| 4 | `receipt` | Receipt | O | Stage 2 re-anchor only: the fresh record the PC created (8.7). |
 
-**`REPAIR_REQUEST` (0x44)**: `0 items` (array of `{0 key (ItemKey, O), 1 hash (Hash, R), 2 size (uint, R)}`,
-R). **`REPAIR_REPLY` (0x45)**: `0 available` (array of Hash, R: the items the phone still holds with exactly
-that content; it then sends them in an `OFFER` with purpose 5); `1 unavailable` (array of Hash, R).
+**`FM_STATE` (0x42)**: `0 events` (array of FmEvent, R, 1 to 500). **`FM_STATE_ACK` (0x43)**: `0 count`
+(uint, R).
+
+**`FmEvent`**
+
+| Key | Field | Type | R/O | Notes |
+|---|---|---|---|---|
+| 0 | `key` | ItemKey | R | |
+| 1 | `hash` | Hash | R | |
+| 2 | `state` | uint | R | 1 trashed, 2 restored to its place on the phone, 3 gone from the phone. |
+| 3 | `session_seq` | uint | R | Session in which it happened (or in which the phone found out). |
+| 4 | `expires` | Time | O | State 1: when the trash is expected to delete it. The PC uses it only for display and for its own warnings (8.10). |
+| 5 | `cause` | uint | O | State 3: 1 purged by the app after the trash period (Android 7-10), 2 removed by the system trash at expiry, 3 not found: removed outside the app or never reached the trash. |
+
+**`REPAIR_REQUEST` (0x44)**: `0 items` (array of `{0 key (ItemKey, R), 1 hash (Hash, R), 2 size (uint, R)}`,
+R, 1 to 500). **`REPAIR_REPLY` (0x45)**: `0 results` (array of `{0 key (ItemKey, R), 1 available (bool, R)}`,
+R, same length and order). `available` is true only under the rule of 8.9(5): the phone's own ledger for
+this link has exactly this (`key`, `hash`) pair and the phone still holds that content. The phone then sends
+the available items in an `OFFER` with purpose 5.
+
+**`AUDIT` (0x46)**: `0 items` (array of `{0 key (ItemKey, R), 1 hash (Hash, R), 2 size (uint, R),
+3 commit_seq (uint, R)}`, R, 1 to 500). **`AUDIT_RESULT` (0x47)**: `0 results` (array of
+`{0 key (ItemKey, R), 1 status (uint, R)}`, R; any subset, each item exactly once over all parts);
+`1 more` (bool, R); `2 ledger_id` (Id16, R). Status: 1 present (a record of this link with this `key`,
+`hash`, `size` and `commit_seq` exists, and the file is at its recorded path with the recorded size and
+modification time; nothing is read), 2 file missing or changed in size or time, 6 no such record, 10 removed
+by the PC user (8.10).
 
 **`BROWSE` (0x50)**
 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
-| 0 | `root_id` | uint | R | Kind 1 (own backup), 2 or 3. |
+| 0 | `root_id` | uint | R | A root from `STATUS` (any kind). |
 | 1 | `dir` | Id16 | O | Entry handle of a directory from an earlier reply in this session; absent = top of the root. |
 | 2 | `cursor` | byte string | O | Opaque, from `next_cursor`; at most 64 bytes. |
 | 3 | `limit` | uint | O | 1 to 200; default 200. |
@@ -1384,13 +1516,15 @@ that content; it then sends them in an `OFFER` with purpose 5); `1 unavailable` 
 | Key | Field | Type | R/O | Notes |
 |---|---|---|---|---|
 | 0 | `entry` | Id16 | R | Opaque handle, valid for this session only (9.3). |
-| 1 | `name` | Name | R | Display name. Untrusted on the phone. |
+| 1 | `name` | Name | R | Display name: for a file the ledger knows, the name it had on the phone (not a neutralised stored name, 6.8). Untrusted on the phone. |
 | 2 | `kind` | uint | R | 1 directory, 2 file. |
 | 3 | `size` | uint | O | Files. |
 | 4 | `mtime` | Time | O | |
 | 5 | `mime` | text | O | |
 | 6 | `thumb` | bool | O | A thumbnail can be requested. |
 | 7 | `hash` | Hash | O | Present for files the ledger knows (lets the phone skip files it already has). |
+| 8 | `item_kind` | uint | O | For files the ledger knows: the `Item.kind` they were stored with. |
+| 9 | `snapshot_time` | Time | O | For snapshots (kinds 3, 4, 5). |
 
 **`THUMB` (0x52)**: `0 entry` (Id16, R); `1 max_px` (uint, R, at most 320).
 **`THUMB_REPLY` (0x53)**: `0 jpeg` (byte string, at most 65 536 bytes, R); `1 width` (uint, R);
