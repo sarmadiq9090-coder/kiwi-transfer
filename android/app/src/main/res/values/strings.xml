@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad) -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Default language: Arabic. English lives in values-en/. -->
+<resources>
+    <string name="app_name">كيوي ترانسفر</string>
+    <string name="tagline">إرسال الملفات بين الأجهزة، مباشرة وبخصوصية</string>
+</resources>

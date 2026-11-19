@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 FastKiwi (Sarmad)
+# SPDX-License-Identifier: Apache-2.0
+[workspace]
+resolver = "3"
+# Members are listed explicitly (a `core/*` glob is an error while core/ is empty).
+# Add each shared-core crate here as it lands, e.g. "core/kiwi-store".
+members = ["windows"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "Apache-2.0"
+authors = ["FastKiwi (Sarmad)"]
+repository = "https://github.com/fastkiwi/kiwi-transfer"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Release profile: small, reproducible (docs-build/REPRODUCIBLE.md).
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
