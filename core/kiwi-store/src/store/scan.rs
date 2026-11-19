@@ -407,7 +407,6 @@ impl Store {
         };
         let mut this_call = 0u64;
         let mut stopped = false;
-        let mut io_errors = 0u64;
 
         'records: loop {
             let batch = ledger.files_after(state.cursor_id, state.upper_id, 64)?;
@@ -466,17 +465,10 @@ impl Store {
                         findings.push(FindingKind::Unreadable, path, why.as_str(), true);
                     }
                     Probe::IoError(why) => {
+                        // A device error: `apply_probe` has blocked final move.
                         state.unreadable += 1;
-                        io_errors += 1;
+                        state.suspicious += 1;
                         findings.push(FindingKind::Unreadable, path, why.as_str(), true);
-                        // A disk that returns errors is failing, whatever the
-                        // files that can still be read look like.
-                        if io_errors == inner.cfg.mirror_policy.io_errors_to_block.max(1) {
-                            let reason = format!(
-                                "the destination disk returned {io_errors} I/O errors during an integrity scan (last: {why})"
-                            );
-                            ledger.block(BlockKind::DiskFailing, &reason, inner.now())?;
-                        }
                     }
                     Probe::Reparse(at) => {
                         state.suspicious += 1;
@@ -508,7 +500,7 @@ impl Store {
         if !stopped && !opts.skip_unexpected {
             let missing = MissingIndex::new(&ledger.missing_since(state.started_seq)?);
             let mut ledger_error = None;
-            let walked = inner.walk(cancel, &mut |visit| match visit {
+            let walked = inner.walk(inner.root(), cancel, &mut |visit| match visit {
                 Visit::File { dir_rel, entry, .. } => {
                     if is_temp_name(&entry.name) || ledger_error.is_some() {
                         return;

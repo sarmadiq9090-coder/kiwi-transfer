@@ -115,6 +115,17 @@ pub enum StoreError {
     /// again before it can send more.
     #[error("the device {0:?} is unpaired")]
     DeviceDetached(String),
+    /// The session number given for a device is not above its current one.
+    #[error("session {requested} is not above the device's current session {current}")]
+    SessionNotNewer {
+        /// The device's current session number.
+        current: u64,
+        /// The number that was asked for.
+        requested: u64,
+    },
+    /// The item key is empty or longer than 64 bytes.
+    #[error("the item key is not valid (it must be 1 to 64 bytes)")]
+    InvalidItemKey,
     /// A mirror could not be set up or used.
     #[error(transparent)]
     Mirror(#[from] crate::MirrorError),

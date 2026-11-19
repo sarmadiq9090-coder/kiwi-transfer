@@ -176,13 +176,13 @@ fn a_directory_swapped_for_a_junction_after_the_commit_fails_every_check() {
     assert_eq!(block.kind, BlockKind::IntegrityProblems);
     assert!(block.reason.contains("junction"), "{}", block.reason);
     assert!(matches!(
-        store.verify_for_deletion(&phone(), &hash, 1),
+        verify(&store, &hash, 1),
         Err(DeletionDenied::Blocked(_))
     ));
     // Clearing the block does not make the junction acceptable; it blocks again.
     store.clear_final_move_block("test").unwrap();
     assert!(matches!(
-        store.verify_for_deletion(&phone(), &hash, 1),
+        verify(&store, &hash, 1),
         Err(DeletionDenied::NotVerified(
             NotVerifiedReason::ReparsePoint(_)
         ))
@@ -211,7 +211,7 @@ fn a_directory_swapped_for_a_junction_after_the_commit_fails_every_check() {
     store
         .clear_final_move_block("the junction was removed")
         .unwrap();
-    assert!(store.verify_for_deletion(&phone(), &hash, 1).is_ok());
+    assert!(verify(&store, &hash, 1).is_ok());
 }
 
 #[test]
@@ -255,7 +255,9 @@ fn a_directory_swapped_for_a_junction_between_the_check_and_the_create_is_caught
 fn recovery_and_scan_never_enter_a_junction() {
     let w = World::new("not-entered");
     // Outside the root: something that looks exactly like our debris, and a file.
-    let bait = w.outside.join(".kiwi-tmp-1-1-0123456789abcdef.part");
+    let bait = w
+        .outside
+        .join(".kiwi-tmp-0123456789abcdef-1-0123456789abcdef.part");
     std::fs::write(&bait, b"not ours to delete").unwrap();
     std::fs::write(w.outside.join("precious.txt"), b"precious").unwrap();
     link_dir(&w.path("Linked"), &w.outside);
@@ -263,7 +265,7 @@ fn recovery_and_scan_never_enter_a_junction() {
     link_dir(&w.path("Pixel 8/Linked Too"), &w.outside);
     // A look-alike inside the root: named like debris, but not the engine's.
     std::fs::write(
-        w.path("Pixel 8/.kiwi-tmp-1-2-0123456789abcdef.part"),
+        w.path("Pixel 8/.kiwi-tmp-0123456789abcdef-2-0123456789abcdef.part"),
         b"not ours either",
     )
     .unwrap();
@@ -273,7 +275,7 @@ fn recovery_and_scan_never_enter_a_junction() {
     assert_eq!(report.orphan_temps_removed, 0);
     assert_eq!(
         report.unowned_temps,
-        vec!["Pixel 8/.kiwi-tmp-1-2-0123456789abcdef.part"]
+        vec!["Pixel 8/.kiwi-tmp-0123456789abcdef-2-0123456789abcdef.part"]
     );
     let mut skipped = report.reparse_points_skipped.clone();
     skipped.sort();
@@ -281,7 +283,10 @@ fn recovery_and_scan_never_enter_a_junction() {
     assert_eq!(std::fs::read(&bait).unwrap(), b"not ours to delete");
     assert_eq!(
         outside_listing(&w),
-        vec![".kiwi-tmp-1-1-0123456789abcdef.part", "precious.txt"]
+        vec![
+            ".kiwi-tmp-0123456789abcdef-1-0123456789abcdef.part",
+            "precious.txt"
+        ]
     );
 
     put(&store, "a.jpg", b"photo");
@@ -337,7 +342,7 @@ fn file_links_are_never_read_adopted_or_deleted() {
     let bait = w.outside.join("bait.bin");
     std::fs::write(&bait, b"bait").unwrap();
     assert!(link_file(
-        &w.path("Pixel 8/.kiwi-tmp-1-1-0123456789abcdef.part"),
+        &w.path("Pixel 8/.kiwi-tmp-0123456789abcdef-1-0123456789abcdef.part"),
         &bait
     ));
 

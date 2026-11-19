@@ -3,8 +3,8 @@
 //! from a mirror.
 //!
 //! ```text
-//! create    walk/create directories (no reparse points) -> create temp
-//!           -> note the intent in the ledger -> the temp is where it was put?
+//! create    walk/create directories (no reparse points) -> create temp,
+//!           named with this run's tag -> the temp is where it was put?
 //! write     temp file  +  incremental BLAKE3 of the bytes written
 //! seal      set mtime -> flush to device -> close
 //! read_back reopen UNBUFFERED, re-hash from disk
@@ -18,11 +18,13 @@
 //! # The only place a file is deleted
 //!
 //! [`Inner::delete_own_temp`] is the single call site of `Fs::remove_file` in
-//! the engine. It refuses any name that is not a temp-file name, and a
-//! temp-file name is one no stored file can have: the sanitiser never
-//! produces a name starting with `.kiwi-`, and a ledger row carrying one is
-//! rejected when it is read. A [`TempSlot`] deletes only the file it created
-//! itself, and not after that file was renamed into place.
+//! the engine. It refuses any name that is not exactly a temp-file name
+//! carrying a tag this ledger has recorded. Such a name is one no stored file
+//! can have: the sanitiser never produces a name starting with `.kiwi-`, and
+//! a ledger row carrying one is rejected when it is read. A [`TempSlot`]
+//! deletes only the file it created itself, and not after that file was
+//! renamed into place. What the recovery pass does with temp files left by a
+//! crash is in [`super::recovery`].
 
 use std::io;
 use std::ops::ControlFlow;
@@ -37,21 +39,19 @@ use crate::hash::ContentHash;
 use crate::ledger::FileRecord;
 use crate::sanitize::{SafeName, SafeRelPath};
 
-/// Most alternative names (` (2)`, ` (3)`, ...) tried before giving up.
-const MAX_NAME_ATTEMPTS: u32 = 10_000;
+/// The last alternative name tried is ` (999)`.
+const MAX_NAME_ATTEMPTS: u32 = 999;
 
 /// The location number of the destination itself. Mirrors use their ledger id.
 pub(crate) const PRIMARY: i64 = 0;
 
-/// Whether `name` is exactly the shape of a temp-file name the engine makes:
-/// `.kiwi-tmp-<hex>-<hex>-<16 hex>.part`, lower case.
-pub(crate) fn is_temp_name(name: &str) -> bool {
-    let Some(middle) = name
+/// The tag in a temp-file name, if `name` is exactly the shape of the names
+/// the engine makes: `.kiwi-tmp-<tag>-<n>-<random>.part`, where the tag and
+/// the random part are 16 lower-case hex digits and `n` is 1 to 16.
+pub(crate) fn temp_tag_of(name: &str) -> Option<&str> {
+    let middle = name
         .strip_prefix(TEMP_PREFIX)
-        .and_then(|rest| rest.strip_suffix(TEMP_SUFFIX))
-    else {
-        return false;
-    };
+        .and_then(|rest| rest.strip_suffix(TEMP_SUFFIX))?;
     let hex = |part: &str| {
         !part.is_empty()
             && part.len() <= 16
@@ -61,11 +61,19 @@ pub(crate) fn is_temp_name(name: &str) -> bool {
     };
     let mut parts = middle.split('-');
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(session), Some(counter), Some(random), None) => {
-            hex(session) && hex(counter) && hex(random) && random.len() == 16
+        (Some(tag), Some(counter), Some(random), None)
+            if hex(tag) && tag.len() == 16 && hex(counter) && hex(random) && random.len() == 16 =>
+        {
+            Some(tag)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// Whether `name` has the shape of a temp-file name. Having the shape does
+/// not make a file the engine's: its tag must also be one this ledger knows.
+pub(crate) fn is_temp_name(name: &str) -> bool {
+    temp_tag_of(name).is_some()
 }
 
 pub(crate) fn system_time_from_unix_ns(ns: i64) -> Option<SystemTime> {
@@ -92,7 +100,7 @@ pub(crate) enum Placed {
     /// sure); the temp file was not needed.
     Adopted {
         name: SafeName,
-        record: Option<FileRecord>,
+        record: Option<Box<FileRecord>>,
         unbuffered: bool,
     },
 }
@@ -101,7 +109,7 @@ pub(crate) enum Placed {
 pub(crate) enum Adoption {
     No,
     /// Yes; with the ledger record it already has, if any.
-    Yes(Option<FileRecord>),
+    Yes(Option<Box<FileRecord>>),
 }
 
 /// What [`TempSlot::place`] needs to know.
@@ -114,6 +122,10 @@ pub(crate) struct PlaceRequest<'a> {
     pub may_adopt: &'a dyn Fn(&SafeRelPath) -> Result<Adoption, StoreError>,
     /// For the error message when no name is free.
     pub display_name: &'a str,
+    /// The flush of the file under its new name and of its directory must
+    /// both succeed, or nothing is recorded. Required wherever a deletion on
+    /// a phone could ever rest on the file.
+    pub require_flush: bool,
 }
 
 /// A temp file the engine created, with everything registered for it. Dropping
@@ -124,7 +136,6 @@ pub(crate) struct TempSlot {
     dir_rel: SafeRelPath,
     dir_abs: PathBuf,
     temp_path: PathBuf,
-    temp_rel: String,
     temp: Option<Box<dyn TempFile>>,
     hasher: blake3::Hasher,
     written: u64,
@@ -132,9 +143,7 @@ pub(crate) struct TempSlot {
     created: bool,
     /// The temp file has been renamed into place and must not be deleted.
     renamed: bool,
-    /// The ledger has removed the intent row (together with recording the file).
-    intent_closed: bool,
-    /// Crash simulation: leave the temp file and its intent row behind.
+    /// Crash simulation: leave the temp file behind.
     leak: bool,
 }
 
@@ -142,19 +151,9 @@ impl Drop for TempSlot {
     fn drop(&mut self) {
         // Close the handle first: an open handle would block the delete.
         self.temp = None;
-        if self.created && !self.leak {
-            let mut gone = self.renamed;
-            if !self.renamed {
-                gone = self.inner.delete_own_temp(&self.temp_path);
-            }
-            // A temp file that could not be deleted keeps its intent row, so
-            // that the next recovery pass removes it.
-            if gone && !self.intent_closed {
-                let _ = self
-                    .inner
-                    .ledger
-                    .remove_partial(self.location, &self.temp_rel);
-            }
+        if self.created && !self.renamed && !self.leak {
+            // What cannot be deleted now is dealt with by the next recovery pass.
+            self.inner.delete_own_temp(&self.temp_path);
         }
         lock(&self.inner.in_flight).temps.remove(&self.temp_path);
     }
@@ -178,13 +177,11 @@ impl TempSlot {
             dir_rel: dir_actual,
             dir_abs,
             temp_path: PathBuf::new(),
-            temp_rel: String::new(),
             temp: None,
             hasher: blake3::Hasher::new(),
             written: 0,
             created: false,
             renamed: false,
-            intent_closed: false,
             leak: false,
         };
 
@@ -198,11 +195,6 @@ impl TempSlot {
             lock(&inner.in_flight).temps.insert(candidate.clone());
             match inner.fs.create_temp(&candidate) {
                 Ok(temp) => {
-                    slot.temp_rel = if slot.dir_rel.is_empty() {
-                        name
-                    } else {
-                        format!("{}/{name}", slot.dir_rel.to_slash_string())
-                    };
                     slot.temp_path = candidate;
                     slot.temp = Some(temp);
                     slot.created = true;
@@ -217,14 +209,6 @@ impl TempSlot {
                 }
             }
         }
-
-        // The intent row is written only after the file exists: a row is
-        // therefore proof that the engine itself created that file. (If the
-        // row cannot be written, the slot is dropped and removes the file it
-        // has just made.)
-        inner
-            .ledger
-            .add_partial(location, &slot.temp_rel, inner.now())?;
 
         // The directory was checked before the file was created. Check again
         // through the file itself: it must be exactly where it was put. This
@@ -247,11 +231,6 @@ impl TempSlot {
         &self.inner
     }
 
-    /// The temp file's path relative to the root, as noted in the ledger.
-    pub(crate) fn temp_rel(&self) -> &str {
-        &self.temp_rel
-    }
-
     /// The directory, as it is spelled on disk.
     pub(crate) fn dir_rel(&self) -> &SafeRelPath {
         &self.dir_rel
@@ -266,12 +245,7 @@ impl TempSlot {
         ContentHash::from(self.hasher.finalize())
     }
 
-    /// Tells the slot that the ledger has removed the intent row.
-    pub(crate) fn intent_closed(&mut self) {
-        self.intent_closed = true;
-    }
-
-    /// Leaves the temp file and its intent row behind, as a killed process would.
+    /// Leaves the temp file behind, as a killed process would.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn leak(&mut self) -> PathBuf {
         self.leak = true;
@@ -406,18 +380,31 @@ impl TempSlot {
                     inner.remember_name(&dir_key, key, candidate.as_str());
                     // Make the new name durable. A same-volume rename is a
                     // change to the directory only; it is on the device once
-                    // the file and its directory have been flushed. A file
-                    // system that cannot do either does not fail the commit;
-                    // the receipt and the ledger say whether both happened.
-                    let file_synced = inner.fs.sync_file(&target).is_ok();
-                    let dir_synced = inner.fs.sync_dir(&self.dir_abs).is_ok();
+                    // the file and its directory have been flushed.
+                    let flushed = inner
+                        .fs
+                        .sync_file(&target)
+                        .and_then(|()| inner.fs.sync_dir(&self.dir_abs));
+                    let dir_synced = match flushed {
+                        Ok(()) => true,
+                        // Where a deletion could ever rest on this file, a
+                        // name that is not known to be on the device is not
+                        // recorded: the file stays where it is, unrecorded,
+                        // and a retry finds and records it.
+                        Err(e) if req.require_flush => {
+                            return Err(StoreError::io("flush the new name of", target, e))
+                        }
+                        // Elsewhere (a file system that cannot flush a
+                        // directory) the record says that it did not happen.
+                        Err(_) => false,
+                    };
                     // And look: the file must be there under its new name,
                     // must be where it was put, and must still hash right.
                     // Nothing is recorded for a file that fails this.
                     let unbuffered = inner.confirm_in_place(&target, req.size, req.hash)?;
                     return Ok(Placed::Stored {
                         name: candidate,
-                        dir_synced: file_synced && dir_synced,
+                        dir_synced,
                         unbuffered,
                     });
                 }
@@ -495,16 +482,17 @@ impl Inner {
     /// Deletes one of the engine's own temp files: the only way the engine
     /// ever deletes anything. Returns whether the file is gone.
     ///
-    /// A name that is not a temp-file name is refused, whoever asks. A
-    /// scanner may hold the file for a moment, so a refusal by the file
-    /// system is retried briefly; what is left behind is removed by the next
-    /// recovery pass.
+    /// A name that is not exactly a temp-file name, or whose tag this ledger
+    /// has not recorded, is refused, whoever asks. A scanner may hold the
+    /// file for a moment, so a refusal by the file system is retried
+    /// briefly; what is left behind is dealt with by the next recovery pass.
     pub(crate) fn delete_own_temp(&self, path: &Path) -> bool {
-        let is_temp = path
+        let own = path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(is_temp_name);
-        if !is_temp {
+            .and_then(temp_tag_of)
+            .is_some_and(|tag| lock(&self.known_tags).contains(tag));
+        if !own {
             return false;
         }
         for attempt in 0..3u64 {
@@ -521,7 +509,7 @@ impl Inner {
     /// of the right size, the name must lead where the engine put it, and its
     /// content, read from the device again, must still hash to `hash`.
     /// Returns whether that read bypassed the cache.
-    fn confirm_in_place(
+    pub(crate) fn confirm_in_place(
         &self,
         target: &Path,
         size: u64,

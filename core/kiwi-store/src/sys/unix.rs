@@ -45,6 +45,7 @@ pub(crate) fn probe_volume(path: &Path) -> io::Result<VolumeInfo> {
         hot_plug: None,
         bus: None,
         volume_root: String::new(),
+        device_number: None,
     })
 }
 
@@ -120,6 +121,12 @@ pub(crate) fn other_writers(path: &Path) -> io::Result<Vec<String>> {
         out.push("everyone".to_owned());
     }
     Ok(out)
+}
+
+/// Makes a folder accessible to its owner only.
+pub(crate) fn make_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
 /// Unix has no hidden attribute (a leading dot is only a convention).

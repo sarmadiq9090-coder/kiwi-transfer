@@ -173,11 +173,12 @@ fn fail_every_operation(label: &str, prepare: fn(&World)) {
             Err(_) => failed += 1,
         }
         // Only steps that are explicitly "where possible" may fail without
-        // failing the commit: the mtime, the two flushes after the rename
-        // (the receipt says whether they happened), and reading an *existing*
-        // file to see whether it is identical (if that cannot be read, it is
-        // simply not adopted). The read under the final name is not one of
-        // them: the payload's own name is not an "existing file".
+        // failing the commit: the mtime, and reading an *existing* file to
+        // see whether it is identical (if that cannot be read, it is simply
+        // not adopted). The flushes after the rename and the read under the
+        // final name are not among them on a destination that can confirm a
+        // deletion: a name that is not known to be on the device is not
+        // recorded.
         if let Ok(receipt) = &result {
             let name = path
                 .file_name()
@@ -187,15 +188,13 @@ fn fail_every_operation(label: &str, prepare: fn(&World)) {
                 && !name.starts_with(kiwi_store::TEMP_PREFIX)
                 && name != "IMG_0001.jpg";
             assert!(
-                matches!(op, Op::SetMtime | Op::SyncDir | Op::SyncFile) || reads_existing_file,
+                matches!(op, Op::SetMtime) || reads_existing_file,
                 "{context}: the commit succeeded although a required step failed"
             );
-            if matches!(op, Op::SyncDir | Op::SyncFile) {
-                assert!(
-                    !receipt.dir_synced,
-                    "{context}: the receipt must not claim a flush that failed"
-                );
-            }
+            assert!(
+                receipt.dir_synced || receipt.outcome == CommitOutcome::AlreadyPresent,
+                "{context}: a stored file's new name must have been flushed"
+            );
         }
 
         // The phone retries. Whatever state the failure left, the retry must
@@ -413,6 +412,7 @@ fn files_in_flight_reserve_their_space() {
     w.fs.inject(When::Every(Op::FreeSpace), Action::FreeSpace(10 * mib));
     let big = FileRequest {
         device: &phone(),
+        key: b"item",
         name: "a.bin",
         size: 6 * mib,
         claimed_hash: None,
@@ -589,18 +589,43 @@ fn required_steps_fail_the_commit_and_optional_ones_do_not() {
     assert!(!w.path("Pixel 8/Brand New Folder").exists());
     assert_eq!(store.stats().unwrap().files_committed, 0);
 
-    // "Where possible" steps: the commit stands and the receipt says what was skipped.
+    // The new name must be flushed before the file is recorded: the file,
+    // then its directory. If either flush fails there is no record and no
+    // receipt; the file stays where it is and a retry records it.
+    for op in [Op::SyncFile, Op::SyncDir] {
+        w.fs.clear_rules();
+        w.fs.inject(When::Every(op), Action::Fail(ErrorKind::PermissionDenied));
+        match send(&store, &bytes) {
+            Err(StoreError::Io { op: failed, .. }) => {
+                assert_eq!(failed, "flush the new name of", "{op:?}")
+            }
+            other => panic!("{op:?}: expected an I/O error, got {other:?}"),
+        }
+        assert_eq!(store.stats().unwrap().files_committed, 0, "{op:?}");
+        assert_eq!(std::fs::read(w.path(STORED)).unwrap(), bytes, "{op:?}");
+        w.fs.clear_rules();
+        let retry = send(&store, &bytes).unwrap();
+        assert_eq!(retry.outcome, CommitOutcome::AlreadyPresent, "{op:?}");
+        assert_eq!(retry.rel_path, STORED, "{op:?}");
+        drop(retry);
+        // Start over for the next step.
+        std::fs::remove_file(w.path(STORED)).unwrap();
+        assert!(!store
+            .is_safely_stored(&phone(), &ContentHash::of_bytes(&bytes))
+            .unwrap()
+            .is_verified());
+        store.clear_final_move_block("test").unwrap();
+    }
+
+    // The one "where possible" step: the commit stands and the receipt says
+    // what was skipped.
     w.fs.clear_rules();
-    w.fs.inject(
-        When::Every(Op::SyncDir),
-        Action::Fail(ErrorKind::PermissionDenied),
-    );
     w.fs.inject(
         When::Every(Op::SetMtime),
         Action::Fail(ErrorKind::PermissionDenied),
     );
     let receipt = send(&store, &bytes).unwrap();
-    assert!(!receipt.dir_synced);
+    assert!(receipt.dir_synced);
     assert!(!receipt.mtime_applied);
     assert_eq!(std::fs::read(&receipt.abs_path).unwrap(), bytes);
 }
@@ -677,7 +702,7 @@ fn a_crash_between_rename_and_ledger_leaves_a_complete_file_that_a_retry_adopts(
     assert_eq!(receipt.rel_path, STORED);
     assert_eq!(
         receipt.session,
-        store.session(),
+        store.run_number(),
         "its age counts from the session that recorded it"
     );
     assert_eq!(w.files(), vec![STORED], "no ' (2)' copy");

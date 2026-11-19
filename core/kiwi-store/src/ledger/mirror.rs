@@ -7,7 +7,7 @@
 
 use rusqlite::{params, OptionalExtension, Row};
 
-use super::{append_event, path_key, to_i64, to_u64, FileRecord, Ledger, Result, FILE_COLUMNS};
+use super::{append_event, to_i64, to_u64, FileRecord, Ledger, Result, FILE_COLUMNS};
 
 /// A mirror destination as the ledger knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,8 +93,6 @@ pub(crate) struct MirrorCopy<'a> {
     /// Event kind: `mirror_copy`, `mirror_adopt` or `mirror_repaired`.
     pub kind: &'a str,
     pub detail: &'a str,
-    /// Temp file (relative to the mirror root) whose intent row goes with it.
-    pub partial: Option<&'a str>,
     pub durable: bool,
 }
 
@@ -422,7 +420,9 @@ impl Ledger {
     }
 
     /// Records a verified copy of a file on a mirror. Returns the event's
-    /// sequence number.
+    /// sequence number. The copy is marked to be read back once more at the
+    /// start of a later run: a disk pulled out without "eject" may lose its
+    /// last writes.
     pub(crate) fn record_mirror_copy(&self, copy: &MirrorCopy<'_>, now_ms: i64) -> Result<u64> {
         let session = self.session();
         self.write(copy.durable, |tx| {
@@ -441,10 +441,12 @@ impl Ledger {
             )
             .map_err(|e| self.map(e))?;
             tx.execute(
-                "INSERT INTO mirror_files(mirror_id, file_id, rel_path, state, copied_seq, verified_seq, verified_unix_ms, unbuffered)
-                 VALUES (?1, ?2, ?3, 1, ?4, ?4, ?5, ?6)
+                "INSERT INTO mirror_files(mirror_id, file_id, rel_path, state, copied_seq, copied_run, recheck,
+                                          verified_seq, verified_unix_ms, unbuffered)
+                 VALUES (?1, ?2, ?3, 1, ?4, (SELECT run_no FROM mirrors WHERE id = ?1), 1, ?4, ?5, ?6)
                  ON CONFLICT(mirror_id, file_id) DO UPDATE SET
                      rel_path = excluded.rel_path, state = 1, copied_seq = excluded.copied_seq,
+                     copied_run = excluded.copied_run, recheck = 1,
                      verified_seq = excluded.verified_seq, verified_unix_ms = excluded.verified_unix_ms,
                      unbuffered = excluded.unbuffered",
                 params![
@@ -457,13 +459,6 @@ impl Ledger {
                 ],
             )
             .map_err(|e| self.map(e))?;
-            if let Some(partial) = copy.partial {
-                tx.execute(
-                    "DELETE FROM partials WHERE location = ?1 AND path_key = ?2",
-                    params![copy.mirror_id, path_key(partial)],
-                )
-                .map_err(|e| self.map(e))?;
-            }
             Ok(seq)
         })
     }
@@ -576,24 +571,114 @@ impl Ledger {
         })
     }
 
+    // ----- runs ----------------------------------------------------------
+
+    /// Notes, flushed, that a run or a scan is about to write to a mirror.
+    /// Returns the new run number and whether the previous run on this
+    /// mirror never reached its end (it may have left temp files behind).
+    pub(crate) fn mirror_begin_run(&self, id: i64, now_ms: i64) -> Result<(u64, bool)> {
+        let session = self.session();
+        self.write(true, |tx| {
+            let (run_no, open): (i64, bool) = tx
+                .query_row(
+                    "SELECT run_no, run_open FROM mirrors WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| self.map(e))?;
+            let detail = format!("mirror {id}: run {}", run_no + 1);
+            append_event(tx, session, now_ms, "mirror_run", None, None, Some(&detail))
+                .map_err(|e| self.map(e))?;
+            tx.execute(
+                "UPDATE mirrors SET run_no = ?2, run_open = 1 WHERE id = ?1",
+                params![id, run_no + 1],
+            )
+            .map_err(|e| self.map(e))?;
+            Ok((to_u64(run_no + 1), open))
+        })
+    }
+
+    /// Notes that a run on a mirror reached its end with nothing left behind.
+    pub(crate) fn mirror_end_run(&self, id: i64) -> Result<()> {
+        self.write(false, |tx| {
+            tx.execute("UPDATE mirrors SET run_open = 0 WHERE id = ?1", [id])
+                .map(|_| ())
+                .map_err(|e| self.map(e))
+        })
+    }
+
+    /// Up to `limit` copies with `file id > cursor` that an earlier run wrote
+    /// and that have not been read back since.
+    pub(crate) fn mirror_rows_to_recheck(
+        &self,
+        mirror_id: i64,
+        current_run: u64,
+        cursor: i64,
+        limit: u32,
+    ) -> Result<Vec<MirrorFileRow>> {
+        self.mirror_rows(
+            "SELECT mirror_id, file_id, rel_path, state FROM mirror_files
+             WHERE mirror_id = ?1 AND recheck = 1 AND state = 1 AND copied_run < ?2 AND file_id > ?3
+             ORDER BY file_id LIMIT ?4",
+            &[&mirror_id, &to_i64(current_run), &cursor, &i64::from(limit)],
+        )
+    }
+
+    /// Notes that a copy was read back after the run that wrote it.
+    pub(crate) fn mirror_recheck_done(&self, mirror_id: i64, file_id: i64) -> Result<()> {
+        self.write(false, |tx| {
+            tx.execute(
+                "UPDATE mirror_files SET recheck = 0 WHERE mirror_id = ?1 AND file_id = ?2",
+                params![mirror_id, file_id],
+            )
+            .map(|_| ())
+            .map_err(|e| self.map(e))
+        })
+    }
+
+    /// The copies on one mirror of files that have exactly this size. Used to
+    /// recognise a temp file that is really a recorded copy whose rename was
+    /// lost.
+    pub(crate) fn mirror_rows_with_size(
+        &self,
+        mirror_id: i64,
+        size: u64,
+    ) -> Result<Vec<MirrorFileRow>> {
+        self.mirror_rows(
+            "SELECT mf.mirror_id, mf.file_id, mf.rel_path, mf.state FROM mirror_files mf
+             JOIN files f ON f.id = mf.file_id
+             WHERE mf.mirror_id = ?1 AND f.size = ?2 ORDER BY mf.file_id",
+            &[&mirror_id, &to_i64(size)],
+        )
+    }
+
+    /// How many verified copies of a file the active mirrors hold.
+    pub(crate) fn mirror_copies_of(&self, file_id: i64) -> Result<u64> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM mirror_files mf JOIN mirrors m ON m.id = mf.mirror_id
+             WHERE mf.file_id = ?1 AND mf.state = 1 AND m.active = 1",
+            [file_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(to_u64)
+        .map_err(|e| self.map(e))
+    }
+
     // ----- what is mirrored ---------------------------------------------
 
     /// Per active mirror and device: the files believed intact on the
-    /// destination that have no verified copy on that mirror. A shared file
-    /// counts for every device that answers for it.
+    /// destination that have no verified copy on that mirror.
     pub(crate) fn mirror_pending(&self) -> Result<Vec<PendingRow>> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "WITH claims(device_id, file_id) AS (
-                     SELECT device_id, id FROM files
-                     UNION ALL SELECT device_id, file_id FROM file_refs)
-                 SELECT m.id, c.device_id, COUNT(*), COALESCE(SUM(f.size), 0)
-                 FROM mirrors m CROSS JOIN files f JOIN claims c ON c.file_id = f.id
+                "SELECT m.id, f.device_id, COUNT(*), COALESCE(SUM(f.size), 0)
+                 FROM mirrors m CROSS JOIN files f
                  WHERE m.active = 1 AND f.state = 1
                    AND NOT EXISTS (SELECT 1 FROM mirror_files mf
                                    WHERE mf.mirror_id = m.id AND mf.file_id = f.id AND mf.state = 1)
-                 GROUP BY m.id, c.device_id ORDER BY m.id, c.device_id",
+                 GROUP BY m.id, f.device_id ORDER BY m.id, f.device_id",
             )
             .map_err(|e| self.map(e))?;
         let rows = stmt
@@ -611,20 +696,18 @@ impl Ledger {
     }
 
     /// For one device: how many of its files have how many copies believed
-    /// good (the destination's copy plus one per active mirror). Returns
-    /// pairs of (number of copies, number of files).
+    /// good (the destination's copy plus one per active mirror). Files the
+    /// PC user acknowledged as removed are not counted. Returns pairs of
+    /// (number of copies, number of files).
     pub(crate) fn copy_counts(&self, device: &str) -> Result<Vec<(u64, u64)>> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "WITH claims(file_id) AS (
-                     SELECT id FROM files WHERE device_id = ?1
-                     UNION SELECT file_id FROM file_refs WHERE device_id = ?1)
-                 SELECT copies, COUNT(*) FROM (
+                "SELECT copies, COUNT(*) FROM (
                      SELECT (CASE WHEN f.state = 1 THEN 1 ELSE 0 END)
                           + (SELECT COUNT(*) FROM mirror_files mf JOIN mirrors m ON m.id = mf.mirror_id
                              WHERE mf.file_id = f.id AND mf.state = 1 AND m.active = 1) AS copies
-                     FROM files f JOIN claims c ON c.file_id = f.id)
+                     FROM files f WHERE f.device_id = ?1 AND f.fm_state <> 3)
                  GROUP BY copies ORDER BY copies",
             )
             .map_err(|e| self.map(e))?;
@@ -635,50 +718,28 @@ impl Ledger {
             .map_err(|e| self.map(e))
     }
 
-    /// The device's oldest record (by its own commit sequence number) of a
-    /// file that is believed intact on the destination and has no verified
-    /// copy on any active mirror.
+    /// The device's oldest file (by commit number) that is believed intact
+    /// on the destination and has no verified copy on any active mirror.
     pub(crate) fn oldest_unmirrored(&self, device: &str) -> Result<Option<FileRecord>> {
-        let own = {
-            let conn = self.lock();
-            let sql = format!(
-                "SELECT {FILE_COLUMNS} FROM files AS f
-                 WHERE f.device_id = ?1 AND f.state = 1 AND NOT {HAS_MIRROR_COPY}
-                 ORDER BY f.committed_seq, f.id LIMIT 1"
-            );
-            self.query_files(&conn, &sql, &[&device])?
-                .into_iter()
-                .next()
-        };
-        let claimed = self.oldest_unmirrored_claim(device)?;
-        Ok(match (own, claimed) {
-            (Some(a), Some(b)) => Some(if a.committed_seq <= b.committed_seq {
-                a
-            } else {
-                b
-            }),
-            (a, b) => a.or(b),
-        })
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT {FILE_COLUMNS} FROM files AS f
+             WHERE f.device_id = ?1 AND f.state = 1 AND NOT {HAS_MIRROR_COPY}
+             ORDER BY f.committed_seq, f.id LIMIT 1"
+        );
+        Ok(self
+            .query_files(&conn, &sql, &[&device])?
+            .into_iter()
+            .next())
     }
 
-    fn oldest_unmirrored_claim(&self, device: &str) -> Result<Option<FileRecord>> {
-        let file_id: Option<i64> = {
-            let conn = self.lock();
-            conn.query_row(
-                &format!(
-                    "SELECT r.file_id FROM file_refs r JOIN files f ON f.id = r.file_id
-                     WHERE r.device_id = ?1 AND f.state = 1 AND NOT {HAS_MIRROR_COPY}
-                     ORDER BY r.committed_seq, r.id LIMIT 1"
-                ),
-                [device],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| self.map(e))?
-        };
-        match file_id {
-            Some(id) => self.claim_on_file(id, device),
-            None => Ok(None),
-        }
+    /// How many mirrors are active.
+    pub(crate) fn active_mirror_count(&self) -> Result<u64> {
+        let conn = self.lock();
+        conn.query_row("SELECT COUNT(*) FROM mirrors WHERE active = 1", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .map(to_u64)
+        .map_err(|e| self.map(e))
     }
 }

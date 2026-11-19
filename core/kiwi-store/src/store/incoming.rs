@@ -35,6 +35,9 @@ use crate::fsops::Checkpoint;
 use crate::hash::ContentHash;
 use crate::ledger::{FileState, NewFile};
 use crate::sanitize::{sanitize_rel_path, utf16_len, SafeName, SafeRelPath, NEUTRAL_SUFFIX};
+
+/// Longest item key accepted, in bytes.
+const MAX_ITEM_KEY_BYTES: usize = 64;
 use crate::template::{CaptureTime, CivilDate, TemplateContext};
 
 /// One file the peer wants to store.
@@ -42,6 +45,12 @@ use crate::template::{CaptureTime, CivilDate, TemplateContext};
 pub struct FileRequest<'a> {
     /// The paired device sending the file. Must be registered.
     pub device: &'a DeviceId,
+    /// The item key: the phone's identifier of this version of this source
+    /// file, 1 to 64 bytes, opaque to the store. It is recorded with the
+    /// file, and it is what the phone names, together with the hash, the
+    /// size and the commit number, when it later asks whether it may delete
+    /// its copy.
+    pub key: &'a [u8],
     /// The file's relative path as the peer names it, e.g.
     /// `DCIM/Camera/IMG_0001.jpg`. Untrusted; sanitised here.
     pub name: &'a str,
@@ -84,10 +93,11 @@ pub struct CommitReceipt {
     pub hash: ContentHash,
     /// Size in bytes.
     pub size: u64,
-    /// The sending device's commit sequence number for the file: the number
-    /// of the ledger event that recorded it for this device.
+    /// The commit number of the file: counted per device (1, 2, 3, ...), and
+    /// never issued twice to the same device. The phone keeps it with its
+    /// receipt.
     pub seq: u64,
-    /// Session in which the file was recorded for this device.
+    /// The device's session in which the file was recorded.
     pub session: u64,
     /// The ledger record had been flushed to the device when this receipt was
     /// made. Always true for [`IncomingFile::finish`]. After
@@ -102,8 +112,8 @@ pub struct CommitReceipt {
     pub verified_unbuffered: bool,
     /// The requested modification time was applied.
     pub mtime_applied: bool,
-    /// The file's type is shell-active; it was stored with
-    /// [`NEUTRAL_SUFFIX`] appended to its name.
+    /// The file's name is shell-active; the sanitiser stored it with
+    /// [`NEUTRAL_SUFFIX`] appended. The ledger keeps the name the phone sent.
     pub neutralised: bool,
 }
 
@@ -138,7 +148,9 @@ struct ActiveFile {
     slot: TempSlot,
     reservation: Reservation,
     claimed: Option<ContentHash>,
+    key: Vec<u8>,
     name: SafeName,
+    /// The name exactly as the phone sent it.
     source_name: String,
     mtime_unix_ns: Option<i64>,
 }
@@ -179,6 +191,9 @@ impl Store {
             source,
         };
 
+        if req.key.is_empty() || req.key.len() > MAX_ITEM_KEY_BYTES {
+            return Err(StoreError::InvalidItemKey);
+        }
         let device = inner
             .ledger
             .device(req.device.as_str())?
@@ -217,9 +232,17 @@ impl Store {
             })
             .map_err(unsafe_name)?;
 
+        // Every file lies below its device's own folder, whatever the layout
+        // says: two phones never share a path, and a record of one phone
+        // never names a file in another phone's folder.
+        let dir_rel = if inner.cfg.layout.starts_with_device() {
+            dir_rel
+        } else {
+            SafeRelPath::from_components(vec![device_folder.clone()]).join_path(&dir_rel)
+        };
+
         let root_len = utf16_len(&inner.dest.display_root());
-        let longest_name =
-            (name.utf16_len() + utf16_len(NEUTRAL_SUFFIX)).max(TEMP_PREFIX.len() + 64);
+        let longest_name = name.utf16_len().max(TEMP_PREFIX.len() + 64);
         let path_len = root_len + 1 + dir_rel.utf16_len() + 1 + longest_name;
         if path_len > MAX_PATH_UTF16 {
             return Err(StoreError::PathTooLong {
@@ -307,8 +330,9 @@ impl Store {
                 slot,
                 reservation,
                 claimed: req.claimed_hash,
+                key: req.key.to_vec(),
                 name,
-                source_name: source.to_slash_string(),
+                source_name: req.name.to_owned(),
                 mtime_unix_ns: req.mtime_unix_ns,
             }),
         })
@@ -387,11 +411,13 @@ impl IncomingFile {
     /// again), so:
     ///
     /// * do not acknowledge the file to the phone before
-    ///   [`Store::flush_batch`] has returned;
+    ///   [`Store::flush_batch`] has returned (the receipts of a batch are
+    ///   sent only after the flush);
     /// * nothing the phone deletes may depend on it. The engine itself makes
     ///   sure of that: [`Store::verify_for_deletion`] flushes the ledger
-    ///   before it looks, and never confirms a file recorded in the session
-    ///   that is still running.
+    ///   before it looks, never confirms a file recorded in the device's
+    ///   session that is still running, and writes each confirmation in a
+    ///   flushed transaction of its own. A confirmation is never batched.
     ///
     /// The receipt has [`CommitReceipt::durable`] set to `false`.
     pub fn finish_batched(
@@ -451,24 +477,32 @@ impl IncomingFile {
         }
 
         let base = active.name.clone();
+        let owner = device.clone();
         let placed = active.slot.place(&PlaceRequest {
             hash: &stream_hash,
             size: declared,
-            // The collision suffix goes before the extension, the neutral
-            // suffix after it: "a (2).url.kiwi-safe" restores to "a (2).url".
-            name_for: &|n| base.with_collision_suffix(n).neutralised().0,
-            // An identical file may be used unless the ledger knows the path
-            // for other content (or under another spelling).
+            name_for: &|n| base.with_collision_suffix(n),
+            // An identical file already at the target path may be recorded
+            // instead of creating " (2)" (this is what makes a retry
+            // idempotent), unless the ledger knows the path for other
+            // content, under another spelling, or for another device.
             may_adopt: &|rel: &SafeRelPath| {
                 let record = inner.ledger.file_by_path_key(&rel.collision_key())?;
                 Ok(match record {
-                    Some(r) if r.hash != stream_hash || r.rel_path != rel.to_slash_string() => {
+                    Some(r)
+                        if r.hash != stream_hash
+                            || r.rel_path != rel.to_slash_string()
+                            || r.device != owner =>
+                    {
                         Adoption::No
                     }
-                    other => Adoption::Yes(other),
+                    other => Adoption::Yes(other.map(Box::new)),
                 })
             },
             display_name: active.name.as_str(),
+            // Where a deletion could ever rest on the file, a name that is
+            // not known to be on the device is not recorded.
+            require_flush: inner.dest.supports_final_move(),
         })?;
         let (name, existing, dir_synced, verified_unbuffered, adopted) = match placed {
             Placed::Stored {
@@ -482,7 +516,12 @@ impl IncomingFile {
                 unbuffered,
             } => (name, record, false, unbuffered, true),
         };
-        let neutralised = active.name.neutralised().1;
+        let neutralised = active.name.as_str().ends_with(NEUTRAL_SUFFIX)
+            && !active
+                .source_name
+                .to_lowercase()
+                .trim_end_matches(['.', ' '])
+                .ends_with(NEUTRAL_SUFFIX);
         let rel = active.slot.dir_rel().join(name);
         let rel_path = rel.to_slash_string();
         let abs_path = rel.under(inner.root());
@@ -495,8 +534,10 @@ impl IncomingFile {
         let now = inner.now();
         let (record, record_durable) = match existing {
             Some(existing) => {
-                // Already recorded with this content at this path, and just
-                // re-read from disk: refresh what the ledger believes.
+                let existing = *existing;
+                // Already recorded for this device with this content at this
+                // path, and just re-read from disk: refresh what the ledger
+                // believes. The receipt is the one the file already had.
                 if existing.state != FileState::Committed {
                     inner.ledger.set_state(
                         existing.id,
@@ -505,37 +546,13 @@ impl IncomingFile {
                         now,
                     )?;
                 }
-                if existing.device == device {
-                    inner.ledger.mark_verified(
-                        existing.id,
-                        "duplicate_received",
-                        Some(&device),
-                        now,
-                    )?;
-                    (existing, true)
-                } else {
-                    // Another device committed this file first. This device
-                    // has now delivered the same bytes itself and they were
-                    // compared with the file on disk: it gets a record of its
-                    // own, which ages from now. Nothing recorded for the
-                    // other device is ever used to answer for this one.
-                    let (claim, new) = inner.ledger.record_claim(
-                        &existing,
-                        &device,
-                        &active.source_name,
-                        durable,
-                        now,
-                    )?;
-                    if !new {
-                        inner.ledger.mark_verified(
-                            existing.id,
-                            "duplicate_received",
-                            Some(&device),
-                            now,
-                        )?;
-                    }
-                    (claim, durable || !new)
-                }
+                inner.ledger.mark_verified(
+                    existing.id,
+                    "duplicate_received",
+                    Some(&device),
+                    now,
+                )?;
+                (existing, true)
             }
             None => {
                 let record = inner.ledger.record_commit(
@@ -550,15 +567,17 @@ impl IncomingFile {
                         dir_synced,
                         verified_unbuffered,
                         adopted,
-                        partial: Some(active.slot.temp_rel()),
+                        key: &active.key,
                         durable,
                     },
                     now,
                 )?;
-                active.slot.intent_closed();
                 (record, durable)
             }
         };
+        if record_durable {
+            inner.write_witness();
+        }
         // The ledger now counts the file; only then is the reservation released.
         drop(active);
 
@@ -573,7 +592,7 @@ impl IncomingFile {
             abs_path,
             hash: stream_hash,
             size: record.size,
-            seq: record.committed_seq,
+            seq: record.commit_no,
             session: record.committed_session,
             durable: record_durable,
             dir_synced,

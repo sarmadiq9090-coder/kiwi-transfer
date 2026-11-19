@@ -17,9 +17,11 @@
 //! `:` that selects an NTFS alternate data stream), bidirectional override and
 //! zero-width formatting characters become `_`, trailing dots and spaces are
 //! removed, reserved device names (`CON`, `NUL`, `COM1`, ... with or without an
-//! extension) and the engine's own `.kiwi-` prefix get a leading `_`, names
-//! are normalised to Unicode NFC, and over-long components are shortened while
-//! keeping the extension.
+//! extension) and the engine's own `.kiwi-` prefix get a leading `_`,
+//! shell-active names (shortcuts and their relatives, see
+//! [`is_shell_active`]) get the suffix `.kiwi-blocked`, names are normalised
+//! to Unicode NFC, and over-long components are shortened while keeping the
+//! extension.
 //!
 //! The output never needs Win32 path normalisation, so it can be appended to a
 //! `\\?\` (verbatim) root as is.
@@ -55,55 +57,68 @@ const MAX_KEPT_EXTENSION_UTF16: usize = 32;
 /// Peer names starting with it are neutralised.
 pub const RESERVED_PREFIX: &str = ".kiwi-";
 
-/// Suffix appended to the name of a shell-active file. See
-/// [`SafeName::neutralised`].
-pub const NEUTRAL_SUFFIX: &str = ".kiwi-safe";
+/// Suffix appended to a shell-active name (protocol constant `NEUTRAL_SUFFIX`).
+pub const NEUTRAL_SUFFIX: &str = ".kiwi-blocked";
 
 /// Extensions (lower case, without the dot) of the file types Windows
-/// Explorer parses when a folder is merely *displayed*: shortcuts and their
-/// relatives, whose icon or target may point at a remote server and make
-/// Explorer authenticate to it without anybody opening anything.
+/// Explorer reads when a folder is merely *listed*, to draw an icon or to
+/// resolve a target. For these types that can make the PC contact a remote
+/// server and disclose the user's credentials hash, or run a handler.
 pub const SHELL_ACTIVE_EXTENSIONS: &[&str] = &[
-    "url",
     "lnk",
     "pif",
-    "scf",
+    "url",
     "website",
+    "scf",
     "library-ms",
-    "search-ms",
     "searchconnector-ms",
+    "search-ms",
+    "appref-ms",
+    "settingcontent-ms",
+    "theme",
+    "themepack",
+    "deskthemepack",
 ];
 
-/// Whole file names (lower case) Explorer treats as instructions for the
-/// folder they are in.
-pub const SHELL_ACTIVE_NAMES: &[&str] = &["desktop.ini", "autorun.inf"];
+/// Whole names (lower case) Explorer treats as instructions for the folder
+/// they are in.
+pub const SHELL_ACTIVE_NAMES: &[&str] = &["desktop.ini", "autorun.inf", "thumbs.db"];
 
-/// Whether a file with this name must not be stored under this name: its
-/// type is shell-active (see [`SHELL_ACTIVE_EXTENSIONS`] and
-/// [`SHELL_ACTIVE_NAMES`]), or it already ends in [`NEUTRAL_SUFFIX`] (which
-/// is escaped by the same rule so that the scheme stays reversible).
+/// Whether `ext` (without the dot) is `{` + a GUID + `}`: Explorer shows a
+/// file or folder with such an extension as a shell object.
+fn is_guid_extension(ext: &str) -> bool {
+    let Some(inner) = ext.strip_prefix('{').and_then(|e| e.strip_suffix('}')) else {
+        return false;
+    };
+    inner.len() == 36
+        && inner.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// Whether a component is shell-active: its last extension is one of
+/// [`SHELL_ACTIVE_EXTENSIONS`] or has the form `.{GUID}`, or the whole name
+/// is one of [`SHELL_ACTIVE_NAMES`]; compared without regard to case.
+///
+/// The sanitiser appends [`NEUTRAL_SUFFIX`] to every such component, file or
+/// directory (`x.url` is stored as `x.url.kiwi-blocked`). Windows then sees
+/// an unknown type and Explorer leaves the file alone. The content is not
+/// touched, and the ledger keeps the name the phone sent, which is what a
+/// restore gives the file back under; the engine never renames a stored file
+/// back by itself.
 pub fn is_shell_active(name: &str) -> bool {
     let key = collision_key(name);
-    if key.ends_with(NEUTRAL_SUFFIX) || SHELL_ACTIVE_NAMES.contains(&key.as_str()) {
+    if SHELL_ACTIVE_NAMES.contains(&key.as_str()) {
         return true;
     }
     match key.rfind('.') {
-        Some(dot) => SHELL_ACTIVE_EXTENSIONS.contains(&&key[dot + 1..]),
+        Some(dot) => {
+            let ext = &key[dot + 1..];
+            SHELL_ACTIVE_EXTENSIONS.contains(&ext) || is_guid_extension(ext)
+        }
         None => false,
     }
-}
-
-/// Undoes [`SafeName::neutralised`]: the name a stored file had on the phone,
-/// if the stored name carries the suffix.
-///
-/// The scheme is: a name that [`is_shell_active`] is stored with
-/// [`NEUTRAL_SUFFIX`] appended, every other name is stored unchanged. A name
-/// that already ends in the suffix counts as shell-active, so no other name
-/// ever ends in it, and stripping the suffix once is the exact inverse.
-pub fn restore_neutralised_name(stored: &str) -> Option<&str> {
-    let start = stored.len().checked_sub(NEUTRAL_SUFFIX.len())?;
-    let (name, suffix) = (stored.get(..start)?, stored.get(start..)?);
-    (suffix.eq_ignore_ascii_case(NEUTRAL_SUFFIX) && !name.is_empty()).then_some(name)
 }
 
 /// Why a peer-supplied name was refused.
@@ -186,42 +201,6 @@ impl SafeName {
         let budget = MAX_COMPONENT_UTF16 - utf16_len(ext) - utf16_len(&suffix);
         let kept = take_utf16(stem, budget);
         SafeName(format!("{kept}{suffix}{ext}"))
-    }
-
-    /// The name a file from a phone is stored under: unchanged, unless it is
-    /// shell-active ([`is_shell_active`]), in which case [`NEUTRAL_SUFFIX`]
-    /// is appended (`x.url` is stored as `x.url.kiwi-safe`) and `true` is
-    /// returned with it. Windows then treats the file as an unknown type and
-    /// Explorer leaves it alone. [`restore_neutralised_name`] is the inverse.
-    ///
-    /// An over-long name is shortened first, keeping its own extension, so
-    /// that the result still fits in [`MAX_COMPONENT_UTF16`].
-    pub fn neutralised(&self) -> (SafeName, bool) {
-        if !is_shell_active(&self.0) {
-            return (self.clone(), false);
-        }
-        let room = MAX_COMPONENT_UTF16 - utf16_len(NEUTRAL_SUFFIX);
-        let mut name = shorten(&self.0, room);
-        name.push_str(NEUTRAL_SUFFIX);
-        (SafeName(name), true)
-    }
-
-    /// The n-th alternative for a name that is already in its stored form
-    /// (see [`SafeName::neutralised`]): like
-    /// [`SafeName::with_collision_suffix`], except that the number goes
-    /// before the original extension of a neutralised name, so
-    /// `x.url.kiwi-safe` becomes `x (2).url.kiwi-safe` and still restores to
-    /// a shortcut name.
-    pub fn stored_variant(&self, n: u32) -> SafeName {
-        match restore_neutralised_name(&self.0) {
-            Some(original) if n >= 2 => {
-                SafeName(original.to_owned())
-                    .with_collision_suffix(n)
-                    .neutralised()
-                    .0
-            }
-            _ => self.with_collision_suffix(n),
-        }
     }
 
     /// Re-validates a name read back from the ledger or from a directory
@@ -500,6 +479,11 @@ fn clean_component(raw: &str) -> Result<SafeName, SanitizeError> {
         let before = name.clone();
         if is_reserved_device_name(&name) || has_reserved_prefix(&name) {
             name.insert(0, '_');
+        }
+        // Shell-active names are neutralised. The suffix is itself not
+        // shell-active, so this happens at most once.
+        if is_shell_active(&name) {
+            name.push_str(NEUTRAL_SUFFIX);
         }
         name = shorten(&name, MAX_COMPONENT_UTF16);
         if name == before {
@@ -1218,40 +1202,43 @@ mod tests {
     }
 
     #[test]
-    fn shell_active_names_are_neutralised_reversibly() {
-        let stored = |name: &str| {
-            let (out, changed) = sanitize_component(name).unwrap().neutralised();
-            (out.as_str().to_owned(), changed)
-        };
+    fn shell_active_names_are_neutralised() {
         for (name, expected) in [
-            ("x.url", "x.url.kiwi-safe"),
-            ("X.URL", "X.URL.kiwi-safe"),
-            ("Holiday.LNK", "Holiday.LNK.kiwi-safe"),
-            ("a.pif", "a.pif.kiwi-safe"),
-            ("a.scf", "a.scf.kiwi-safe"),
-            ("a.website", "a.website.kiwi-safe"),
-            ("Docs.library-ms", "Docs.library-ms.kiwi-safe"),
-            ("q.search-ms", "q.search-ms.kiwi-safe"),
-            ("q.searchConnector-ms", "q.searchConnector-ms.kiwi-safe"),
-            ("desktop.ini", "desktop.ini.kiwi-safe"),
-            ("Desktop.INI", "Desktop.INI.kiwi-safe"),
-            ("AUTORUN.inf", "AUTORUN.inf.kiwi-safe"),
-            (".url", ".url.kiwi-safe"),
-            // Trailing dots and blanks are gone before the type is judged.
-            ("x.url. .", "x.url.kiwi-safe"),
-            // A name that already carries the suffix is escaped, not trusted.
-            ("x.url.kiwi-safe", "x.url.kiwi-safe.kiwi-safe"),
-            ("photo.jpg.KIWI-SAFE", "photo.jpg.KIWI-SAFE.kiwi-safe"),
+            ("x.url", "x.url.kiwi-blocked"),
+            ("X.URL", "X.URL.kiwi-blocked"),
+            ("Holiday.LNK", "Holiday.LNK.kiwi-blocked"),
+            ("a.pif", "a.pif.kiwi-blocked"),
+            ("a.scf", "a.scf.kiwi-blocked"),
+            ("a.website", "a.website.kiwi-blocked"),
+            ("Docs.library-ms", "Docs.library-ms.kiwi-blocked"),
+            ("q.search-ms", "q.search-ms.kiwi-blocked"),
+            ("q.searchConnector-ms", "q.searchConnector-ms.kiwi-blocked"),
+            ("app.appref-ms", "app.appref-ms.kiwi-blocked"),
+            ("s.SettingContent-ms", "s.SettingContent-ms.kiwi-blocked"),
+            ("dark.theme", "dark.theme.kiwi-blocked"),
+            ("dark.themepack", "dark.themepack.kiwi-blocked"),
+            ("dark.deskthemepack", "dark.deskthemepack.kiwi-blocked"),
+            ("desktop.ini", "desktop.ini.kiwi-blocked"),
+            ("Desktop.INI", "Desktop.INI.kiwi-blocked"),
+            ("AUTORUN.inf", "AUTORUN.inf.kiwi-blocked"),
+            ("Thumbs.db", "Thumbs.db.kiwi-blocked"),
+            (".url", ".url.kiwi-blocked"),
+            (
+                "Bin.{645FF040-5081-101B-9F08-00AA002F954E}",
+                "Bin.{645FF040-5081-101B-9F08-00AA002F954E}.kiwi-blocked",
+            ),
+            // Trailing dots and blanks are gone before the type is judged,
+            // and a stream name cannot hide the type.
+            ("x.url. .", "x.url.kiwi-blocked"),
+            ("x.jpg:evil.lnk", "x.jpg_evil.lnk.kiwi-blocked"),
+            // Reserved names and shell-active types at once.
+            ("NUL.lnk", "_NUL.lnk.kiwi-blocked"),
         ] {
-            let (out, changed) = stored(name);
-            assert_eq!(out, expected, "{name:?}");
-            assert!(changed, "{name:?}");
-            // What is stored is inert, is a name the sanitiser accepts as it
-            // is, and gives the original back.
-            assert!(!is_shell_active(&out) || out.ends_with(NEUTRAL_SUFFIX));
-            assert!(SafeName::from_stored(&out).is_some(), "{out:?}");
-            let original = sanitize_component(name).unwrap();
-            assert_eq!(restore_neutralised_name(&out), Some(original.as_str()));
+            let stored = sanitize_component(name).unwrap();
+            assert_eq!(stored.as_str(), expected, "{name:?}");
+            // What is stored is inert and is a name the sanitiser leaves alone.
+            assert!(!is_shell_active(stored.as_str()), "{name:?}");
+            assert!(SafeName::from_stored(stored.as_str()).is_some(), "{name:?}");
         }
         for name in [
             "photo.jpg",
@@ -1259,34 +1246,36 @@ mod tests {
             "x.urls",
             "x.url.jpg",
             "desktop.ini.txt",
-            "my desktop.ini.bak",
+            "my desktop.ini",
             "lnk.txt",
-            "kiwi-safe",
-            "x.kiwi-safely",
+            "x.kiwi-blocked",
+            "x.{645FF040-5081-101B-9F08-00AA002F954E",
+            "x.{not-a-guid-at-all-but-36-chars-long!}",
+            "{645FF040-5081-101B-9F08-00AA002F954E}",
         ] {
-            let (out, changed) = stored(name);
-            assert_eq!(out, name);
-            assert!(!changed, "{name:?}");
-            assert_eq!(restore_neutralised_name(&out), None, "{name:?}");
+            assert_eq!(sanitize_component(name).unwrap().as_str(), name);
         }
-        // The suffix alone is not a neutralised name.
-        assert_eq!(restore_neutralised_name(".kiwi-safe"), None);
+        // Directories are neutralised like files.
+        assert_eq!(
+            sanitize_rel_path("Albums/Trip.lnk/desktop.ini")
+                .unwrap()
+                .to_slash_string(),
+            "Albums/Trip.lnk.kiwi-blocked/desktop.ini.kiwi-blocked"
+        );
     }
 
     #[test]
-    fn neutralising_keeps_the_type_of_an_over_long_name() {
+    fn a_neutralised_name_still_fits_and_numbers_go_before_the_suffix() {
         let long = format!("{}.url", "n".repeat(300));
-        let (out, changed) = sanitize_component(&long).unwrap().neutralised();
-        assert!(changed);
-        assert!(out.utf16_len() <= MAX_COMPONENT_UTF16);
-        assert!(out.as_str().ends_with(".url.kiwi-safe"));
-        assert!(SafeName::from_stored(out.as_str()).is_some());
-        // Collision suffixes go before the type, so the original name stays a shortcut name.
+        let stored = sanitize_component(&long).unwrap();
+        assert!(stored.utf16_len() <= MAX_COMPONENT_UTF16);
+        assert!(stored.as_str().ends_with(NEUTRAL_SUFFIX));
+        assert!(SafeName::from_stored(stored.as_str()).is_some());
         let second = sanitize_component("a.url")
             .unwrap()
-            .with_collision_suffix(2)
-            .neutralised()
-            .0;
-        assert_eq!(second.as_str(), "a (2).url.kiwi-safe");
+            .with_collision_suffix(2);
+        assert_eq!(second.as_str(), "a.url (2).kiwi-blocked");
+        assert!(!is_shell_active(second.as_str()));
+        assert!(SafeName::from_stored(second.as_str()).is_some());
     }
 }

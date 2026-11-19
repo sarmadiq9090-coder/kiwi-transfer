@@ -159,9 +159,17 @@ pub struct TemplateContext<'a> {
 }
 
 impl Template {
-    /// `{year}/{month}`: one folder per month of capture.
+    /// `{device}/{year}/{month}`: per device, one folder per month of capture.
     pub fn by_date() -> Template {
-        Template::parse("{year}/{month}").expect("built-in template is valid")
+        Template::parse("{device}/{year}/{month}").expect("built-in template is valid")
+    }
+
+    /// Whether the first folder this template produces is the device's own
+    /// folder (`{device}` as the whole first segment). The store puts every
+    /// file below its device's folder whatever the template says: a template
+    /// that does not start with `{device}` is applied *inside* that folder.
+    pub fn starts_with_device(&self) -> bool {
+        matches!(self.segments.first(), Some(Segment::Pieces(p)) if p.as_slice() == [Piece::Device])
     }
 
     /// `{device}`: one folder per paired device.
@@ -403,6 +411,16 @@ mod tests {
 
     #[test]
     fn presets() {
+        assert!(Template::by_date().starts_with_device());
+        assert!(Template::per_device().starts_with_device());
+        assert!(Template::keep_phone_structure().starts_with_device());
+        assert!(!Template::parse("{year}/{device}")
+            .unwrap()
+            .starts_with_device());
+        assert!(!Template::parse("{device} photos/{year}")
+            .unwrap()
+            .starts_with_device());
+        assert!(!Template::parse("{phone_dir}").unwrap().starts_with_device());
         assert_eq!(
             render(
                 Template::by_date().source(),
@@ -410,7 +428,7 @@ mod tests {
                 date(2024, 3, 9),
                 "DCIM/Camera"
             ),
-            "2024/03"
+            "Pixel/2024/03"
         );
         assert_eq!(
             render(

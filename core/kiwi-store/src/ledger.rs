@@ -16,11 +16,12 @@
 //!   the b-tree structure, not the cell contents; this closes that gap.
 //! * Every change appends an event whose `seq` comes from an `AUTOINCREMENT`
 //!   key: strictly increasing, never reused, independent of the clock.
-//! * A session counter is incremented durably on every open and on every
-//!   explicit new session.
-//! * A commit high-water mark (`commit_hwm`) records the highest commit
-//!   sequence number ever issued; a peer holding a receipt above it proves a
-//!   rollback.
+//! * A run counter is incremented durably on every open. Each device has
+//!   its own session counter, advanced only when the transfer layer says that
+//!   device has begun a session.
+//! * Commit numbers are counted per device; the per-device high-water mark
+//!   (`commit_hwm`) never decreases. A phone holding a receipt above it
+//!   proves a rollback.
 //! * Records that may be written without an immediate flush (plain copies in a
 //!   batch, mirror bookkeeping, temp-file intents) are written with
 //!   `synchronous=NORMAL`; the next durable write flushes them too.
@@ -129,31 +130,33 @@ CREATE TABLE scan_state (
 const SCHEMA_V3: &str = "
 ALTER TABLE devices ADD COLUMN detached_seq INTEGER;
 ALTER TABLE devices ADD COLUMN commit_hwm INTEGER NOT NULL DEFAULT 0;
-UPDATE devices SET commit_hwm = COALESCE(
-    (SELECT MAX(committed_seq) FROM files WHERE files.device_id = devices.device_id), 0);
-INSERT INTO meta(key, value)
-    SELECT 'commit_hwm', CAST(COALESCE(MAX(committed_seq), 0) AS TEXT) FROM files;
+ALTER TABLE devices ADD COLUMN session_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE devices ADD COLUMN session_start_seq INTEGER NOT NULL DEFAULT 0;
 
-CREATE TABLE file_refs (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id           INTEGER NOT NULL REFERENCES files(id),
-    device_id         TEXT NOT NULL REFERENCES devices(device_id),
-    source_name       TEXT NOT NULL,
-    committed_seq     INTEGER NOT NULL,
-    committed_session INTEGER NOT NULL,
-    committed_unix_ms INTEGER NOT NULL,
-    row_check         BLOB NOT NULL CHECK (length(row_check) = 32),
-    UNIQUE (file_id, device_id)
-);
-CREATE INDEX file_refs_by_device ON file_refs(device_id);
+ALTER TABLE files ADD COLUMN item_key BLOB;
+ALTER TABLE files ADD COLUMN commit_no INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN fm_state INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN fm_expires INTEGER;
+ALTER TABLE files ADD COLUMN fm_seq INTEGER;
 
-CREATE TABLE partials (
-    location        INTEGER NOT NULL,
-    path_key        TEXT NOT NULL,
-    rel_path        TEXT NOT NULL,
-    created_session INTEGER NOT NULL,
-    created_unix_ms INTEGER NOT NULL,
-    PRIMARY KEY (location, path_key)
+-- Rows written before commit numbers were counted per device get theirs in
+-- the order they were committed, and every device starts in the session the
+-- whole store was in: nothing stored so far counts as 'an earlier session'
+-- until that device has begun a session of its own.
+UPDATE files SET commit_no = (
+    SELECT COUNT(*) FROM files AS older
+    WHERE older.device_id = files.device_id
+      AND (older.committed_seq < files.committed_seq
+           OR (older.committed_seq = files.committed_seq AND older.id <= files.id)));
+UPDATE devices SET
+    commit_hwm = COALESCE((SELECT MAX(commit_no) FROM files WHERE files.device_id = devices.device_id), 0),
+    session_seq = COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'session_counter'), 0);
+CREATE INDEX files_by_key ON files(device_id, item_key);
+
+CREATE TABLE temp_tags (
+    tag             TEXT PRIMARY KEY NOT NULL,
+    created_seq     INTEGER NOT NULL,
+    created_unix_ms INTEGER NOT NULL
 ) WITHOUT ROWID;
 
 CREATE TABLE mirrors (
@@ -169,7 +172,9 @@ CREATE TABLE mirrors (
     last_seen_session INTEGER NOT NULL,
     last_seen_unix_ms INTEGER NOT NULL,
     io_errors         INTEGER NOT NULL DEFAULT 0,
-    mismatches        INTEGER NOT NULL DEFAULT 0
+    mismatches        INTEGER NOT NULL DEFAULT 0,
+    run_no            INTEGER NOT NULL DEFAULT 0,
+    run_open          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE mirror_files (
@@ -178,6 +183,8 @@ CREATE TABLE mirror_files (
     rel_path         TEXT NOT NULL,
     state            INTEGER NOT NULL CHECK (state IN (1, 2, 3)),
     copied_seq       INTEGER NOT NULL,
+    copied_run       INTEGER NOT NULL,
+    recheck          INTEGER NOT NULL,
     verified_seq     INTEGER NOT NULL,
     verified_unix_ms INTEGER NOT NULL,
     unbuffered       INTEGER NOT NULL,
@@ -199,20 +206,59 @@ const EXPECTED_TABLES: &[&str] = &[
     "devices",
     "files",
     "scan_state",
-    "file_refs",
-    "partials",
+    "temp_tags",
     "mirrors",
     "mirror_files",
     "mirror_scan_state",
 ];
 
 const DEVICE_COLUMNS: &str = "device_id, display_name, folder_name, max_bytes, max_files, \
-     max_file_bytes, used_bytes, used_files, detached_seq, commit_hwm";
+     max_file_bytes, used_bytes, used_files, detached_seq, commit_hwm, session_seq, \
+     session_start_seq";
 
 const FILE_COLUMNS: &str =
     "id, device_id, rel_path, hash, size, mtime_unix_ns, source_name, state, \
      committed_seq, committed_session, committed_unix_ms, dir_synced, verified_unbuffered, \
-     last_verified_seq, last_verified_session, row_check";
+     last_verified_seq, last_verified_session, row_check, item_key, commit_no, fm_state, \
+     fm_expires";
+
+/// Where a stored file stands in a final move, as far as the PC has been told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FmState {
+    /// Nothing beyond the commit is known: the phone still has its copy.
+    None,
+    /// A deletion was confirmed for this file. The phone may move its copy
+    /// to its trash at any moment, and its report of that can be lost: the
+    /// file **may be the only copy**.
+    Reverified,
+    /// The phone reported that its copy is in its trash or gone: this file is
+    /// **the only copy**.
+    SoleCopy,
+    /// The PC user acknowledged that the file was removed or changed on
+    /// purpose. Nothing is confirmed for it any more.
+    UserRemoved,
+}
+
+impl FmState {
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            FmState::None => 0,
+            FmState::Reverified => 1,
+            FmState::SoleCopy => 2,
+            FmState::UserRemoved => 3,
+        }
+    }
+
+    fn from_code(code: i64) -> Option<FmState> {
+        match code {
+            0 => Some(FmState::None),
+            1 => Some(FmState::Reverified),
+            2 => Some(FmState::SoleCopy),
+            3 => Some(FmState::UserRemoved),
+            _ => None,
+        }
+    }
+}
 
 /// What the ledger believes about a recorded file. Belief only: every answer
 /// given to a caller is re-checked against the disk.
@@ -271,7 +317,7 @@ pub struct FileRecord {
     pub state: FileState,
     /// Sequence number of the commit event.
     pub committed_seq: u64,
-    /// Session in which it was committed.
+    /// The device's session in which it was committed.
     pub committed_session: u64,
     /// Wall-clock time of the commit (Unix milliseconds).
     pub committed_unix_ms: i64,
@@ -283,6 +329,16 @@ pub struct FileRecord {
     pub last_verified_seq: Option<u64>,
     /// Session of the last successful re-verification, if any.
     pub last_verified_session: Option<u64>,
+    /// The item key the phone gave the file (opaque; empty for rows written
+    /// before keys were recorded).
+    pub key: Vec<u8>,
+    /// The device's commit number for this file: what a receipt carries.
+    pub commit_no: u64,
+    /// Where the file stands in a final move.
+    pub fm: FmState,
+    /// When the phone's trash lets go of its copy, if the phone said
+    /// (Unix milliseconds).
+    pub fm_expires_unix_ms: Option<i64>,
 }
 
 /// Limits for one paired device. `None` means unlimited.
@@ -315,8 +371,14 @@ pub struct DeviceRecord {
     /// mirrored like any others; it only cannot receive or confirm anything
     /// until it is registered again.
     pub detached: bool,
-    /// Highest commit sequence number ever issued to this device.
+    /// Highest commit number ever issued to this device (or named by it:
+    /// see `Store::check_peer_commit_seq`). Never decreases.
     pub commit_hwm: u64,
+    /// The device's current session number. It advances only with
+    /// `Store::new_session` for this device.
+    pub session_seq: u64,
+    /// Sequence number of the ledger event that began that session.
+    pub session_start_seq: u64,
 }
 
 /// Why final move is blocked.
@@ -447,9 +509,8 @@ pub(crate) struct NewFile<'a> {
     pub verified_unbuffered: bool,
     /// The file was already on disk with identical content and is being adopted.
     pub adopted: bool,
-    /// Relative path of the temp file this commit came from; its intent row
-    /// is removed in the same transaction.
-    pub partial: Option<&'a str>,
+    /// The item key the phone gave the file.
+    pub key: &'a [u8],
     /// Flush the record to the device before returning. `false` is for plain
     /// copies in a batch: the record becomes durable with the next flush.
     pub durable: bool,
@@ -488,12 +549,12 @@ pub(crate) struct Ledger {
     fresh: bool,
 }
 
-mod claims;
 mod mirror;
+mod records;
 
-pub(crate) use claims::Restored;
 pub(crate) use mirror::{MirrorCopy, MirrorFileRow, NewMirror};
 pub use mirror::{MirrorFileState, MirrorRecord};
+pub(crate) use records::Restored;
 
 type Result<T> = std::result::Result<T, LedgerError>;
 
@@ -622,9 +683,9 @@ impl Ledger {
         })
     }
 
-    /// Starts a session: bumps the counter and logs it, durably. Called once
-    /// when the store is opened and again for every explicit new session.
-    /// Returns the new session number.
+    /// Starts a run of the store: bumps the run counter and logs it, durably.
+    /// Called once when the store is opened. Returns the run number. (A
+    /// device's sessions are something else: see `start_device_session`.)
     ///
     /// Being a flushed write, it also makes every batched record durable.
     pub(crate) fn start_session(&self, now_ms: i64) -> Result<u64> {
@@ -651,14 +712,16 @@ impl Ledger {
         // Usage counters are derived data; recompute them so they can never drift.
         tx.execute_batch(
             "UPDATE devices SET
-                 used_bytes = (SELECT COALESCE(SUM(size), 0) FROM files WHERE files.device_id = devices.device_id AND state <> 2)
-                            + (SELECT COALESCE(SUM(f.size), 0) FROM file_refs r JOIN files f ON f.id = r.file_id
-                               WHERE r.device_id = devices.device_id AND f.state <> 2),
-                 used_files = (SELECT COUNT(*) FROM files WHERE files.device_id = devices.device_id AND state <> 2)
-                            + (SELECT COUNT(*) FROM file_refs r JOIN files f ON f.id = r.file_id
-                               WHERE r.device_id = devices.device_id AND f.state <> 2);",
+                 used_bytes = (SELECT COALESCE(SUM(size), 0) FROM files WHERE files.device_id = devices.device_id AND state <> 2),
+                 used_files = (SELECT COUNT(*) FROM files WHERE files.device_id = devices.device_id AND state <> 2);",
         )
         .map_err(|e| self.map(e))?;
+        if meta_get(&tx, "ledger_id")
+            .map_err(|e| self.map(e))?
+            .is_none()
+        {
+            meta_set(&tx, "ledger_id", &random_id()).map_err(|e| self.map(e))?;
+        }
         tx.commit().map_err(|e| self.map(e))?;
         self.session.store(session, Ordering::SeqCst);
         self.session_start_seq.store(seq, Ordering::SeqCst);
@@ -795,9 +858,8 @@ impl Ledger {
         self.pending_batched.load(Ordering::SeqCst)
     }
 
-    /// Makes everything written so far durable. Returns the commit
-    /// high-water mark, which is durable when this returns.
-    pub(crate) fn flush(&self, now_ms: i64) -> Result<u64> {
+    /// Makes everything written so far durable.
+    pub(crate) fn flush(&self, now_ms: i64) -> Result<()> {
         let mut conn = self.lock();
         self.check_sync()?;
         let pending = self.pending_batched.load(Ordering::SeqCst);
@@ -815,16 +877,39 @@ impl Ledger {
             Some(&detail),
         )
         .map_err(|e| self.map(e))?;
-        let hwm = read_hwm(&tx).map_err(|e| self.map(e))?;
         tx.commit().map_err(|e| self.map(e))?;
         self.pending_batched.store(0, Ordering::SeqCst);
-        Ok(hwm)
+        Ok(())
     }
 
-    /// The highest commit sequence number ever issued by this ledger.
-    pub(crate) fn commit_hwm(&self) -> Result<u64> {
+    /// The random identifier of this ledger. A ledger that was found to have
+    /// been restored from an older copy gets a new one.
+    pub(crate) fn ledger_id(&self) -> Result<String> {
         let conn = self.lock();
-        read_hwm(&conn).map_err(|e| self.map(e))
+        meta_get(&conn, "ledger_id")
+            .map_err(|e| self.map(e))?
+            .ok_or_else(|| self.corrupt("the ledger has no identifier"))
+    }
+
+    /// Gives the ledger a new identifier (it was found to be a restored
+    /// copy), so that every receipt issued under the old one is void.
+    pub(crate) fn renew_ledger_id(&self, detail: &str, now_ms: i64) -> Result<String> {
+        let id = random_id();
+        let run = self.session();
+        self.write(true, |tx| {
+            append_event(
+                tx,
+                run,
+                now_ms,
+                "ledger_id_renewed",
+                None,
+                None,
+                Some(detail),
+            )
+            .map_err(|e| self.map(e))?;
+            meta_set(tx, "ledger_id", &id).map_err(|e| self.map(e))
+        })?;
+        Ok(id)
     }
 
     /// True if the database had no schema before this open.
@@ -888,9 +973,9 @@ impl Ledger {
     /// the future at some point, and was corrected).
     ///
     /// The high-water mark is lowered to `now_ms`, and every file whose commit
-    /// time lies in the future is re-stamped as committed now, in this
-    /// session: its age starts over, which can only delay a confirmation,
-    /// never hasten one. Returns the number of files re-stamped.
+    /// time lies in the future is re-stamped as committed now, in its
+    /// device's current session: its age starts over, which can only delay a
+    /// confirmation, never hasten one. Returns the number of files re-stamped.
     pub(crate) fn acknowledge_clock(&self, note: &str, now_ms: i64) -> Result<u64> {
         let mut conn = self.lock();
         // Read the affected rows through the validating loader, so that a
@@ -913,33 +998,30 @@ impl Ledger {
         )
         .map_err(|e| self.map(e))?;
         for rec in &future {
+            let device_session: i64 = tx
+                .query_row(
+                    "SELECT session_seq FROM devices WHERE device_id = ?1",
+                    [&rec.device],
+                    |r| r.get(0),
+                )
+                .map_err(|e| self.map(e))?;
             let check = row_check(
                 &rec.device,
                 &rec.rel_path,
                 &rec.hash,
                 rec.size,
                 seq,
-                self.session(),
+                to_u64(device_session),
                 now_ms,
             );
             tx.execute(
                 "UPDATE files SET committed_seq = ?2, committed_session = ?3, committed_unix_ms = ?4, row_check = ?5 WHERE id = ?1",
-                params![rec.id, to_i64(seq), to_i64(self.session()), now_ms, check.as_slice()],
+                params![rec.id, to_i64(seq), device_session, now_ms, check.as_slice()],
             )
             .map_err(|e| self.map(e))?;
         }
-        // The same for other devices' claims on shared files.
-        let restamped_refs = claims::restamp_refs(
-            &tx,
-            "r.committed_unix_ms > ?1",
-            &[&now_ms],
-            seq,
-            self.session(),
-            now_ms,
-        )
-        .map_err(|e| self.map(e))?;
         tx.commit().map_err(|e| self.map(e))?;
-        Ok(future.len() as u64 + restamped_refs)
+        Ok(future.len() as u64)
     }
 
     // ----- devices -------------------------------------------------------
@@ -1072,18 +1154,37 @@ impl Ledger {
     /// verified. Replaces a stale row for the same path, if there is one (the
     /// file it described is gone: the no-replace rename could not otherwise
     /// have succeeded).
+    ///
+    /// The file gets the device's next commit number and belongs to the
+    /// device's current session.
     pub(crate) fn record_commit(&self, new: &NewFile<'_>, now_ms: i64) -> Result<FileRecord> {
-        let session = self.session();
-        let (id, seq) = self.write(new.durable, |tx| {
+        let run = self.session();
+        let (id, seq, commit_no, device_session) = self.write(new.durable, |tx| {
+            let device: Option<(i64, i64)> = tx
+                .query_row(
+                    "SELECT session_seq, commit_hwm FROM devices WHERE device_id = ?1",
+                    [new.device],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| self.map(e))?;
+            let Some((device_session, hwm)) = device else {
+                return Err(self.corrupt(format!(
+                    "device {} vanished while one of its files was being recorded",
+                    new.device
+                )));
+            };
+            let (device_session, commit_no) = (to_u64(device_session), to_u64(hwm) + 1);
+
             // A stale row for the same path describes a file that is gone
             // (the no-replace rename could not have succeeded otherwise).
-            claims::supersede_stale(tx, session, now_ms, new.path_key, None)
+            records::supersede_stale(tx, run, now_ms, new.path_key, None)
                 .map_err(|e| self.map(e))?;
 
             let kind = if new.adopted { "adopt" } else { "commit" };
             let seq = append_event(
                 tx,
-                session,
+                run,
                 now_ms,
                 kind,
                 Some(new.device),
@@ -1097,13 +1198,14 @@ impl Ledger {
                 &new.hash,
                 new.size,
                 seq,
-                session,
+                device_session,
                 now_ms,
             );
             tx.execute(
                 "INSERT INTO files(device_id, rel_path, path_key, hash, size, mtime_unix_ns, source_name, state, state_seq,
-                                   committed_seq, committed_session, committed_unix_ms, dir_synced, verified_unbuffered, row_check)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                   committed_seq, committed_session, committed_unix_ms, dir_synced, verified_unbuffered,
+                                   row_check, item_key, commit_no)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     new.device,
                     new.rel_path,
@@ -1113,11 +1215,13 @@ impl Ledger {
                     new.mtime_unix_ns,
                     new.source_name,
                     to_i64(seq),
-                    to_i64(session),
+                    to_i64(device_session),
                     now_ms,
                     new.dir_synced,
                     new.verified_unbuffered,
                     check.as_slice(),
+                    new.key,
+                    to_i64(commit_no),
                 ],
             )
             .map_err(|e| self.map(e))?;
@@ -1128,15 +1232,12 @@ impl Ledger {
             )
             .map_err(|e| self.map(e))?;
             adjust_usage(tx, new.device, to_i64(new.size), 1).map_err(|e| self.map(e))?;
-            raise_hwm(tx, new.device, seq).map_err(|e| self.map(e))?;
-            if let Some(partial) = new.partial {
-                tx.execute(
-                    "DELETE FROM partials WHERE location = 0 AND path_key = ?1",
-                    [path_key(partial)],
-                )
-                .map_err(|e| self.map(e))?;
-            }
-            Ok((id, seq))
+            tx.execute(
+                "UPDATE devices SET commit_hwm = ?2 WHERE device_id = ?1",
+                params![new.device, to_i64(commit_no)],
+            )
+            .map_err(|e| self.map(e))?;
+            Ok((id, seq, commit_no, device_session))
         })?;
         if !new.durable {
             self.pending_batched.fetch_add(1, Ordering::SeqCst);
@@ -1152,12 +1253,16 @@ impl Ledger {
             source_name: new.source_name.to_owned(),
             state: FileState::Committed,
             committed_seq: seq,
-            committed_session: session,
+            committed_session: device_session,
             committed_unix_ms: now_ms,
             dir_synced: new.dir_synced,
             verified_unbuffered: new.verified_unbuffered,
             last_verified_seq: None,
             last_verified_session: None,
+            key: new.key.to_vec(),
+            commit_no,
+            fm: FmState::None,
+            fm_expires_unix_ms: None,
         })
     }
 
@@ -1183,7 +1288,13 @@ impl Ledger {
             .ok_or_else(|| self.corrupt(format!("file row {} has a malformed hash", raw.id)))?;
         let state = FileState::from_code(raw.state)
             .ok_or_else(|| self.corrupt(format!("file row {} has an unknown state", raw.id)))?;
-        if raw.size < 0 || raw.committed_seq < 0 || raw.committed_session < 0 {
+        let fm = FmState::from_code(raw.fm_state).ok_or_else(|| {
+            self.corrupt(format!(
+                "file row {} has an unknown final-move state",
+                raw.id
+            ))
+        })?;
+        if raw.size < 0 || raw.committed_seq < 0 || raw.committed_session < 0 || raw.commit_no < 0 {
             return Err(self.corrupt(format!("file row {} has negative counters", raw.id)));
         }
         let record = FileRecord {
@@ -1202,6 +1313,10 @@ impl Ledger {
             verified_unbuffered: raw.verified_unbuffered,
             last_verified_seq: raw.last_verified_seq.map(to_u64),
             last_verified_session: raw.last_verified_session.map(to_u64),
+            key: raw.item_key.unwrap_or_default(),
+            commit_no: to_u64(raw.commit_no),
+            fm,
+            fm_expires_unix_ms: raw.fm_expires,
         };
         let expected = row_check(
             &record.device,
@@ -1330,12 +1445,8 @@ impl Ledger {
         )
         .map_err(|e| self.map(e))?;
         match (old.occupies_space(), new_state.occupies_space()) {
-            (true, false) => {
-                adjust_usage_all(&tx, file_id, &device, -size, -1).map_err(|e| self.map(e))?
-            }
-            (false, true) => {
-                adjust_usage_all(&tx, file_id, &device, size, 1).map_err(|e| self.map(e))?
-            }
+            (true, false) => adjust_usage(&tx, &device, -size, -1).map_err(|e| self.map(e))?,
+            (false, true) => adjust_usage(&tx, &device, size, 1).map_err(|e| self.map(e))?,
             _ => {}
         }
         tx.commit().map_err(|e| self.map(e))?;
@@ -1583,6 +1694,10 @@ struct RawFile {
     last_verified_seq: Option<i64>,
     last_verified_session: Option<i64>,
     row_check: Vec<u8>,
+    item_key: Option<Vec<u8>>,
+    commit_no: i64,
+    fm_state: i64,
+    fm_expires: Option<i64>,
 }
 
 fn raw_file_from_row(r: &Row<'_>) -> rusqlite::Result<RawFile> {
@@ -1603,6 +1718,10 @@ fn raw_file_from_row(r: &Row<'_>) -> rusqlite::Result<RawFile> {
         last_verified_seq: r.get(13)?,
         last_verified_session: r.get(14)?,
         row_check: r.get(15)?,
+        item_key: r.get(16)?,
+        commit_no: r.get(17)?,
+        fm_state: r.get(18)?,
+        fm_expires: r.get(19)?,
     })
 }
 
@@ -1620,6 +1739,8 @@ fn device_from_row(r: &Row<'_>) -> rusqlite::Result<DeviceRecord> {
         used_files: to_u64(r.get(7)?),
         detached: r.get::<_, Option<i64>>(8)?.is_some(),
         commit_hwm: to_u64(r.get(9)?),
+        session_seq: to_u64(r.get(10)?),
+        session_start_seq: to_u64(r.get(11)?),
     })
 }
 
@@ -1645,42 +1766,20 @@ fn adjust_usage(
     .map(|_| ())
 }
 
-/// Adjusts the usage of a file's owner and of every device holding a claim on it.
-fn adjust_usage_all(
-    tx: &Transaction<'_>,
-    file_id: i64,
-    owner: &str,
-    bytes: i64,
-    files: i64,
-) -> rusqlite::Result<()> {
-    adjust_usage(tx, owner, bytes, files)?;
-    tx.execute(
-        "UPDATE devices SET used_bytes = MAX(0, used_bytes + ?2), used_files = MAX(0, used_files + ?3)
-         WHERE device_id IN (SELECT device_id FROM file_refs WHERE file_id = ?1)",
-        params![file_id, bytes, files],
-    )
-    .map(|_| ())
-}
-
-/// The commit high-water mark: the highest commit sequence number ever issued.
-fn read_hwm(conn: &Connection) -> rusqlite::Result<u64> {
-    Ok(meta_get(conn, "commit_hwm")?
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0))
-}
-
-/// Raises the global and the device's high-water marks to `seq`. They never go down.
-fn raise_hwm(tx: &Transaction<'_>, device: &str, seq: u64) -> rusqlite::Result<()> {
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES ('commit_hwm', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(excluded.value AS INTEGER) > CAST(value AS INTEGER)",
-        [seq.to_string()],
-    )?;
-    tx.execute(
-        "UPDATE devices SET commit_hwm = MAX(commit_hwm, ?2) WHERE device_id = ?1",
-        params![device, to_i64(seq)],
-    )?;
-    Ok(())
+/// 128 random bits as 32 hex digits. Used for identifiers, not for secrets.
+fn random_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(32);
+    for round in 0..2u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(round);
+        h.write_u32(std::process::id());
+        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            h.write_u128(d.as_nanos());
+        }
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
 }
 
 fn meta_get(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1855,7 +1954,7 @@ mod tests {
             dir_synced: true,
             verified_unbuffered: true,
             adopted: false,
-            partial: None,
+            key: b"item-key",
             durable: true,
         }
     }
@@ -1975,10 +2074,16 @@ mod tests {
         let dir = scratch("commit");
         let ledger = Ledger::open(&dir, 0).unwrap();
         device(&ledger, "d", "D");
+        assert_eq!(
+            ledger.start_device_session("d", None, 10).unwrap(),
+            Some(Ok(1))
+        );
         let rec = ledger
             .record_commit(&new_file("d", "D/a.jpg", "d/a.jpg", b"aaaa"), 50)
             .unwrap();
         assert_eq!(rec.committed_session, 1);
+        assert_eq!(rec.commit_no, 1);
+        assert_eq!(ledger.device("d").unwrap().unwrap().commit_hwm, 1);
         assert!(rec.committed_seq > ledger.session_start_seq());
         assert_eq!(
             ledger
@@ -2177,9 +2282,11 @@ mod tests {
         let dir = scratch("row-check");
         let ledger = Ledger::open(&dir, 0).unwrap();
         device(&ledger, "d", "D");
+        ledger.start_device_session("d", Some(7), 0).unwrap();
         let rec = ledger
             .record_commit(&new_file("d", "D/a", "d/a", b"data"), 1)
             .unwrap();
+        assert_eq!(rec.committed_session, 7);
         // Each of these would make an unsafe answer more likely if believed.
         for tamper in [
             "UPDATE files SET committed_session = 0",
@@ -2308,6 +2415,163 @@ mod tests {
             std::fs::read(dir.join("ledger.db.corrupt-1")).unwrap(),
             b"junk"
         );
+    }
+
+    #[test]
+    fn sessions_and_commit_numbers_are_counted_per_device() {
+        let dir = scratch("per-device");
+        let ledger = Ledger::open(&dir, 0).unwrap();
+        device(&ledger, "a", "A");
+        device(&ledger, "b", "B");
+        // Opening the ledger is nobody's session.
+        assert_eq!(ledger.device("a").unwrap().unwrap().session_seq, 0);
+        assert_eq!(
+            ledger.start_device_session("a", None, 1).unwrap(),
+            Some(Ok(1))
+        );
+        assert_eq!(
+            ledger.start_device_session("a", None, 1).unwrap(),
+            Some(Ok(2))
+        );
+        // The number agreed with the phone is taken as it is, if it is newer.
+        assert_eq!(
+            ledger.start_device_session("a", Some(40), 1).unwrap(),
+            Some(Ok(40))
+        );
+        assert_eq!(
+            ledger.start_device_session("a", Some(40), 1).unwrap(),
+            Some(Err(40))
+        );
+        assert_eq!(
+            ledger.start_device_session("a", Some(3), 1).unwrap(),
+            Some(Err(40))
+        );
+        assert_eq!(
+            ledger
+                .start_device_session("a", Some(records::MAX_SESSION_SEQ + 1), 1)
+                .unwrap(),
+            Some(Err(40))
+        );
+        assert_eq!(
+            ledger.start_device_session("nobody", None, 1).unwrap(),
+            None
+        );
+        // Another device's sessions are its own.
+        assert_eq!(ledger.device("b").unwrap().unwrap().session_seq, 0);
+
+        let a1 = ledger
+            .record_commit(&new_file("a", "A/1", "a/1", b"1"), 5)
+            .unwrap();
+        let b1 = ledger
+            .record_commit(&new_file("b", "B/1", "b/1", b"1"), 5)
+            .unwrap();
+        let a2 = ledger
+            .record_commit(&new_file("a", "A/2", "a/2", b"2"), 5)
+            .unwrap();
+        assert_eq!((a1.commit_no, a2.commit_no, b1.commit_no), (1, 2, 1));
+        assert_eq!((a1.committed_session, b1.committed_session), (40, 0));
+        assert_eq!(ledger.device("a").unwrap().unwrap().commit_hwm, 2);
+        assert_eq!(ledger.device("b").unwrap().unwrap().commit_hwm, 1);
+        // A raised mark is never handed out again, and never goes down.
+        ledger
+            .raise_commit_hwm("a", 10, "the phone holds commit 10", 6)
+            .unwrap();
+        ledger.raise_commit_hwm("a", 4, "lower", 6).unwrap();
+        let a3 = ledger
+            .record_commit(&new_file("a", "A/3", "a/3", b"3"), 7)
+            .unwrap();
+        assert_eq!(a3.commit_no, 11);
+        // Look-ups never cross devices, even for identical content.
+        let hash = ContentHash::of_bytes(b"1");
+        assert_eq!(
+            ledger.device_files_by_hash("a", &hash).unwrap(),
+            vec![a1.clone()]
+        );
+        assert_eq!(
+            ledger.device_files_by_hash("b", &hash).unwrap(),
+            vec![b1.clone()]
+        );
+        assert_eq!(
+            ledger.device_record("a", b"item-key", &hash, 1, 1).unwrap(),
+            Some(a1)
+        );
+        for (device, key, size, commit) in [
+            ("b", b"item-key".as_slice(), 1, 2),
+            ("a", b"other-key".as_slice(), 1, 1),
+            ("a", b"item-key".as_slice(), 2, 1),
+            ("a", b"item-key".as_slice(), 1, 2),
+        ] {
+            assert_eq!(
+                ledger
+                    .device_record(device, key, &hash, size, commit)
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn relaxed_writes_leave_the_ledger_on_flushed_writes() {
+        let dir = scratch("relaxed");
+        let ledger = Ledger::open(&dir, 0).unwrap();
+        device(&ledger, "d", "D");
+        let synchronous = |ledger: &Ledger| -> i64 {
+            ledger
+                .lock()
+                .query_row("PRAGMA synchronous", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(synchronous(&ledger), 2);
+        let mut batched = new_file("d", "D/a", "d/a", b"a");
+        batched.durable = false;
+        ledger.record_commit(&batched, 1).unwrap();
+        // The relaxed write is over; every later write is flushed again.
+        assert_eq!(synchronous(&ledger), 2);
+        assert_eq!(ledger.pending_batched(), 1);
+        let mut second = new_file("d", "D/b", "d/b", b"b");
+        second.durable = false;
+        ledger.record_commit(&second, 1).unwrap();
+        assert_eq!(ledger.pending_batched(), 2);
+        ledger.flush(2).unwrap();
+        assert_eq!(ledger.pending_batched(), 0);
+        assert_eq!(synchronous(&ledger), 2);
+        // A device session is a flushed write too.
+        ledger.record_commit(&batched_again(), 3).unwrap();
+        assert_eq!(ledger.pending_batched(), 1);
+        ledger.start_device_session("d", None, 4).unwrap();
+        assert_eq!(ledger.pending_batched(), 0);
+        assert!(ledger.events_after(0, 100).unwrap().iter().any(
+            |e| e.kind == "ledger_flushed" && e.detail.as_deref() == Some("2 batched records")
+        ));
+    }
+
+    fn batched_again() -> NewFile<'static> {
+        NewFile {
+            durable: false,
+            ..new_file("d", "D/c", "d/c", b"c")
+        }
+    }
+
+    #[test]
+    fn temp_tags_and_the_ledger_id_persist() {
+        let dir = scratch("tags");
+        let id = {
+            let ledger = Ledger::open(&dir, 0).unwrap();
+            assert!(ledger.temp_tags().unwrap().is_empty());
+            ledger.add_temp_tag("00112233aabbccdd", 1).unwrap();
+            ledger.add_temp_tag("00112233aabbccdd", 1).unwrap();
+            ledger.add_temp_tag("ffeeddccbbaa9988", 1).unwrap();
+            ledger.ledger_id().unwrap()
+        };
+        assert_eq!(id.len(), 32);
+        let ledger = Ledger::open(&dir, 0).unwrap();
+        assert_eq!(ledger.ledger_id().unwrap(), id);
+        let tags = ledger.temp_tags().unwrap();
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains("00112233aabbccdd") && tags.contains("ffeeddccbbaa9988"));
+        let renewed = ledger.renew_ledger_id("restored", 2).unwrap();
+        assert_ne!(renewed, id);
+        assert_eq!(ledger.ledger_id().unwrap(), renewed);
     }
 
     #[test]

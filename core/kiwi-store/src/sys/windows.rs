@@ -10,11 +10,13 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetAce, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+    GetAce, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE,
+    ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FindClose, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
@@ -41,6 +43,7 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
 const IOCTL_STORAGE_GET_HOTPLUG_INFO: u32 = 0x002D_0C14;
+const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
 
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_LOCK_VIOLATION: i32 = 33;
@@ -167,6 +170,7 @@ pub(crate) fn probe_volume(path: &Path) -> io::Result<VolumeInfo> {
         hot_plug: None,
         bus: None,
         volume_root,
+        device_number: None,
     };
 
     if matches!(drive, DriveKind::Fixed | DriveKind::Removable) {
@@ -177,6 +181,7 @@ pub(crate) fn probe_volume(path: &Path) -> io::Result<VolumeInfo> {
                 info.removable_media = Some(d.removable_media != 0);
                 info.bus = Some(bus_kind(d.bus_type));
             }
+            info.device_number = query_device_number(&device);
             if let Some(h) = query_hotplug(&device) {
                 info.hot_plug = Some(h.device_hotplug != 0 || h.media_hotplug != 0);
                 if h.media_removable != 0 {
@@ -249,6 +254,40 @@ fn query_device_descriptor(device: &File) -> Option<StorageDeviceDescriptor> {
         return None;
     }
     Some(out.head)
+}
+
+/// STORAGE_DEVICE_NUMBER.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct StorageDeviceNumber {
+    device_type: u32,
+    device_number: u32,
+    partition_number: u32,
+}
+
+/// The number of the physical disk behind a volume. A volume that spans
+/// several disks has none.
+fn query_device_number(device: &File) -> Option<u32> {
+    let mut out = StorageDeviceNumber::default();
+    let mut returned = 0u32;
+    // SAFETY: the out buffer is valid for the stated size; the handle is open.
+    let ok = unsafe {
+        DeviceIoControl(
+            device.as_raw_handle() as _,
+            IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            std::ptr::null(),
+            0,
+            (&mut out as *mut StorageDeviceNumber).cast(),
+            std::mem::size_of::<StorageDeviceNumber>() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    let _ = (out.device_type, out.partition_number);
+    if ok == 0 || (returned as usize) < std::mem::size_of::<StorageDeviceNumber>() {
+        return None;
+    }
+    Some(out.device_number)
 }
 
 fn query_hotplug(device: &File) -> Option<StorageHotplugInfo> {
@@ -521,6 +560,69 @@ pub(crate) fn other_writers(path: &Path) -> io::Result<Vec<String>> {
     out.sort();
     out.dedup();
     Ok(out)
+}
+
+/// Gives a folder a protected access list: full control for the current
+/// account, SYSTEM and the Administrators group, inherited by everything
+/// below, and nothing inherited from the parent.
+pub(crate) fn make_private(path: &Path) -> io::Result<()> {
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            // SAFETY: the descriptor was allocated by the conversion call.
+            unsafe { LocalFree(self.0.cast()) };
+        }
+    }
+
+    let me = current_user_sid()?;
+    // D: a DACL; P: protected (no inheritance from the parent); AI: children
+    // inherit automatically; each entry: allow, for this folder and all files
+    // and folders below (OICI), full access (FA).
+    let sddl = format!("D:PAI(A;OICI;FA;;;{me})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+    let sddl_w: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl_w` is NUL-terminated; `descriptor` is a valid out-pointer.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_w.as_ptr(),
+            1, // SDDL_REVISION_1
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let descriptor = Descriptor(descriptor);
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: the descriptor is valid; the out-pointers are valid.
+    if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) }
+        == 0
+        || present == 0
+        || dacl.is_null()
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let w = wide(path)?;
+    // SAFETY: `w` is NUL-terminated; `dacl` points into the descriptor, which
+    // lives until the end of this function.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    Ok(())
 }
 
 /// True for files carrying the hidden or the system attribute.

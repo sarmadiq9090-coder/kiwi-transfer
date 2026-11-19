@@ -95,6 +95,9 @@ pub struct VolumeInfo {
     pub bus: Option<BusKind>,
     /// The volume's mount point as the operating system names it.
     pub volume_root: String,
+    /// Number of the physical disk behind the volume, when the platform can
+    /// tell. Two volumes with the same number are partitions of one disk.
+    pub device_number: Option<u32>,
 }
 
 /// Why a destination is copy-only.
@@ -125,6 +128,10 @@ pub enum CopyOnlyReason {
     SyncFolder(SyncProvider),
     /// The folder is inside a folder the system empties by itself.
     ManagedFolder(ManagedFolder),
+    /// Accounts other than the current user, the system and the
+    /// administrators may change or delete what is in the folder. See
+    /// [`Destination::make_private`].
+    WritableByOthers,
 }
 
 /// A program that keeps a folder in step with a server.
@@ -184,7 +191,10 @@ pub enum DestinationWarning {
         folder: PathBuf,
     },
     /// Accounts other than the current user, the system and the
-    /// administrators may write to (and so delete from) the folder.
+    /// administrators may write to (and so delete from) the folder: another
+    /// person using this PC could delete the only copy of a photo. Files are
+    /// stored here, but a deletion is never confirmed until the folder has
+    /// been made private ([`Destination::make_private`]).
     WritableByOthers {
         /// Who, as far as they could be named.
         principals: Vec<String>,
@@ -352,7 +362,22 @@ fn detect_hazards(root: &Path, env: &HazardEnv) -> Vec<DestinationWarning> {
             break;
         }
     }
-    let in_bin = folded_components(root)
+    // Any user's Downloads folder, not only this account's.
+    let parts = folded_components(root);
+    let any_downloads = parts
+        .windows(3)
+        .any(|w| w[0] == "users" && w[2] == "downloads");
+    if any_downloads
+        && !out
+            .iter()
+            .any(|w| matches!(w, DestinationWarning::ManagedFolder { .. }))
+    {
+        out.push(DestinationWarning::ManagedFolder {
+            kind: ManagedFolder::Downloads,
+            folder: root.to_path_buf(),
+        });
+    }
+    let in_bin = parts
         .iter()
         .any(|part| part == "$recycle.bin" || part == "recycler");
     if in_bin {
@@ -386,7 +411,11 @@ fn narrow(volume_verdict: FinalMoveSupport, warnings: &[DestinationWarning]) -> 
             DestinationWarning::ManagedFolder { kind, .. } => {
                 return FinalMoveSupport::CopyOnly(CopyOnlyReason::ManagedFolder(*kind))
             }
-            _ => {}
+            DestinationWarning::WritableByOthers { .. } => {
+                return FinalMoveSupport::CopyOnly(CopyOnlyReason::WritableByOthers)
+            }
+            // Not knowing who may write is not a reason by itself.
+            DestinationWarning::AccessListUnreadable(_) => {}
         }
     }
     FinalMoveSupport::Supported
@@ -422,6 +451,9 @@ impl fmt::Display for CopyOnlyReason {
                 f,
                 "the destination is inside a folder the system empties by itself ({kind:?})"
             ),
+            Self::WritableByOthers => {
+                f.write_str("other accounts may change or delete files in the destination")
+            }
         }
     }
 }
@@ -631,6 +663,28 @@ impl Destination {
         &self.warnings
     }
 
+    /// The sync program that manages `path`, if one does, judged with the
+    /// same rules and the same environment as the destination itself.
+    pub(crate) fn sync_provider_of(&self, path: &Path) -> Option<SyncProvider> {
+        detect_hazards(path, &self.env)
+            .into_iter()
+            .find_map(|w| match w {
+                DestinationWarning::SyncFolder { provider, .. } => Some(provider),
+                _ => None,
+            })
+    }
+
+    /// Makes a folder private to the current account: full control for this
+    /// account, the system and the administrators, nothing inherited from
+    /// the parent, nobody else. This is the "make this folder private to my
+    /// account" action, and what an application should do to a destination
+    /// folder it creates. The engine never changes permissions by itself.
+    ///
+    /// On Unix the folder's mode becomes `0700`.
+    pub fn make_private(folder: &Path) -> std::io::Result<()> {
+        sys::make_private(folder)
+    }
+
     /// The resolved root. On Windows this is a verbatim (`\\?\`) path, which
     /// is what makes long paths work; use [`Destination::display_root`] for
     /// anything shown to a person.
@@ -690,21 +744,11 @@ impl Destination {
         };
         let (class, volume_verdict) = classify(&volume);
         // The folder is looked at again as well: a sync program may have been
-        // pointed at it since. The access list is not read again; who may
-        // write is a note for the user, not part of the verdict.
+        // pointed at it since, or its permissions changed.
         let mut warnings = detect_hazards(&self.root, &self.env);
-        warnings.extend(
-            self.warnings
-                .iter()
-                .filter(|w| {
-                    matches!(
-                        w,
-                        DestinationWarning::WritableByOthers { .. }
-                            | DestinationWarning::AccessListUnreadable(_)
-                    )
-                })
-                .cloned(),
-        );
+        if self.env.check_access {
+            warnings.extend(access_warning(&self.root));
+        }
         Ok(Destination {
             root: self.root.clone(),
             final_move: narrow(volume_verdict, &warnings),
@@ -743,6 +787,7 @@ mod tests {
             hot_plug: Some(false),
             bus: Some(BusKind::Sata),
             volume_root: r"\\?\E:\".into(),
+            device_number: Some(0),
         }
     }
 

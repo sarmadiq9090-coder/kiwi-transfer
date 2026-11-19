@@ -22,6 +22,7 @@ fn stores_a_file_end_to_end() {
     let mut incoming = store
         .begin_file(FileRequest {
             device: &phone(),
+            key: b"item",
             name: "DCIM/Camera/IMG_0001.jpg",
             size: bytes.len() as u64,
             claimed_hash: None,
@@ -48,7 +49,7 @@ fn stores_a_file_end_to_end() {
     assert_eq!(receipt.abs_path, w.path("Pixel 8/DCIM/Camera/IMG_0001.jpg"));
     assert_eq!(receipt.hash, hash);
     assert_eq!(receipt.size, 100_000);
-    assert_eq!(receipt.session, store.session());
+    assert_eq!(receipt.session, store.run_number());
     assert!(
         receipt.dir_synced,
         "the directory flush works on the platforms we test on"
@@ -83,15 +84,17 @@ fn stores_a_file_end_to_end() {
         .iter()
         .find(|e| e.kind == "commit")
         .expect("a commit event");
-    assert_eq!(commit.seq, receipt.seq);
     assert_eq!(commit.file_id, Some(receipt.file_id));
+    // The receipt carries the phone's own commit number, not the event's.
+    assert_eq!(receipt.seq, 1);
+    assert_eq!(store.commit_hwm(&phone()).unwrap(), 1);
     assert!(events.windows(2).all(|p| p[0].seq < p[1].seq));
 
     match store.is_safely_stored(&phone(), &hash).unwrap() {
         StoredStatus::Verified(file) => {
             assert_eq!(file.rel_path, receipt.rel_path);
             assert_eq!(file.abs_path, receipt.abs_path);
-            assert_eq!(file.committed_seq, receipt.seq);
+            assert_eq!(file.commit_seq, receipt.seq);
         }
         other => panic!("expected Verified, got {other:?}"),
     }
@@ -626,6 +629,8 @@ fn unicode_names_survive() {
 
 #[test]
 fn layouts_decide_the_folder() {
+    // Whatever the layout says, every file lies below its phone's own
+    // folder: a layout that does not begin with {device} is applied inside it.
     let mut w = World::new("layouts");
     w.configure =
         |cfg: &mut StoreConfig| cfg.layout = Template::parse("{year}/{month}/{device}").unwrap();
@@ -645,17 +650,17 @@ fn layouts_decide_the_folder() {
     let march = CaptureTime::utc(1_709_985_600);
     assert_eq!(
         put_with("DCIM/a.jpg", Some(march), None, b"a"),
-        "2024/03/Pixel 8/a.jpg"
+        "Pixel 8/2024/03/Pixel 8/a.jpg"
     );
     // The capture time wins over the modification time.
     assert_eq!(
         put_with("b.jpg", Some(march), Some(1_500_000_000_000_000_000), b"b"),
-        "2024/03/Pixel 8/b.jpg"
+        "Pixel 8/2024/03/Pixel 8/b.jpg"
     );
     // Without a capture time the modification time is used (2017-07-14).
     assert_eq!(
         put_with("c.jpg", None, Some(1_500_000_000_000_000_000), b"c"),
-        "2017/07/Pixel 8/c.jpg"
+        "Pixel 8/2017/07/Pixel 8/c.jpg"
     );
     // Local time decides the month: 2024-12-31T22:30Z is January in UTC+3.
     let new_year = CaptureTime {
@@ -664,14 +669,17 @@ fn layouts_decide_the_folder() {
     };
     assert_eq!(
         put_with("d.jpg", Some(new_year), None, b"d"),
-        "2025/01/Pixel 8/d.jpg"
+        "Pixel 8/2025/01/Pixel 8/d.jpg"
     );
     // No date at all.
-    assert_eq!(put_with("e.jpg", None, None, b"e"), "undated/Pixel 8/e.jpg");
+    assert_eq!(
+        put_with("e.jpg", None, None, b"e"),
+        "Pixel 8/undated/Pixel 8/e.jpg"
+    );
     // A nonsense timestamp is "no date", not a folder named after year 292277026596.
     assert_eq!(
         put_with("f.jpg", Some(CaptureTime::utc(i64::MAX)), None, b"f"),
-        "undated/Pixel 8/f.jpg"
+        "Pixel 8/undated/Pixel 8/f.jpg"
     );
 }
 
@@ -689,7 +697,7 @@ fn keep_phone_structure_and_per_device_layouts() {
     let store = w.open();
     assert_eq!(
         put(&store, "DCIM/Camera/b.jpg", b"b").rel_path,
-        "undated/b.jpg"
+        "Pixel 8/undated/b.jpg"
     );
     drop(store);
     w.configure = |cfg: &mut StoreConfig| cfg.layout = Template::keep_phone_structure();
@@ -746,7 +754,7 @@ fn a_destination_can_only_be_open_once() {
     assert!(matches!(w.try_open(), Err(StoreError::AlreadyOpen { .. })));
     drop(clone);
     let reopened = w.open();
-    assert_eq!(reopened.session(), 2);
+    assert_eq!(reopened.run_number(), 2);
 }
 
 #[test]
@@ -759,6 +767,7 @@ fn the_low_space_guard_uses_the_real_volume() {
     let size = free.saturating_add(1 << 40);
     let request = FileRequest {
         device: &phone(),
+        key: b"item",
         name: "huge.bin",
         size,
         claimed_hash: None,

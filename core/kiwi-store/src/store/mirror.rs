@@ -1,12 +1,15 @@
-//! The mirror: a second copy of every stored file on a second disk.
+//! The mirror: a second copy of every stored file on a second disk
+//! (protocol section 8.13). It is made by the PC alone; no phone ever sees it.
 //!
-//! A mirror is a folder on another volume, internal or external. Several may
-//! be registered (two external disks that take turns, for example). Each
-//! holds the stored files under the same relative paths as the destination,
-//! so it can be browsed, and used to put files back.
+//! A mirror is a folder on another physical disk, internal or external. Up to
+//! [`MAX_MIRRORS`] may be registered (external disks that take turns, for
+//! example). Each holds the stored files as plain files under the same
+//! relative paths and names as the destination, so it can be browsed, and
+//! used to put files back.
 //!
 //! ```text
-//! run_mirror   for every stored file without a verified copy on the mirror:
+//! run_mirror   check the marker -> read back what the previous run wrote
+//!              -> for every stored file without a verified copy here:
 //!              read the file from the destination (unbuffered), checking the
 //!              whole path and hashing as it is read, and write those very
 //!              bytes to a temp file on the mirror
@@ -24,22 +27,24 @@
 //! Rules that hold whatever happens:
 //!
 //! * **Nothing is ever overwritten, moved or deleted**, on either disk. A
-//!   repaired file is written next to the damaged one (`photo (2).jpg`) and
-//!   the ledger is pointed at the good copy; the damaged file stays where it
-//!   is, for a person to look at.
+//!   repaired file takes the original name if that is free (the file was
+//!   missing) and otherwise the next free name (`photo (2).jpg`), and the
+//!   ledger is pointed at the good copy; the damaged file stays where it is,
+//!   for a person to look at.
 //! * **The ledger's hash is the arbiter.** A copy repairs another only after
 //!   it has itself been read back from its disk and matched that hash. If
 //!   neither disk has a matching copy, nothing is repaired.
 //! * **The wrong disk is never written to.** Before every run the mirror's
 //!   marker file (a random id) and its volume serial number are compared
 //!   with the ledger; a folder that does not carry the marker is left alone.
-//! * **An absent disk is normal.** It is reported with the time since it was
-//!   last seen, nothing more.
-//! * **A failing disk blocks final move, and copying goes on.** I/O errors
-//!   or several mismatching files on either disk set the persistent block.
-//! * **Final move does not wait for the mirror** (the owner's decision). The
-//!   mirror is a second line of defence; what the phone may delete is decided
-//!   from the destination alone. [`Store::oldest_unmirrored_commit`] lets the
+//! * **An absent disk is normal** and blocks nothing. It is reported with the
+//!   time since it was last seen.
+//! * **A failing disk blocks final move, and copying goes on.** A damaged or
+//!   missing copy on a connected mirror, or any device error on either disk,
+//!   sets the persistent block. A repair does not clear it.
+//! * **Final move does not wait for the mirror.** What a phone may delete is
+//!   decided from the destination alone, and a proof is always computed from
+//!   the destination's file. [`Store::oldest_unmirrored_commit`] lets the
 //!   application warn while the phone's trash still holds the original.
 
 use std::io;
@@ -51,6 +56,7 @@ use super::pipeline::{Adoption, PlaceRequest, Placed, TempSlot, PRIMARY};
 use super::scan::{CancelToken, Throttle};
 use super::verify::Probe;
 use super::{lock, new_destination_id, DeviceId, Inner, Store, STORE_DIR};
+use crate::destination::{DriveKind, SyncProvider};
 use crate::error::{LedgerError, StoreError};
 use crate::fsops::{is_hard_io_error, Checkpoint, EntryKind};
 use crate::ledger::{
@@ -61,7 +67,10 @@ use crate::sanitize::{SafeName, SafeRelPath};
 use crate::sys;
 
 /// Name of the marker file inside a mirror's `.kiwi-store` folder.
-pub const MIRROR_MARKER_FILE: &str = "mirror";
+pub const MIRROR_MARKER_FILE: &str = "second-id";
+
+/// Most mirrors that may be active at once (protocol `MAX_SECOND_DISKS`).
+pub const MAX_MIRRORS: u64 = 4;
 
 const MARKER_MAX_BYTES: usize = 512;
 
@@ -72,28 +81,6 @@ const MAX_LISTED: usize = 200;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MirrorId(pub i64);
 
-/// When a disk counts as failing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MirrorPolicy {
-    /// This many I/O errors from one disk (during one run for the
-    /// destination; accumulated until the next clean scan for a mirror) block
-    /// final move.
-    pub io_errors_to_block: u64,
-    /// This many files on one mirror found different from what was written
-    /// there block final move. (One changed file on the destination always
-    /// blocks.)
-    pub mismatches_to_block: u64,
-}
-
-impl Default for MirrorPolicy {
-    fn default() -> Self {
-        MirrorPolicy {
-            io_errors_to_block: 3,
-            mismatches_to_block: 3,
-        }
-    }
-}
-
 /// Why a mirror could not be set up or addressed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -101,6 +88,9 @@ pub enum MirrorError {
     /// No mirror has this id.
     #[error("there is no mirror with id {0}")]
     Unknown(i64),
+    /// There are already [`MAX_MIRRORS`] active mirrors.
+    #[error("there are already {MAX_MIRRORS} second disks; remove one first")]
+    TooMany,
     /// The folder cannot be reached or examined.
     #[error("the mirror folder {path:?} cannot be used: {source}")]
     Unavailable {
@@ -119,12 +109,31 @@ pub enum MirrorError {
     /// The folder is the destination, inside it, or around it.
     #[error("the mirror folder {0:?} overlaps the destination")]
     OverlapsDestination(PathBuf),
-    /// The folder is on the destination's own volume.
+    /// The folder is on the destination's own physical disk (the same
+    /// volume, or another partition of the same disk).
     #[error(
-        "the mirror folder {0:?} is on the same volume as the destination; a second copy on \
-         the same disk protects nothing"
+        "the mirror folder {0:?} is on the same disk as the destination; a second copy on the \
+         same disk protects nothing"
     )]
-    SameVolume(PathBuf),
+    SameDisk(PathBuf),
+    /// It could not be established that the folder is on a different
+    /// physical disk than the destination. Unknown is not "different".
+    #[error("it cannot be told whether {0:?} is on a different disk than the destination")]
+    DiskUnidentified(PathBuf),
+    /// The folder is on a network location.
+    #[error("the mirror folder {0:?} is on a network location")]
+    Network(PathBuf),
+    /// The folder's file system is not NTFS, ReFS or exFAT.
+    #[error("the mirror folder's file system is {0}, not NTFS, ReFS or exFAT")]
+    Filesystem(String),
+    /// The folder is inside a cloud-synced folder.
+    #[error("the mirror folder {path:?} is inside a folder synced by {provider:?}")]
+    SyncFolder {
+        /// The folder.
+        path: PathBuf,
+        /// The program that manages it.
+        provider: SyncProvider,
+    },
     /// The folder already carries a mirror marker this store cannot accept.
     #[error("the folder {path:?} carries a mirror marker that is not this store's ({detail})")]
     ForeignMarker {
@@ -151,13 +160,13 @@ pub struct MirrorInfo {
     pub active: bool,
     /// Serial number of the volume it was created on.
     pub volume_serial: Option<u64>,
-    /// Session in which it was last present with the right identity.
-    pub last_seen_session: u64,
+    /// Run of the store in which it was last present with the right identity.
+    pub last_seen_run: u64,
     /// Wall-clock time of that moment (Unix milliseconds).
     pub last_seen_unix_ms: i64,
-    /// I/O errors on it since its last clean scan.
+    /// Device errors on it since its last clean scan.
     pub io_errors: u64,
-    /// Mismatching files on it since its last clean scan.
+    /// Copies on it found different from what was written, since then.
     pub mismatches: u64,
 }
 
@@ -170,7 +179,7 @@ impl From<MirrorRecord> for MirrorInfo {
             label: m.label,
             active: m.active,
             volume_serial: m.volume_serial,
-            last_seen_session: m.last_seen_session,
+            last_seen_run: m.last_seen_session,
             last_seen_unix_ms: m.last_seen_unix_ms,
             io_errors: m.io_errors,
             mismatches: m.mismatches,
@@ -186,8 +195,8 @@ pub struct MirrorAbsent {
     pub last_seen_unix_ms: i64,
     /// Seconds since then, by the wall clock.
     pub secs_since_seen: u64,
-    /// Sessions begun since then.
-    pub sessions_since_seen: u64,
+    /// Runs of the store (program starts) begun since then.
+    pub runs_since_seen: u64,
     /// What the operating system said.
     pub detail: String,
 }
@@ -245,7 +254,7 @@ impl MirrorPresence {
 pub struct MirrorPending {
     /// The mirror.
     pub mirror: MirrorId,
-    /// The device. A file two devices answer for counts for both.
+    /// The device.
     pub device: String,
     /// Number of files.
     pub files: u64,
@@ -257,7 +266,8 @@ pub struct MirrorPending {
 ///
 /// A "copy" is the file on the destination, if the last check found it
 /// intact, plus one for every active mirror whose copy was read back and
-/// matched. These are the ledger's beliefs; scans keep them honest.
+/// matched. These are the ledger's beliefs; scans keep them honest. Files the
+/// PC user acknowledged as removed are not counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CopyCounts {
     /// Files with no copy believed good anywhere.
@@ -277,11 +287,9 @@ pub struct UnmirroredCommit {
     pub rel_path: String,
     /// Size in bytes.
     pub size: u64,
-    /// The device's commit sequence number for it.
-    pub committed_seq: u64,
-    /// Session of the device's commit.
-    pub committed_session: u64,
-    /// Wall-clock time of the device's commit (Unix milliseconds).
+    /// The device's commit number for it.
+    pub commit_seq: u64,
+    /// Wall-clock time of the commit (Unix milliseconds).
     pub committed_unix_ms: i64,
     /// Seconds since then, by the wall clock (negative if the clock is off).
     pub age_secs: i64,
@@ -328,8 +336,16 @@ pub struct MirrorRun {
     pub mirror: MirrorId,
     /// Whether it could be used. If not, nothing else in here is set.
     pub presence: MirrorPresence,
-    /// Every stored file now has a verified copy on this mirror.
+    /// Every stored file now has a verified copy on this mirror, and what an
+    /// earlier run wrote has been read back: the disk may be disconnected.
     pub completed: bool,
+    /// Copies written by an earlier run that were read back at the start of
+    /// this one and matched.
+    pub rechecked: u64,
+    /// Copies written by an earlier run that were found gone or different
+    /// (a disk pulled out without "eject" loses its last writes). They were
+    /// queued again.
+    pub recheck_failed: u64,
     /// Files copied.
     pub copied: u64,
     /// Their total size.
@@ -342,7 +358,7 @@ pub struct MirrorRun {
     pub skipped_source: u64,
     /// Files that could not be copied (including the skipped ones).
     pub failed: u64,
-    /// I/O errors from the mirror during this run.
+    /// Device errors from the mirror during this run.
     pub io_errors: u64,
     /// Copies that did not read back from the mirror as written.
     pub mismatches: u64,
@@ -362,6 +378,8 @@ impl MirrorRun {
             mirror: MirrorId(id),
             presence: MirrorPresence::Present,
             completed: false,
+            rechecked: 0,
+            recheck_failed: 0,
             copied: 0,
             bytes_copied: 0,
             already_there: 0,
@@ -384,7 +402,7 @@ pub struct MirrorRunReport {
     pub mirrors: Vec<MirrorRun>,
     /// Every mirror looked at is present and complete.
     pub completed: bool,
-    /// I/O errors from the destination during this run.
+    /// Device errors from the destination during this run.
     pub destination_io_errors: u64,
     /// The final-move block in force after the run, if any.
     pub block: Option<BlockInfo>,
@@ -441,10 +459,12 @@ pub struct MirrorScan {
     /// Missing or changed copies that could not be written again (the
     /// destination's own copy is not intact either, or the write failed).
     pub unrepairable: u64,
-    /// I/O errors from the mirror during this scan.
+    /// Device errors from the mirror during this scan.
     pub io_errors: u64,
     /// The mirror disappeared while the scan was working on it.
     pub removed_mid_run: bool,
+    /// Left-over temp files of an interrupted run that were removed.
+    pub temps_removed: u64,
     /// The individual failures (at most 200 are listed).
     pub failures: Vec<MirrorFailure>,
 }
@@ -466,6 +486,7 @@ impl MirrorScan {
             unrepairable: 0,
             io_errors: 0,
             removed_mid_run: false,
+            temps_removed: 0,
             failures: Vec::new(),
         }
     }
@@ -488,7 +509,7 @@ pub struct MirrorScanReport {
     /// Files missing or damaged on the destination for which no connected
     /// mirror had a copy that still matched.
     pub destination_unrepairable: u64,
-    /// I/O errors from the destination during this scan.
+    /// Device errors from the destination during this scan.
     pub destination_io_errors: u64,
     /// Every repair made, in both directions (at most 200 are listed).
     pub repairs: Vec<Repair>,
@@ -540,6 +561,12 @@ impl From<LedgerError> for CopyFail {
     }
 }
 
+impl From<StoreError> for CopyFail {
+    fn from(e: StoreError) -> Self {
+        CopyFail::Fatal(e)
+    }
+}
+
 /// Sorts an error of the write pipeline into what it means for a copy.
 fn target_fail(e: StoreError) -> CopyFail {
     match e {
@@ -569,6 +596,10 @@ struct CopyDone {
     adopted: bool,
     /// Where the copy is, relative to the target root.
     rel_path: String,
+    /// The new name was flushed to the device.
+    dir_synced: bool,
+    /// The reads of the copy bypassed the cache.
+    unbuffered: bool,
 }
 
 /// What a failure means for the loop over one mirror's files.
@@ -581,6 +612,19 @@ enum Next {
 #[derive(Default)]
 struct Trouble {
     destination_io_errors: u64,
+}
+
+/// The counters a failed copy is booked to (a run and a scan keep them in
+/// different places).
+struct Counters<'a> {
+    failed: &'a mut u64,
+    skipped_source: &'a mut u64,
+    io_errors: &'a mut u64,
+    mismatches: &'a mut u64,
+    removed_mid_run: &'a mut bool,
+    out_of_space: &'a mut bool,
+    presence: &'a mut MirrorPresence,
+    failures: &'a mut Vec<MirrorFailure>,
 }
 
 fn push_failure(list: &mut Vec<MirrorFailure>, rel_path: &str, reason: String) {
@@ -654,7 +698,7 @@ impl Inner {
                 last_seen_unix_ms: m.last_seen_unix_ms,
                 secs_since_seen: u64::try_from(now.saturating_sub(m.last_seen_unix_ms) / 1_000)
                     .unwrap_or(0),
-                sessions_since_seen: self.ledger.session().saturating_sub(m.last_seen_session),
+                runs_since_seen: self.ledger.session().saturating_sub(m.last_seen_session),
                 detail,
             })
         };
@@ -741,65 +785,66 @@ impl Inner {
         }
     }
 
-    /// Sets the "a disk is failing" block.
-    fn block_failing(&self, what: &str) -> Result<(), StoreError> {
-        let reason = format!("a disk may be failing: {what}");
+    /// A device error on a mirror: counted, and final move is blocked.
+    fn mirror_device_error(&self, m: &MirrorRecord, detail: &str) -> Result<(), StoreError> {
+        self.ledger.mirror_trouble(m.id, 1, 0, detail, self.now())?;
+        let reason = format!(
+            "a disk may be failing: second disk {} ({}) returned an error ({detail})",
+            m.id, m.label
+        );
         self.ledger
             .block(BlockKind::DiskFailing, &reason, self.now())?;
         Ok(())
     }
 
-    /// Counts trouble on a mirror and blocks when it has become too much.
-    fn mirror_trouble(
+    /// A copy on a connected mirror is gone or is not what was written
+    /// there: counted, and final move is blocked.
+    fn mirror_damaged(
         &self,
         m: &MirrorRecord,
-        io_errors: u64,
-        mismatches: u64,
+        changed: bool,
         detail: &str,
     ) -> Result<(), StoreError> {
-        let (total_io, total_mismatch) =
-            self.ledger
-                .mirror_trouble(m.id, io_errors, mismatches, detail, self.now())?;
-        let policy = self.cfg.mirror_policy;
-        if io_errors > 0 && total_io >= policy.io_errors_to_block.max(1) {
-            self.block_failing(&format!(
-                "mirror {} ({}) returned {total_io} I/O errors (last: {detail})",
-                m.id, m.label
-            ))?;
-        }
-        if mismatches > 0 && total_mismatch >= policy.mismatches_to_block.max(1) {
-            self.block_failing(&format!(
-                "{total_mismatch} files on mirror {} ({}) did not match what was written there (last: {detail})",
-                m.id, m.label
-            ))?;
-        }
+        self.ledger
+            .mirror_trouble(m.id, 0, u64::from(changed), detail, self.now())?;
+        let reason = format!(
+            "a second copy is {} on second disk {} ({}): {detail}",
+            if changed { "damaged" } else { "missing" },
+            m.id,
+            m.label
+        );
+        self.ledger
+            .block(BlockKind::IntegrityProblems, &reason, self.now())?;
         Ok(())
     }
 
-    /// Counts an I/O error on the destination and blocks when there have
-    /// been too many in this call.
-    fn destination_trouble(&self, trouble: &mut Trouble, detail: &str) -> Result<(), StoreError> {
+    /// A device error on the destination: counted, and final move is blocked.
+    fn destination_device_error(
+        &self,
+        trouble: &mut Trouble,
+        detail: &str,
+    ) -> Result<(), StoreError> {
         trouble.destination_io_errors += 1;
-        if trouble.destination_io_errors == self.cfg.mirror_policy.io_errors_to_block.max(1) {
-            self.block_failing(&format!(
-                "the destination returned {} I/O errors (last: {detail})",
-                trouble.destination_io_errors
-            ))?;
-        }
+        let reason = format!("a disk may be failing: the destination returned an error ({detail})");
+        self.ledger
+            .block(BlockKind::DiskFailing, &reason, self.now())?;
         Ok(())
     }
 }
 
 impl Store {
-    /// Registers a folder on another volume as a mirror.
+    /// Registers a folder on another disk as a mirror.
     ///
-    /// The folder must exist, must not overlap the destination and must not
-    /// be on the destination's own volume. It may be on any kind of disk
-    /// (a USB disk is the usual case) and may already contain files; nothing
-    /// in it is ever overwritten. A marker file with a fresh random id is
-    /// written to `<folder>/.kiwi-store/mirror`; the id and the volume's
-    /// serial number are what later proves that the disk at this path is
-    /// this mirror.
+    /// The folder must exist and must be on a **different physical disk**
+    /// than the destination (another partition of the same disk is refused,
+    /// and so is a disk that cannot be identified), on a local NTFS, ReFS or
+    /// exFAT volume, outside any cloud-synced folder, and must not overlap
+    /// the destination. USB and hot-pluggable disks are fine here. It may
+    /// already contain files; nothing in it is ever overwritten. A marker
+    /// file with a fresh random id is written to
+    /// `<folder>/.kiwi-store/second-id`; the id and the volume's serial
+    /// number are what later proves that the disk at this path is this
+    /// mirror, whatever its drive letter.
     ///
     /// If the folder already carries the marker of a mirror this store knows
     /// (the disk came back under another drive letter, or the mirror had been
@@ -828,10 +873,34 @@ impl Store {
         if overlap(&resolved, inner.root()) {
             return Err(MirrorError::OverlapsDestination(resolved).into());
         }
+
+        // Which disk is it?
         let volume = (inner.volume_probe)(&resolved).map_err(|e| unavailable(&resolved, e))?;
-        if volume.serial.is_some() && volume.serial == inner.dest.volume().serial {
-            return Err(MirrorError::SameVolume(resolved).into());
+        let primary = inner.dest.volume();
+        if volume.drive == DriveKind::Remote {
+            return Err(MirrorError::Network(resolved).into());
         }
+        let fs_name = volume.filesystem.to_ascii_uppercase();
+        if !matches!(fs_name.as_str(), "NTFS" | "REFS" | "EXFAT") {
+            return Err(MirrorError::Filesystem(volume.filesystem).into());
+        }
+        if volume.serial.is_some() && volume.serial == primary.serial {
+            return Err(MirrorError::SameDisk(resolved).into());
+        }
+        match (volume.device_number, primary.device_number) {
+            (Some(a), Some(b)) if a == b => return Err(MirrorError::SameDisk(resolved).into()),
+            (Some(_), Some(_)) => {}
+            // Unknown is not "a different disk".
+            _ => return Err(MirrorError::DiskUnidentified(resolved).into()),
+        }
+        if let Some(provider) = inner.dest.sync_provider_of(&resolved) {
+            return Err(MirrorError::SyncFolder {
+                path: resolved,
+                provider,
+            }
+            .into());
+        }
+
         let label: String = label
             .chars()
             .filter(|c| !c.is_control())
@@ -876,6 +945,9 @@ impl Store {
                 if known.volume_serial.is_some() && known.volume_serial != volume.serial {
                     return Err(foreign("it is not on the volume the mirror was created on").into());
                 }
+                if !known.active && inner.ledger.active_mirror_count()? >= MAX_MIRRORS {
+                    return Err(MirrorError::TooMany.into());
+                }
                 inner
                     .ledger
                     .reattach_mirror(known.id, &root_text, &label, now)?;
@@ -887,6 +959,9 @@ impl Store {
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(unavailable(&marker, e).into()),
+        }
+        if inner.ledger.active_mirror_count()? >= MAX_MIRRORS {
+            return Err(MirrorError::TooMany.into());
         }
 
         // The ledger first: if we stop between the two writes, the ledger has
@@ -1005,8 +1080,7 @@ impl Store {
                 file_id: rec.id,
                 rel_path: rec.rel_path,
                 size: rec.size,
-                committed_seq: rec.committed_seq,
-                committed_session: rec.committed_session,
+                commit_seq: rec.commit_no,
                 committed_unix_ms: rec.committed_unix_ms,
                 age_secs: now.saturating_sub(rec.committed_unix_ms).div_euclid(1_000),
             }))
@@ -1015,12 +1089,15 @@ impl Store {
     /// Copies every stored file that has no verified copy on a mirror yet to
     /// that mirror, for every active mirror that is connected.
     ///
-    /// Each copy goes through the same pipeline as a file received from a
-    /// phone (see the module documentation). The work is resumable: what a
-    /// run did not get to, or could not do, the next run does. A mirror that
-    /// is not connected is reported as [`MirrorPresence::Absent`] and
-    /// skipped; a folder that is not the mirror is reported as
-    /// [`MirrorPresence::WrongDisk`] and not written to.
+    /// For each connected mirror: the marker is checked; the copies written
+    /// by the previous run are read back (a disk pulled out without "eject"
+    /// may have lost its last writes); then the queue is copied, each file
+    /// through the same pipeline as a file received from a phone (see the
+    /// module documentation). The work is resumable: what a run did not get
+    /// to, or could not do, the next run does. A mirror that is not connected
+    /// is reported as [`MirrorPresence::Absent`] and skipped; a folder that
+    /// is not the mirror is reported as [`MirrorPresence::WrongDisk`] and not
+    /// written to. Files of unpaired devices are copied like any others.
     pub fn run_mirror(&self, cancel: &CancelToken) -> Result<MirrorRunReport, StoreError> {
         self.run_mirror_with(&MirrorOptions::default(), cancel)
     }
@@ -1066,7 +1143,9 @@ impl Store {
     /// destination's file is itself intact. Then every file the ledger
     /// records as missing or changed on the destination is written again
     /// from a mirror copy, provided that copy, read back just then, matches
-    /// the ledger's hash.
+    /// the ledger's hash. This is also how a destination that was lost
+    /// entirely is rebuilt: open the store on the new, empty folder with the
+    /// same ledger, and scan.
     ///
     /// This scan does not look for damage on the destination; that is
     /// [`Store::integrity_scan`]. Run that first.
@@ -1074,8 +1153,9 @@ impl Store {
     /// Nothing is overwritten, moved or deleted by a repair, and a repair
     /// never clears the final-move block: the block was set when the damage
     /// was found and stays until a person clears it. A file repaired on the
-    /// destination is treated as stored anew: it has to age again before a
-    /// deletion can be confirmed by it.
+    /// destination keeps its item key, its hash and its commit number, but is
+    /// treated as stored anew: it has to age again before a deletion can be
+    /// confirmed by it.
     ///
     /// The scan is resumable per mirror, like the integrity scan.
     pub fn scan_mirror(
@@ -1156,6 +1236,12 @@ impl Store {
         replaces: Option<MirrorId>,
         cancel: &CancelToken,
     ) -> Result<MirrorRunReport, StoreError> {
+        if let Some(old) = replaces {
+            // Make room first if the limit is reached; the old disk is not touched.
+            if self.inner.ledger.active_mirror_count()? >= MAX_MIRRORS {
+                self.remove_mirror(old, "replaced by a new second disk")?;
+            }
+        }
         let added = self.add_mirror(new_destination, label)?;
         if let Some(old) = replaces.filter(|old| *old != added.id) {
             let note = format!("replaced by mirror {} ({})", added.id.0, added.label);
@@ -1192,19 +1278,94 @@ impl Store {
         trouble: &mut Trouble,
     ) -> Result<MirrorRun, StoreError> {
         let inner = &self.inner;
+        let ledger = &inner.ledger;
         let mut run = MirrorRun::new(m.id);
         run.presence = inner.mirror_presence(m)?;
         if !run.presence.is_present() {
             return Ok(run);
         }
-        inner.ledger.mirror_seen(m.id, inner.now())?;
+        ledger.mirror_seen(m.id, inner.now())?;
         let root = PathBuf::from(&m.root);
-        run.temps_removed = inner.clean_partials(m.id, &root)?.removed;
+        let (run_no, left_open) = ledger.mirror_begin_run(m.id, inner.now())?;
+        if left_open {
+            // The previous run on this disk never reached its end: it may
+            // have left temp files behind.
+            run.temps_removed = inner.sweep_temps(m.id, &root, cancel)?.removed;
+        }
+        let mut stopped = false;
+
+        // Read back what earlier runs wrote and nobody has read since.
+        let mut cursor = 0i64;
+        'recheck: loop {
+            let rows = ledger.mirror_rows_to_recheck(m.id, run_no, cursor, 64)?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in &rows {
+                if cancel.is_cancelled() {
+                    stopped = true;
+                    break 'recheck;
+                }
+                cursor = row.file_id;
+                let Some(rec) = ledger.file_by_id(row.file_id)? else {
+                    continue;
+                };
+                let probe = inner.probe_at(&root, &row.rel_path, rec.size, &rec.hash, &mut |c| {
+                    throttle.tick(c.len())
+                });
+                match probe {
+                    Probe::Interrupted => {
+                        stopped = true;
+                        break 'recheck;
+                    }
+                    Probe::Match { unbuffered } => {
+                        run.rechecked += 1;
+                        ledger.mirror_file_verified(m.id, rec.id, unbuffered, inner.now())?;
+                        ledger.mirror_recheck_done(m.id, rec.id)?;
+                    }
+                    Probe::Missing | Probe::Changed(_) => {
+                        // The disk lost what it was given. The copy is queued
+                        // again (the loop below finds it) and the block is set.
+                        run.recheck_failed += 1;
+                        let changed = matches!(probe, Probe::Changed(_));
+                        let detail = format!("{}: {}", row.rel_path, probe.reason());
+                        let state = if changed {
+                            MirrorFileState::Changed
+                        } else {
+                            MirrorFileState::Missing
+                        };
+                        if ledger.set_mirror_file_state(
+                            m.id,
+                            rec.id,
+                            state,
+                            &detail,
+                            inner.now(),
+                        )? {
+                            inner.mirror_damaged(m, changed, &detail)?;
+                        }
+                    }
+                    Probe::IoError(why) => {
+                        let presence = inner.mirror_presence(m)?;
+                        if !presence.is_present() {
+                            run.removed_mid_run = true;
+                            run.presence = presence;
+                            return Ok(run);
+                        }
+                        run.io_errors += 1;
+                        inner.mirror_device_error(m, &why)?;
+                    }
+                    // In use, behind a link, ...: looked at again next time.
+                    _ => {}
+                }
+            }
+        }
 
         let mut cursor = 0i64;
-        let mut stopped = false;
         'files: loop {
-            let batch = inner.ledger.files_pending_for_mirror(m.id, cursor, 64)?;
+            if stopped {
+                break;
+            }
+            let batch = ledger.files_pending_for_mirror(m.id, cursor, 64)?;
             if batch.is_empty() {
                 break;
             }
@@ -1245,6 +1406,10 @@ impl Store {
             }
         }
         run.completed = !stopped && run.failed == 0;
+        if !run.removed_mid_run && run.failed == 0 {
+            // Nothing can have been left behind: the next run need not look.
+            ledger.mirror_end_run(m.id)?;
+        }
         Ok(run)
     }
 
@@ -1268,7 +1433,7 @@ impl Store {
             }
             CopyFail::SourceIo(why) => {
                 *c.skipped_source += 1;
-                inner.destination_trouble(trouble, &why)?;
+                inner.destination_device_error(trouble, &why)?;
                 Next::Continue
             }
             CopyFail::TargetIo(why) => {
@@ -1277,7 +1442,7 @@ impl Store {
                 let presence = inner.mirror_presence(m)?;
                 if presence.is_present() {
                     *c.io_errors += 1;
-                    inner.mirror_trouble(m, 1, 0, &why)?;
+                    inner.mirror_device_error(m, &why)?;
                     Next::Continue
                 } else {
                     *c.removed_mid_run = true;
@@ -1286,8 +1451,9 @@ impl Store {
                 }
             }
             CopyFail::TargetMismatch(why) => {
+                // The disk gave back something else than it was given.
                 *c.mismatches += 1;
-                inner.mirror_trouble(m, 0, 1, &why)?;
+                inner.mirror_damaged(m, true, &why)?;
                 Next::Continue
             }
             CopyFail::NoSpace => {
@@ -1347,6 +1513,7 @@ impl Store {
             other => {
                 // Missing, changed, behind a link: the ledger is told, and
                 // final move is blocked, exactly as when a scan finds it.
+                // Nothing is published on the mirror.
                 inner.apply_probe(rec, &other)?;
                 return Err(CopyFail::SourceNotIntact(other.reason().to_string()));
             }
@@ -1363,19 +1530,19 @@ impl Store {
             &mut slot,
             rec,
             source_mtime,
-            &|n| name.stored_variant(n),
+            &name,
             &|_| Ok(Adoption::Yes(None)),
-            name.as_str(),
+            // A second copy gates no deletion: where its file system cannot
+            // flush a directory, the copy is still made.
+            false,
             throttle,
         )?;
-        let (rel_path, dir_synced, unbuffered, adopted) = done;
-        let _ = dir_synced;
 
         inner
             .fs
             .checkpoint(Checkpoint::BeforeMirrorRecord)
             .map_err(|e| CopyFail::Obstacle(format!("stopped before recording the copy: {e}")))?;
-        let detail = if adopted {
+        let detail = if done.adopted {
             "was already there with identical content".to_owned()
         } else {
             format!("{} bytes, hash {}", rec.size, rec.hash)
@@ -1384,21 +1551,17 @@ impl Store {
             &MirrorCopy {
                 mirror_id: m.id,
                 file_id: rec.id,
-                rel_path: &rel_path,
-                unbuffered,
-                kind: if adopted { "mirror_adopt" } else { kind },
+                rel_path: &done.rel_path,
+                unbuffered: done.unbuffered,
+                kind: if done.adopted { "mirror_adopt" } else { kind },
                 detail: &detail,
-                partial: (!adopted).then(|| slot.temp_rel()),
                 // A repair is part of the audit trail and is flushed at
                 // once; plain copies are flushed together at the end.
                 durable: kind == "mirror_repaired",
             },
             inner.now(),
         )?;
-        if !adopted {
-            slot.intent_closed();
-        }
-        Ok(CopyDone { adopted, rel_path })
+        Ok(done)
     }
 
     /// Reads `rel_path` under `root` as [`Inner::probe_at`] does and writes
@@ -1429,20 +1592,18 @@ impl Store {
 
     /// The second half of a copy, the same in both directions: flush the
     /// temp file, read it back from its disk, compare with the ledger's hash,
-    /// and give it its final name. Returns the final relative path, whether
-    /// the name was flushed, whether the reads bypassed the cache, and
-    /// whether an identical file was found there instead.
+    /// and give it its final name (or find an identical file already there).
     #[allow(clippy::too_many_arguments)]
     fn finish_copy(
         &self,
         slot: &mut TempSlot,
         rec: &FileRecord,
         mtime_unix_ns: Option<i64>,
-        name_for: &dyn Fn(u32) -> SafeName,
+        name: &SafeName,
         may_adopt: &dyn Fn(&SafeRelPath) -> Result<Adoption, StoreError>,
-        display_name: &str,
+        require_flush: bool,
         throttle: &mut Throttle<'_>,
-    ) -> Result<(String, bool, bool, bool), CopyFail> {
+    ) -> Result<CopyDone, CopyFail> {
         if slot.written() != rec.size || slot.stream_hash() != rec.hash {
             return Err(CopyFail::SourceNotIntact(
                 "what was read does not match its record".to_owned(),
@@ -1465,9 +1626,12 @@ impl Store {
             .place(&PlaceRequest {
                 hash: &rec.hash,
                 size: rec.size,
-                name_for,
+                // The same stored name; if it is taken by other content, the
+                // next free one. Nothing is overwritten.
+                name_for: &|n| name.with_collision_suffix(n),
                 may_adopt,
-                display_name,
+                display_name: name.as_str(),
+                require_flush,
             })
             .map_err(target_fail)?;
         Ok(match placed {
@@ -1475,20 +1639,20 @@ impl Store {
                 name,
                 dir_synced,
                 unbuffered,
-            } => (
-                slot.dir_rel().join(name).to_slash_string(),
+            } => CopyDone {
+                adopted: false,
+                rel_path: slot.dir_rel().join(name).to_slash_string(),
                 dir_synced,
-                read.unbuffered && unbuffered,
-                false,
-            ),
+                unbuffered: read.unbuffered && unbuffered,
+            },
             Placed::Adopted {
                 name, unbuffered, ..
-            } => (
-                slot.dir_rel().join(name).to_slash_string(),
-                false,
+            } => CopyDone {
+                adopted: true,
+                rel_path: slot.dir_rel().join(name).to_slash_string(),
+                dir_synced: false,
                 unbuffered,
-                true,
-            ),
+            },
         })
     }
 
@@ -1512,7 +1676,10 @@ impl Store {
         }
         ledger.mirror_seen(m.id, inner.now())?;
         let root = PathBuf::from(&m.root);
-        inner.clean_partials(m.id, &root)?;
+        ledger.mirror_begin_run(m.id, inner.now())?;
+        // A scan looks at the whole disk anyway: temp files left by an
+        // interrupted run are dealt with here.
+        scan.temps_removed = inner.sweep_temps(m.id, &root, cancel)?.removed;
 
         let (upper, mut cursor) = match ledger.mirror_scan_state(m.id)? {
             Some(saved) => {
@@ -1555,10 +1722,11 @@ impl Store {
                 if let Some(left) = budget.as_mut() {
                     *left -= 1;
                 }
-                let finding = match probe {
+                let (state, detail) = match probe {
                     Probe::Match { unbuffered } => {
                         scan.ok += 1;
                         ledger.mirror_file_verified(m.id, rec.id, unbuffered, inner.now())?;
+                        ledger.mirror_recheck_done(m.id, rec.id)?;
                         if row.state != MirrorFileState::Verified {
                             ledger.set_mirror_file_state(
                                 m.id,
@@ -1597,7 +1765,7 @@ impl Store {
                             break 'rows;
                         }
                         scan.io_errors += 1;
-                        inner.mirror_trouble(m, 1, 0, &why)?;
+                        inner.mirror_device_error(m, &why)?;
                         push_failure(&mut scan.failures, &rec.rel_path, why);
                         continue;
                     }
@@ -1610,11 +1778,9 @@ impl Store {
                     }
                 };
                 clean = false;
-                let (state, detail) = finding;
-                let new =
-                    ledger.set_mirror_file_state(m.id, rec.id, state, &detail, inner.now())?;
-                if new && state == MirrorFileState::Changed {
-                    inner.mirror_trouble(m, 0, 1, &detail)?;
+                // A finding already on record does not block again.
+                if ledger.set_mirror_file_state(m.id, rec.id, state, &detail, inner.now())? {
+                    inner.mirror_damaged(m, state == MirrorFileState::Changed, &detail)?;
                 }
                 if !opts.repair {
                     continue;
@@ -1664,6 +1830,9 @@ impl Store {
                 ledger.mirror_trouble_reset(m.id)?;
             }
         }
+        if !scan.removed_mid_run && scan.unrepairable == 0 {
+            ledger.mirror_end_run(m.id)?;
+        }
         Ok(scan)
     }
 
@@ -1704,7 +1873,7 @@ impl Store {
                         continue;
                     }
                     Probe::IoError(why) => {
-                        inner.destination_trouble(trouble, &why)?;
+                        inner.destination_device_error(trouble, &why)?;
                     }
                     _ => {}
                 }
@@ -1792,29 +1961,21 @@ impl Store {
             Probe::Interrupted => return Err(CopyFail::Cancelled),
             Probe::Unreadable(why) => return Err(CopyFail::SourceUnreadable(why)),
             Probe::IoError(why) => {
-                if inner
-                    .mirror_presence(m)
-                    .map_err(CopyFail::Fatal)?
-                    .is_present()
-                {
-                    inner
-                        .mirror_trouble(m, 1, 0, &why)
-                        .map_err(CopyFail::Fatal)?;
+                if inner.mirror_presence(m)?.is_present() {
+                    inner.mirror_device_error(m, &why)?;
                 }
                 return Err(CopyFail::SourceIo(why));
             }
             other => {
-                let (state, mismatch) = match &other {
-                    Probe::Missing => (MirrorFileState::Missing, 0),
-                    _ => (MirrorFileState::Changed, 1),
+                let changed = !matches!(other, Probe::Missing);
+                let state = if changed {
+                    MirrorFileState::Changed
+                } else {
+                    MirrorFileState::Missing
                 };
                 let detail = format!("{}: {}", row.rel_path, other.reason());
-                let new =
-                    ledger.set_mirror_file_state(m.id, rec.id, state, &detail, inner.now())?;
-                if new && mismatch > 0 {
-                    inner
-                        .mirror_trouble(m, 0, mismatch, &detail)
-                        .map_err(CopyFail::Fatal)?;
+                if ledger.set_mirror_file_state(m.id, rec.id, state, &detail, inner.now())? {
+                    inner.mirror_damaged(m, changed, &detail)?;
                 }
                 return Err(CopyFail::SourceNotIntact(detail));
             }
@@ -1825,29 +1986,27 @@ impl Store {
             &mut slot,
             rec,
             rec.mtime_unix_ns,
-            &|n| name.stored_variant(n),
+            &name,
             // An identical file may be used if the ledger does not know the
             // path, or knows it as this very file.
             &|candidate: &SafeRelPath| {
                 Ok(match ledger.file_by_path_key(&candidate.collision_key())? {
                     Some(other) if other.id != own_id => Adoption::No,
-                    known => Adoption::Yes(known),
+                    known => Adoption::Yes(known.map(Box::new)),
                 })
             },
-            name.as_str(),
+            inner.dest.supports_final_move(),
             throttle,
         );
-        let (new_rel_path, dir_synced, unbuffered, adopted) = match done {
+        let done = match done {
             Ok(done) => done,
             Err(CopyFail::TargetIo(why)) => {
-                inner
-                    .destination_trouble(trouble, &why)
-                    .map_err(CopyFail::Fatal)?;
+                inner.destination_device_error(trouble, &why)?;
                 return Err(CopyFail::TargetIo(why));
             }
             Err(other) => return Err(other),
         };
-        let Some(new_rel) = SafeRelPath::from_stored(&new_rel_path) else {
+        let Some(new_rel) = SafeRelPath::from_stored(&done.rel_path) else {
             return Err(CopyFail::Obstacle(
                 "the restored file has a name that cannot be recorded".to_owned(),
             ));
@@ -1863,39 +2022,23 @@ impl Store {
             FileState::Committed => "believed intact",
         };
         let detail = format!(
-            "written again as {new_rel_path} from mirror {} ({}) copy {}; hash {}; the file at {} was {was} and has not been touched",
-            m.id, m.uid, row.rel_path, rec.hash, rec.rel_path
+            "written again as {} from second disk {} ({}) copy {}; hash {}; the file at {} was {was} and has not been touched",
+            done.rel_path, m.id, m.uid, row.rel_path, rec.hash, rec.rel_path
         );
         ledger.record_restored(
             rec,
             &Restored {
-                rel_path: &new_rel_path,
+                rel_path: &done.rel_path,
                 path_key: &new_rel.collision_key(),
-                dir_synced,
-                verified_unbuffered: unbuffered,
-                partial: (!adopted).then(|| slot.temp_rel()),
+                dir_synced: done.dir_synced,
+                verified_unbuffered: done.unbuffered,
                 detail: &detail,
             },
             inner.now(),
         )?;
-        if !adopted {
-            slot.intent_closed();
-        }
-        Ok(new_rel_path)
+        inner.write_witness();
+        Ok(done.rel_path)
     }
-}
-
-/// The counters a failed copy is booked to (a run and a scan keep them in
-/// different places).
-struct Counters<'a> {
-    failed: &'a mut u64,
-    skipped_source: &'a mut u64,
-    io_errors: &'a mut u64,
-    mismatches: &'a mut u64,
-    removed_mid_run: &'a mut bool,
-    out_of_space: &'a mut bool,
-    presence: &'a mut MirrorPresence,
-    failures: &'a mut Vec<MirrorFailure>,
 }
 
 #[cfg(test)]

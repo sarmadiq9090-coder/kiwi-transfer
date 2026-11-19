@@ -3,32 +3,36 @@
 //! A crash can leave two kinds of debris: temp files whose transfer never
 //! finished, and a ledger that disagrees with the disk. The pass
 //!
-//! 1. compares every record believed intact with the disk (existence and
+//! 1. walks the destination, never following a reparse point, and deals with
+//!    every temp file it finds (see below);
+//! 2. compares every record believed intact with the disk (existence and
 //!    size only; content is the integrity scan's job) and marks what is gone
-//!    or obviously different, and
-//! 2. deletes orphaned temp files, and
-//! 3. walks the destination, never following a reparse point, to report what
-//!    it finds there.
+//!    or obviously different; and
+//! 3. if files were found missing, walks once more to count the unknown
+//!    files that look like renamed copies of them.
 //!
 //! # What is deleted, and why that can never be a stored file
 //!
-//! A file is deleted only if **all** of this holds:
+//! The engine deletes nothing but its own temp files, and a temp file is
+//! deleted only if **all** of this holds:
 //!
-//! * the ledger has an intent row for it: the engine noted creating exactly
-//!   this file as a temp file (the row is written after the file is created,
-//!   and removed in the same transaction that records the commit, so a file
-//!   that was committed has none, even if a power failure undid its rename
-//!   and left it under its temp name);
-//! * its name has the exact shape of a temp-file name, which no stored file
-//!   can have (the sanitiser never produces a name starting with `.kiwi-`,
-//!   and a ledger row carrying one is refused when it is read);
-//! * no ledger record names its path;
+//! * its name is exactly `.kiwi-tmp-<tag>-<n>-<random>.part`, a name no
+//!   stored file can have (the sanitiser never produces a name starting with
+//!   `.kiwi-`, and a ledger row carrying one is refused when it is read);
+//! * `<tag>` is a tag recorded in this ledger: every run of the store draws a
+//!   random tag and writes it to the ledger, flushed, before it creates its
+//!   first temp file. A look-alike made by anything else has no such tag;
+//! * it is a plain file, reached through plain directories, inside the root;
 //! * it does not belong to a transfer in progress;
-//! * it is a plain file, reached through plain directories only.
+//! * **it is not a committed file whose rename was lost.** If a record of the
+//!   same size, in the same directory, is without its file, the temp file is
+//!   read and hashed first. If it has that record's hash it *is* that file
+//!   (a drive acknowledged a flush it had not done, and the rename did not
+//!   survive the power failure): it is given its final name again, never
+//!   deleted.
 //!
-//! A file that merely *looks* like a temp file (somebody else made it, or its
-//! intent row was lost) is reported in [`RecoveryReport::unowned_temps`] and
-//! left alone.
+//! A file that merely looks like a temp file (unknown tag) is reported in
+//! [`RecoveryReport::unowned_temps`] and left alone.
 //!
 //! One crash window needs no repair here: a file that got its final name but
 //! not its ledger record. It is complete and verified (it was renamed only
@@ -36,16 +40,18 @@
 //! the commit finds the identical file and records it instead of storing a
 //! second copy.
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use super::pipeline::{is_temp_name, PRIMARY};
+use super::pipeline::{temp_tag_of, PRIMARY};
 use super::scan::{CancelToken, ChangeEvidence, MissingIndex};
 use super::verify::Probe;
 use super::{lock, Inner, Store, STORE_DIR};
 use crate::error::StoreError;
 use crate::fsops::{DirEntryInfo, EntryKind};
-use crate::ledger::{path_key, FileState};
-use crate::sanitize::{collision_key, SafeName, SafeRelPath, MAX_DEPTH};
+use crate::hash::ContentHash;
+use crate::ledger::{path_key, FileRecord, FileState, MirrorFileRow, MirrorFileState};
+use crate::sanitize::{collision_key, SafeRelPath, MAX_DEPTH};
 
 /// Most paths listed individually in a [`RecoveryReport`].
 const MAX_LISTED: usize = 200;
@@ -59,14 +65,18 @@ pub struct RecoveryReport {
     pub orphan_temps_removed: u64,
     /// Their total size.
     pub orphan_temp_bytes: u64,
-    /// Orphaned temp files that could not be deleted (they will be retried).
+    /// Orphaned temp files that could not be deleted or judged (they will be
+    /// looked at again next time).
     pub orphan_temps_left: Vec<String>,
-    /// Files that are named like temp files but that the engine has no
-    /// record of creating. They are never deleted; listed so the user can
-    /// decide. (At most 200 are listed; `unowned_temp_count` is complete.)
+    /// Files that are named like temp files but do not carry a tag of this
+    /// ledger: not the engine's. They are never deleted; listed so the user
+    /// can decide. (At most 200 are listed; `unowned_temp_count` is complete.)
     pub unowned_temps: Vec<String>,
     /// How many such files there are.
     pub unowned_temp_count: u64,
+    /// Committed files that were found under their temp name (the rename had
+    /// been lost) and were given their final name again.
+    pub renames_recreated: Vec<String>,
     /// Reparse points found in the destination. They were not followed.
     pub reparse_points_skipped: Vec<String>,
     /// Directories that could not be listed.
@@ -83,7 +93,7 @@ pub struct RecoveryReport {
     pub mass_change: bool,
 }
 
-/// One thing met while walking the destination.
+/// One thing met while walking a tree.
 pub(crate) enum Visit<'a> {
     /// A regular file.
     File {
@@ -105,106 +115,71 @@ fn join_rel(dir_rel: &[String], name: &str) -> String {
     }
 }
 
-/// What became of the temp files the ledger has intent rows for.
+/// What became of one temp-named file.
+pub(crate) enum TempFate {
+    /// Not the engine's (unknown tag, or a name that is not exactly the
+    /// on-disk name). Left alone.
+    Unowned,
+    /// Belongs to a transfer in progress. Left alone.
+    InUse,
+    /// Deleted; the size it had.
+    Deleted(u64),
+    /// It was a committed file whose rename had been lost; it has its final
+    /// name again (the path relative to the root).
+    Recreated(String),
+    /// Could not be deleted or judged. Left for next time.
+    Left,
+}
+
+/// What a sweep over one tree did with the temp files it found.
 #[derive(Debug, Default)]
-pub(crate) struct TempCleanup {
+pub(crate) struct TempSweep {
+    /// The walk ran to the end.
+    pub completed: bool,
     pub removed: u64,
     pub removed_bytes: u64,
-    /// Could not be deleted, or could not be reached safely; retried next time.
     pub left: Vec<String>,
+    pub unowned: Vec<String>,
+    pub unowned_count: u64,
+    pub recreated: Vec<String>,
+    pub reparse_points: Vec<String>,
+    pub unreadable_dirs: Vec<String>,
+}
+
+/// A record that is without its file and could be what a temp file really is.
+enum Lost {
+    Primary(FileRecord),
+    Mirror(MirrorFileRow, ContentHash),
+}
+
+impl Lost {
+    fn rel_path(&self) -> &str {
+        match self {
+            Lost::Primary(rec) => &rec.rel_path,
+            Lost::Mirror(row, _) => &row.rel_path,
+        }
+    }
+
+    fn hash(&self) -> &ContentHash {
+        match self {
+            Lost::Primary(rec) => &rec.hash,
+            Lost::Mirror(_, hash) => hash,
+        }
+    }
 }
 
 impl Inner {
-    /// Deletes the orphaned temp files at one location (the destination or a
-    /// mirror): those the ledger has an intent row for. See the module
-    /// documentation for why this cannot touch a stored file.
-    pub(crate) fn clean_partials(
+    /// Walks every directory below `root` (the destination or a mirror),
+    /// skipping the engine's own bookkeeping directory and never entering a
+    /// reparse point. Returns false if it was cancelled.
+    pub(crate) fn walk(
         &self,
-        location: i64,
         root: &Path,
-    ) -> Result<TempCleanup, StoreError> {
-        let mut out = TempCleanup::default();
-        for rel in self.ledger.partials(location)? {
-            // The row is read from the ledger, which is not trusted: every
-            // directory on the way must be a name the sanitiser would have
-            // produced, and the file name must be a temp-file name.
-            let mut parts: Vec<&str> = rel.split('/').collect();
-            let name = parts.pop().unwrap_or("");
-            let dirs: Option<Vec<SafeName>> =
-                parts.iter().map(|p| SafeName::from_stored(p)).collect();
-            let (Some(dirs), true) = (dirs, is_temp_name(name)) else {
-                self.ledger.remove_partial(location, &rel)?;
-                continue;
-            };
-            let dir_rel = SafeRelPath::from_components(dirs);
-            let path = dir_rel.under(root).join(name);
-            // A transfer in progress owns its temp file.
-            if lock(&self.in_flight).temps.contains(&path) {
-                continue;
-            }
-            // A path the ledger records as a stored file is never deleted,
-            // whatever else is true. (It cannot happen; it is checked anyway.)
-            if location == PRIMARY && self.ledger.path_key_exists(&path_key(&rel))? {
-                self.ledger.remove_partial(location, &rel)?;
-                continue;
-            }
-            // Only through plain directories: a link on the way could lead
-            // the delete somewhere else.
-            let mut dir = root.to_path_buf();
-            let mut reachable = Some(true);
-            for part in dir_rel.components() {
-                dir.push(part.as_str());
-                match self.fs.stat(&dir) {
-                    Ok(Some(s)) if s.kind == EntryKind::Dir && !s.reparse => {}
-                    Ok(None) => {
-                        reachable = Some(false);
-                        break;
-                    }
-                    _ => {
-                        reachable = None;
-                        break;
-                    }
-                }
-            }
-            let stat = match reachable {
-                Some(true) => self.fs.stat(&path),
-                // The directory is gone, and the temp file with it.
-                Some(false) => Ok(None),
-                None => {
-                    if out.left.len() < MAX_LISTED {
-                        out.left.push(rel);
-                    }
-                    continue;
-                }
-            };
-            match stat {
-                Ok(None) => self.ledger.remove_partial(location, &rel)?,
-                Ok(Some(s)) if s.kind == EntryKind::File && !s.reparse => {
-                    if self.delete_own_temp(&path) {
-                        out.removed += 1;
-                        out.removed_bytes += s.size;
-                        self.ledger.remove_partial(location, &rel)?;
-                    } else if out.left.len() < MAX_LISTED {
-                        out.left.push(rel);
-                    }
-                }
-                // Not a plain file (any more), or it cannot be examined.
-                _ => {
-                    if out.left.len() < MAX_LISTED {
-                        out.left.push(rel);
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Walks every directory below the root, skipping the engine's own
-    /// bookkeeping directory and never entering a reparse point. Returns
-    /// false if it was cancelled.
-    pub(crate) fn walk(&self, cancel: &CancelToken, visit: &mut dyn FnMut(Visit<'_>)) -> bool {
+        cancel: &CancelToken,
+        visit: &mut dyn FnMut(Visit<'_>),
+    ) -> bool {
         let store_dir_key = collision_key(STORE_DIR);
-        let mut stack: Vec<(PathBuf, Vec<String>)> = vec![(self.root().to_path_buf(), Vec::new())];
+        let mut stack: Vec<(PathBuf, Vec<String>)> = vec![(root.to_path_buf(), Vec::new())];
         while let Some((dir_abs, dir_rel)) = stack.pop() {
             if cancel.is_cancelled() {
                 return false;
@@ -254,6 +229,193 @@ impl Inner {
         }
         true
     }
+
+    /// The records at `location` whose file has this size, should be in this
+    /// directory, and is not there.
+    fn lost_in_dir(
+        &self,
+        location: i64,
+        root: &Path,
+        dir_key: &str,
+        size: u64,
+    ) -> Result<Vec<Lost>, StoreError> {
+        let mut candidates = Vec::new();
+        if location == PRIMARY {
+            for rec in self.ledger.files_with_size(size)? {
+                candidates.push(Lost::Primary(rec));
+            }
+        } else {
+            for row in self.ledger.mirror_rows_with_size(location, size)? {
+                if let Some(rec) = self.ledger.file_by_id(row.file_id)? {
+                    candidates.push(Lost::Mirror(row, rec.hash));
+                }
+            }
+        }
+        candidates.retain(|lost| {
+            let Some(rel) = SafeRelPath::from_stored(lost.rel_path()) else {
+                return false;
+            };
+            // "Without its file": anything but a positive "it is there".
+            rel.parent().collision_key() == dir_key
+                && !matches!(self.fs.stat(&rel.under(root)), Ok(Some(_)))
+        });
+        Ok(candidates)
+    }
+
+    /// Applies the deletion rule (see the module documentation) to one
+    /// temp-named regular file that a walk came across.
+    pub(crate) fn dispose_of_temp(
+        &self,
+        location: i64,
+        root: &Path,
+        dir_rel: &[String],
+        dir_abs: &Path,
+        entry: &DirEntryInfo,
+    ) -> Result<TempFate, StoreError> {
+        let own = entry.exact
+            && temp_tag_of(&entry.name).is_some_and(|tag| lock(&self.known_tags).contains(tag));
+        if !own {
+            return Ok(TempFate::Unowned);
+        }
+        let path = dir_abs.join(&entry.name);
+        if lock(&self.in_flight).temps.contains(&path) {
+            return Ok(TempFate::InUse);
+        }
+        if entry.stat.kind != EntryKind::File || entry.stat.reparse {
+            return Ok(TempFate::Left);
+        }
+        let size = entry.stat.size;
+
+        // Never delete while a record of this size is without its file:
+        // read and hash the temp file first.
+        let dir_key = path_key(&dir_rel.join("/"));
+        let lost = self.lost_in_dir(location, root, &dir_key, size)?;
+        if !lost.is_empty() {
+            let mut hasher = blake3::Hasher::new();
+            let read = self.fs.read_verify(&path, &mut |chunk| {
+                hasher.update(chunk);
+                ControlFlow::Continue(())
+            });
+            let hash = match read {
+                Ok(r) if r.completed && r.bytes == size => ContentHash::from(hasher.finalize()),
+                // It cannot be judged now; it is certainly not deleted.
+                _ => return Ok(TempFate::Left),
+            };
+            if let Some(found) = lost.iter().find(|l| *l.hash() == hash) {
+                // It is that committed file. Give it its final name again:
+                // create-new, flushed, and confirmed under that name.
+                let Some(rel) = SafeRelPath::from_stored(found.rel_path()) else {
+                    return Ok(TempFate::Left);
+                };
+                let target = rel.under(root);
+                if self.fs.rename_noreplace(&path, &target).is_err() {
+                    return Ok(TempFate::Left);
+                }
+                let _ = self.fs.sync_file(&target);
+                let _ = self.fs.sync_dir(dir_abs);
+                if self.confirm_in_place(&target, size, &hash).is_err() {
+                    // Under its final name now, but not confirmed: the record
+                    // is left as it is for the scan to judge.
+                    return Ok(TempFate::Left);
+                }
+                let detail = format!(
+                    "{} was found as {} (its rename had been lost) and was given its name again",
+                    found.rel_path(),
+                    entry.name
+                );
+                match found {
+                    Lost::Primary(rec) => {
+                        self.ledger
+                            .record_rename_recreated(rec, &detail, self.now())?;
+                    }
+                    Lost::Mirror(row, _) => {
+                        self.ledger.set_mirror_file_state(
+                            row.mirror_id,
+                            row.file_id,
+                            MirrorFileState::Verified,
+                            &detail,
+                            self.now(),
+                        )?;
+                        self.ledger.log_event(
+                            "mirror_rename_recreated",
+                            None,
+                            Some(row.file_id),
+                            Some(&detail),
+                            self.now(),
+                        )?;
+                    }
+                }
+                return Ok(TempFate::Recreated(found.rel_path().to_owned()));
+            }
+        }
+
+        if self.delete_own_temp(&path) {
+            Ok(TempFate::Deleted(size))
+        } else {
+            Ok(TempFate::Left)
+        }
+    }
+
+    /// Walks one tree and applies the deletion rule to every temp-named file.
+    pub(crate) fn sweep_temps(
+        &self,
+        location: i64,
+        root: &Path,
+        cancel: &CancelToken,
+    ) -> Result<TempSweep, StoreError> {
+        let mut sweep = TempSweep::default();
+        let mut failure: Option<StoreError> = None;
+        sweep.completed = self.walk(root, cancel, &mut |visit| match visit {
+            Visit::File {
+                dir_rel,
+                dir_abs,
+                entry,
+            } => {
+                if failure.is_some() || temp_tag_of(&entry.name).is_none() {
+                    return;
+                }
+                let rel = join_rel(dir_rel, &entry.name);
+                match self.dispose_of_temp(location, root, dir_rel, dir_abs, entry) {
+                    Ok(TempFate::Unowned) => {
+                        sweep.unowned_count += 1;
+                        if sweep.unowned.len() < MAX_LISTED {
+                            sweep.unowned.push(rel);
+                        }
+                    }
+                    Ok(TempFate::InUse) => {}
+                    Ok(TempFate::Deleted(size)) => {
+                        sweep.removed += 1;
+                        sweep.removed_bytes += size;
+                    }
+                    Ok(TempFate::Recreated(final_rel)) => {
+                        if sweep.recreated.len() < MAX_LISTED {
+                            sweep.recreated.push(final_rel);
+                        }
+                    }
+                    Ok(TempFate::Left) => {
+                        if sweep.left.len() < MAX_LISTED {
+                            sweep.left.push(rel);
+                        }
+                    }
+                    Err(e) => failure = Some(e),
+                }
+            }
+            Visit::Reparse { rel } => {
+                if sweep.reparse_points.len() < MAX_LISTED {
+                    sweep.reparse_points.push(rel);
+                }
+            }
+            Visit::Unreadable { rel, error } => {
+                if sweep.unreadable_dirs.len() < MAX_LISTED {
+                    sweep.unreadable_dirs.push(format!("{rel}: {error}"));
+                }
+            }
+        });
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(sweep),
+        }
+    }
 }
 
 impl Store {
@@ -267,11 +429,26 @@ impl Store {
         let mut evidence = ChangeEvidence::default();
         let started_seq = ledger.log_event("recovery_started", None, None, None, inner.now())?;
 
-        // 1. The ledger against the disk.
+        // 1. Temp files first: a committed file whose rename was lost must
+        //    get its name back before step 2 would call it missing.
+        let sweep = inner.sweep_temps(PRIMARY, inner.root(), cancel)?;
+        report.orphan_temps_removed = sweep.removed;
+        report.orphan_temp_bytes = sweep.removed_bytes;
+        report.orphan_temps_left = sweep.left;
+        report.unowned_temps = sweep.unowned;
+        report.unowned_temp_count = sweep.unowned_count;
+        report.renames_recreated = sweep.recreated;
+        report.reparse_points_skipped = sweep.reparse_points;
+        report.unreadable_dirs = sweep.unreadable_dirs;
+        let mut cancelled = !sweep.completed;
+
+        // 2. The ledger against the disk.
         let upper = ledger.max_file_id()?;
         let mut cursor = 0i64;
-        let mut cancelled = false;
         'records: loop {
+            if cancelled {
+                break;
+            }
             let batch = ledger.files_after(cursor, upper, 256)?;
             if batch.is_empty() {
                 break;
@@ -316,73 +493,32 @@ impl Store {
             }
         }
 
-        // 2. Orphaned temp files: exactly those the ledger has an intent row for.
-        if !cancelled && !cancel.is_cancelled() {
-            let cleanup = inner.clean_partials(PRIMARY, inner.root())?;
-            report.orphan_temps_removed = cleanup.removed;
-            report.orphan_temp_bytes = cleanup.removed_bytes;
-            report.orphan_temps_left = cleanup.left;
-        }
-
-        // 3. The disk: files that look like temp files but are not the
-        //    engine's, and files that look like renamed copies of the ones
-        //    just found missing. Nothing is deleted or adopted here.
+        // 3. Files that look like renamed copies of the ones just found
+        //    missing. Nothing is adopted: an unknown file is only counted.
         let missing = MissingIndex::new(&ledger.missing_since(started_seq)?);
-        let mut ledger_error = None;
-        let walked = cancelled
-            || inner.walk(cancel, &mut |visit| match visit {
-                Visit::File {
-                    dir_rel,
-                    dir_abs,
-                    entry,
-                } => {
-                    if is_temp_name(&entry.name) {
-                        let path = dir_abs.join(&entry.name);
-                        let rel = join_rel(dir_rel, &entry.name);
-                        // A transfer in progress owns its temp file; one that
-                        // still has its intent row was listed above.
-                        if lock(&inner.in_flight).temps.contains(&path)
-                            || report.orphan_temps_left.contains(&rel)
-                        {
-                            return;
-                        }
-                        match ledger.has_partial(PRIMARY, &rel) {
+        if !cancelled && !missing.is_empty() {
+            let mut ledger_error = None;
+            let walked = inner.walk(inner.root(), cancel, &mut |visit| {
+                if let Visit::File { dir_rel, entry, .. } = visit {
+                    if ledger_error.is_some() || temp_tag_of(&entry.name).is_some() {
+                        return;
+                    }
+                    let dir_key = path_key(&dir_rel.join("/"));
+                    if missing.is_rename_suspect(&dir_key, &entry.name) {
+                        match ledger.path_key_exists(&path_key(&join_rel(dir_rel, &entry.name))) {
                             Ok(true) => {}
-                            Ok(false) => {
-                                report.unowned_temp_count += 1;
-                                if report.unowned_temps.len() < MAX_LISTED {
-                                    report.unowned_temps.push(rel);
-                                }
-                            }
+                            Ok(false) => report.rename_suspects += 1,
                             Err(e) => ledger_error = Some(e),
                         }
-                    } else if !missing.is_empty() && ledger_error.is_none() {
-                        let dir_key = path_key(&dir_rel.join("/"));
-                        if missing.is_rename_suspect(&dir_key, &entry.name) {
-                            match ledger.path_key_exists(&path_key(&join_rel(dir_rel, &entry.name)))
-                            {
-                                Ok(true) => {}
-                                Ok(false) => report.rename_suspects += 1,
-                                Err(e) => ledger_error = Some(e),
-                            }
-                        }
-                    }
-                }
-                Visit::Reparse { rel } => {
-                    if report.reparse_points_skipped.len() < MAX_LISTED {
-                        report.reparse_points_skipped.push(rel);
-                    }
-                }
-                Visit::Unreadable { rel, error } => {
-                    if report.unreadable_dirs.len() < MAX_LISTED {
-                        report.unreadable_dirs.push(format!("{rel}: {error}"));
                     }
                 }
             });
-        if let Some(e) = ledger_error {
-            return Err(e.into());
+            if let Some(e) = ledger_error {
+                return Err(e.into());
+            }
+            cancelled = !walked;
         }
-        report.completed = walked && !cancelled;
+        report.completed = !cancelled;
 
         evidence.checked = report.records_checked;
         evidence.missing = report.newly_missing;
@@ -391,9 +527,10 @@ impl Store {
         report.mass_change = inner.judge_mass_change(&evidence)?;
 
         let summary = format!(
-            "temps removed {} ({} bytes), unowned temp-like files left alone {}, records checked {}, missing {}, changed {}, rename-suspects {}, reparse points {}",
+            "temps removed {} ({} bytes), lost renames made again {}, temp-like files of others left alone {}, records checked {}, missing {}, changed {}, rename-suspects {}, reparse points {}",
             report.orphan_temps_removed,
             report.orphan_temp_bytes,
+            report.renames_recreated.len(),
             report.unowned_temp_count,
             report.records_checked,
             report.newly_missing,

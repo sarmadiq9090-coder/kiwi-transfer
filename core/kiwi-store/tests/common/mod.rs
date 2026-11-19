@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use kiwi_store::destination::{BusKind, DriveKind};
 use kiwi_store::testing::{FaultFs, ManualClock};
 use kiwi_store::{
-    CommitReceipt, ContentHash, DeviceId, DeviceLimits, FileRequest, HazardEnv, Seams, Store,
-    StoreConfig, StoreError, VolumeInfo, STORE_DIR, TEMP_PREFIX,
+    CommitReceipt, ContentHash, DeletionDenied, DeletionProof, DeviceId, DeviceLimits, FileRequest,
+    HazardEnv, Seams, Store, StoreConfig, StoreError, VerifyRequest, VolumeInfo, STORE_DIR,
+    TEMP_PREFIX,
 };
 
 /// 2027-01-15T08:00:00Z, in milliseconds.
@@ -134,8 +135,17 @@ impl World {
         Store::open_with_seams(self.config(), self.seams())
     }
 
-    /// Opens the store (a new session) with the phone registered.
+    /// Opens the store with the phone registered and connected: a new
+    /// session of the phone has begun.
     pub fn open(&self) -> Store {
+        let store = self.open_idle();
+        store.new_session(&phone(), None).unwrap();
+        store
+    }
+
+    /// Opens the store with the phone registered, but not connected: the
+    /// program was started and no session of the phone has begun.
+    pub fn open_idle(&self) -> Store {
         let store = self.try_open().expect("the store should open");
         store
             .register_device(&phone(), "Pixel 8", DeviceLimits::default())
@@ -238,6 +248,7 @@ pub fn fixed_ntfs() -> VolumeInfo {
         hot_plug: Some(false),
         bus: Some(BusKind::Sata),
         volume_root: "test".to_owned(),
+        device_number: Some(0),
     }
 }
 
@@ -252,6 +263,8 @@ pub fn usb_ntfs(serial: u64) -> VolumeInfo {
         hot_plug: Some(true),
         bus: Some(BusKind::Usb),
         volume_root: "test-usb".to_owned(),
+        // Every stand-in disk is a physical disk of its own.
+        device_number: Some((serial & 0xFFFF) as u32 + 1),
     }
 }
 
@@ -276,9 +289,89 @@ pub fn data(seed: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
+/// The item key the "phone" of these tests gives a file: its name.
+pub fn key_of(name: &str) -> &[u8] {
+    match name.as_bytes() {
+        [] => b"-",
+        bytes => &bytes[..bytes.len().min(64)],
+    }
+}
+
+/// The key of the proof the "phone" asks for.
+pub const PROOF_KEY: [u8; 32] = [0x5A; 32];
+
+/// Asks, as the phone, whether its copy of the content with this hash may be
+/// deleted. The phone names the record on its receipt: here, the oldest one
+/// the ledger has for that hash (read straight from the ledger file, as the
+/// phone's receipt would simply say it).
+pub fn verify(
+    store: &Store,
+    hash: &ContentHash,
+    min_age_sessions: u32,
+) -> Result<DeletionProof, DeletionDenied> {
+    verify_as(store, &phone(), hash, min_age_sessions)
+}
+
+pub fn verify_as(
+    store: &Store,
+    device: &DeviceId,
+    hash: &ContentHash,
+    min_age_sessions: u32,
+) -> Result<DeletionProof, DeletionDenied> {
+    let conn = rusqlite::Connection::open(store.ledger_path()).unwrap();
+    let named: Option<(Option<Vec<u8>>, i64, i64)> = conn
+        .query_row(
+            "SELECT item_key, size, commit_no FROM files WHERE device_id = ?1 AND hash = ?2
+             ORDER BY commit_no LIMIT 1",
+            rusqlite::params![device.as_str(), hash.as_bytes().as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let (key, size, commit_seq) = match named {
+        Some((key, size, commit_no)) => (key.unwrap_or_default(), size as u64, commit_no as u64),
+        None => (b"no-such-item".to_vec(), 0, 0),
+    };
+    store.verify_for_deletion(
+        device,
+        &VerifyRequest {
+            key: &key,
+            hash: *hash,
+            size,
+            commit_seq,
+            proof_key: PROOF_KEY,
+            min_age_sessions,
+        },
+    )
+}
+
+/// The request a phone would make for one particular ledger record.
+pub fn request_of(record: &kiwi_store::StoredRecord) -> VerifyRequest<'_> {
+    VerifyRequest {
+        key: &record.key,
+        hash: record.hash,
+        size: record.size,
+        commit_seq: record.commit_seq,
+        proof_key: PROOF_KEY,
+        min_age_sessions: 1,
+    }
+}
+
+/// The request a phone would make for a file it holds this receipt for.
+pub fn request_for(receipt: &CommitReceipt, name: &str) -> VerifyRequest<'static> {
+    VerifyRequest {
+        key: Box::leak(key_of(name).to_vec().into_boxed_slice()),
+        hash: receipt.hash,
+        size: receipt.size,
+        commit_seq: receipt.seq,
+        proof_key: PROOF_KEY,
+        min_age_sessions: 1,
+    }
+}
+
 pub fn request<'a>(device: &'a DeviceId, name: &'a str, bytes: &[u8]) -> FileRequest<'a> {
     FileRequest {
         device,
+        key: key_of(name),
         name,
         size: bytes.len() as u64,
         claimed_hash: Some(ContentHash::of_bytes(bytes)),

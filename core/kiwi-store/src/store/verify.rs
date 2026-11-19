@@ -4,10 +4,9 @@
 //! comes from reading the candidate file back from the disk and comparing its
 //! BLAKE3 hash with the one asked about.
 //!
-//! Every answer is given **to one device**. The candidates are the files that
-//! device committed itself and its own claims on files another device
-//! committed first; a copy recorded for one phone is never used to answer for
-//! another.
+//! Every answer is given **to one device**, from that device's own records,
+//! which name files inside that device's own folder. A copy stored by one
+//! phone is never used to answer for another, even if it has the same hash.
 
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -17,7 +16,7 @@ use crate::destination::{CopyOnlyReason, FinalMoveSupport};
 use crate::error::{LedgerError, StoreError};
 use crate::fsops::{is_hard_io_error, EntryKind};
 use crate::hash::ContentHash;
-use crate::ledger::{BlockInfo, BlockKind, FileRecord, FileState};
+use crate::ledger::{BlockInfo, BlockKind, FileRecord, FileState, FmState};
 use crate::sanitize::SafeRelPath;
 
 /// A stored file that has just been re-read from disk and matched its hash.
@@ -36,8 +35,8 @@ pub struct StoredFile {
     pub hash: ContentHash,
     /// Size in bytes.
     pub size: u64,
-    /// The device's commit sequence number for the file.
-    pub committed_seq: u64,
+    /// The device's commit number for the file (what its receipt carried).
+    pub commit_seq: u64,
     /// Session of the device's commit.
     pub committed_session: u64,
     /// Wall-clock time of the device's commit (Unix milliseconds).
@@ -109,13 +108,43 @@ impl StoredStatus {
     }
 }
 
+/// What a phone names when it asks whether it may delete its copy of an item:
+/// the record, exactly, and the key of the proof it expects back.
+#[derive(Debug, Clone)]
+pub struct VerifyRequest<'a> {
+    /// The item key the phone gave the file when it sent it.
+    pub key: &'a [u8],
+    /// The content hash on the phone's receipt.
+    pub hash: ContentHash,
+    /// The size on the phone's receipt.
+    pub size: u64,
+    /// The commit number on the phone's receipt ([`CommitReceipt::seq`](super::CommitReceipt)).
+    pub commit_seq: u64,
+    /// The key of the proof: the answer carries `MAC(proof_key, content)`,
+    /// BLAKE3 in keyed mode over the bytes read from the disk. The transfer
+    /// layer derives it from a fresh nonce of the phone, so a proof cannot be
+    /// replayed or computed from anything but the file's bytes.
+    pub proof_key: [u8; 32],
+    /// Sessions of this device that must have begun since the one that
+    /// recorded the file (never fewer than one).
+    pub min_age_sessions: u32,
+}
+
 /// Proof returned by [`Store::verify_for_deletion`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "a DeletionProof is the only thing that may trigger a deletion on the phone"]
 pub struct DeletionProof {
     /// The file that was re-read from disk, unbuffered, just now.
     pub file: StoredFile,
-    /// Sessions elapsed since the commit (at least the requested minimum, at least 1).
+    /// `MAC(proof_key, content)`: BLAKE3 keyed hash of the bytes of that very
+    /// read. The phone computes the same over its own copy and compares.
+    pub proof: [u8; 32],
+    /// How many copies of the file the PC holds: this one, plus one for every
+    /// active mirror whose copy was read back and matched when it was last
+    /// checked. The proof itself always comes from the destination's file.
+    pub copies: u64,
+    /// Sessions of the device elapsed since the commit (at least the
+    /// requested minimum, at least 1).
     pub sessions_elapsed: u64,
     /// Wall-clock seconds elapsed since the commit (at least 24 hours).
     pub age_secs: u64,
@@ -170,9 +199,14 @@ pub enum DeletionDenied {
         /// The most real time that can have passed since the commit.
         real_age_at_most_secs: u64,
     },
-    /// The ledger has no record of this content for this device.
-    #[error("there is no record of this content for this device")]
+    /// This device has no record with this item key, hash, size and commit
+    /// number.
+    #[error("this device has no such record")]
     NoRecord,
+    /// The PC user acknowledged that this file was removed from the PC. This
+    /// is an answer, not an alarm.
+    #[error("the file was removed from the PC by its user")]
+    RemovedByUser,
     /// The file has not been stored for long enough.
     #[error(
         "stored too recently: committed in session {committed_session} (now {current_session}, {sessions_required} \
@@ -400,7 +434,15 @@ impl Inner {
                 self.ledger
                     .block(BlockKind::IntegrityProblems, &reason, now)?;
             }
-            Probe::Unreadable(_) | Probe::IoError(_) | Probe::NotLocal | Probe::Interrupted => {}
+            // A device error while reading a stored file: the disk is failing.
+            Probe::IoError(why) => {
+                let reason = format!(
+                    "a disk may be failing: reading {} returned an error ({why})",
+                    rec.rel_path
+                );
+                self.ledger.block(BlockKind::DiskFailing, &reason, now)?;
+            }
+            Probe::Unreadable(_) | Probe::NotLocal | Probe::Interrupted => {}
         }
         Ok(())
     }
@@ -417,7 +459,7 @@ impl Inner {
             abs_path,
             hash: rec.hash,
             size: rec.size,
-            committed_seq: rec.committed_seq,
+            commit_seq: rec.commit_no,
             committed_session: rec.committed_session,
             committed_unix_ms: rec.committed_unix_ms,
             read_unbuffered: unbuffered,
@@ -434,7 +476,7 @@ impl Inner {
     fn verify_by_hash(&self, device: &str, hash: &ContentHash) -> Result<StoredStatus, StoreError> {
         // A device the store does not know has no records: the answer is
         // simply "no record".
-        let mut candidates = self.ledger.claims_by_hash(hash, device)?;
+        let mut candidates = self.ledger.device_files_by_hash(device, hash)?;
         // Try the ones believed intact first.
         candidates.sort_by_key(|r| (r.state != FileState::Committed, r.committed_seq));
         let mut reason = NotVerifiedReason::NoRecord;
@@ -454,19 +496,18 @@ impl Inner {
     /// The most real time (in seconds) that can have passed since a commit,
     /// if the commit happened while this process was running. `None` for
     /// commits of earlier runs, about which this process knows nothing.
-    fn real_age_at_most_secs(&self, committed_seq: u64) -> Option<u64> {
-        let marks = lock(&self.session_marks);
-        let first = marks.first()?;
-        if committed_seq <= first.start_seq {
+    fn real_age_at_most_secs(&self, device: &str, committed_seq: u64) -> Option<u64> {
+        if committed_seq <= self.open_mark.start_seq {
             return None;
         }
-        // The commit came after the start of the latest session that began
-        // before it; no more time than that session's age has passed.
-        let begun = marks
-            .iter()
-            .rev()
-            .find(|m| m.start_seq < committed_seq)
-            .unwrap_or(first);
+        // The commit came after the start of the device's latest session that
+        // began before it (or, failing that, after this process opened the
+        // store); no more time than that has passed.
+        let begun = lock(&self.device_marks)
+            .get(device)
+            .and_then(|marks| marks.iter().rev().find(|m| m.start_seq < committed_seq))
+            .copied()
+            .unwrap_or(self.open_mark);
         let elapsed_ms = self.clock.monotonic_ms().saturating_sub(begun.monotonic_ms);
         Some(elapsed_ms / 1_000)
     }
@@ -537,38 +578,52 @@ impl Store {
     ///
     /// Returns a [`DeletionProof`] only if **all** of the following hold:
     ///
-    /// 1. the device is registered and paired;
-    /// 2. the destination, examined again right now, is a fixed internal
-    ///    NTFS/ReFS volume outside any known sync folder, and it is the
-    ///    volume the store was opened on;
-    /// 3. final move is not blocked;
+    /// 1. the destination, examined again right now, is a fixed internal
+    ///    NTFS/ReFS volume, outside any cloud-synced or system-managed
+    ///    folder, writable by this account only, and it is the volume the
+    ///    store was opened on;
+    /// 2. final move is not blocked;
+    /// 3. the device is registered and paired;
     /// 4. the clock does not read earlier than a time already in the ledger;
-    /// 5. **this device** has a record of a file with this hash that was
-    ///    committed in an **earlier session**: at least `min_age_sessions`
-    ///    (and at least 1) sessions ago by the session counter, before the
-    ///    current session's first event by sequence number, **and** at least
-    ///    24 hours ago by the clock; and if the commit happened while this
-    ///    program was running, the time that has really passed since does
-    ///    not contradict the clock;
-    /// 6. that file, read back from the device just now with an unbuffered
-    ///    read, hashes to `hash`, and its name is flushed to the device;
-    /// 7. the ledger accepted the record of this verification.
+    /// 5. **this device** has a record with exactly this item key, hash, size
+    ///    and commit number, the PC user has not acknowledged it as removed,
+    ///    and the file it names lies inside this device's own folder;
+    /// 6. that record was committed in an **earlier session of this device**:
+    ///    at least `min_age_sessions` (and at least 1) sessions of the device
+    ///    ago, before the device's current session began by event sequence
+    ///    number, **and** at least 24 hours ago by the clock; and if the
+    ///    commit happened while this program was running, the time that has
+    ///    really passed since does not contradict the clock;
+    /// 7. that file, read back from the device just now with an unbuffered
+    ///    read, has that size and hashes to that hash, and its name is
+    ///    flushed to the device;
+    /// 8. the ledger recorded the verification, in a flushed transaction of
+    ///    its own, before the answer is given. The file is then marked "may
+    ///    be the only copy" ([`FmState::Reverified`]).
     ///
-    /// A session begins with [`Store::open`] and with every
-    /// [`Store::new_session`]. A file is never confirmed in the session that
-    /// recorded it, however long that session lasts.
+    /// The proof in the answer is `MAC(proof_key, content)` computed from the
+    /// bytes of the read in step 7, in the same pass. Nothing is answered
+    /// from the ledger, from a cache, from an earlier result, from a mirror,
+    /// or from a file of another device.
+    ///
+    /// A commit number above the device's high-water mark proves that the
+    /// ledger was rolled back: final move is blocked (see
+    /// [`Store::check_peer_commit_seq`]).
+    ///
+    /// The store's delay rule is its own. The transfer layer has a second
+    /// clock (the link clock, kept with the phone); both must agree before a
+    /// phone deletes anything.
     ///
     /// Any doubt is a denial. A denial never deletes or changes anything.
     pub fn verify_for_deletion(
         &self,
         device: &DeviceId,
-        hash: &ContentHash,
-        min_age_sessions: u32,
+        req: &VerifyRequest<'_>,
     ) -> Result<DeletionProof, DeletionDenied> {
         let inner = &self.inner;
         let device = device.as_str();
 
-        // 2. The destination, as it is now.
+        // 1. The destination, as it is now.
         let current = inner
             .dest
             .reprobe()
@@ -589,24 +644,25 @@ impl Store {
                 .ledger
                 .flush(inner.now())
                 .map_err(DeletionDenied::Ledger)?;
+            inner.write_witness();
         }
 
-        // 3. The block.
+        // 2. The block.
         if let Some(block) = inner.ledger.block_info().map_err(DeletionDenied::Ledger)? {
             return Err(DeletionDenied::Blocked(block));
         }
 
-        // 1. The device. (Checked after the block, so that a blocked store
+        // 3. The device. (Checked after the block, so that a blocked store
         // says "blocked" to everyone, whoever asks.)
-        match inner
+        let owner = match inner
             .ledger
             .device(device)
             .map_err(DeletionDenied::Ledger)?
         {
             None => return Err(DeletionDenied::UnknownDevice(device.to_owned())),
             Some(d) if d.detached => return Err(DeletionDenied::DeviceDetached(d.device_id)),
-            Some(_) => {}
-        }
+            Some(d) => d,
+        };
 
         // 4. The clock.
         let now = inner.now();
@@ -621,97 +677,128 @@ impl Store {
             });
         }
 
-        // 5. and 6. A candidate that is old enough and verifies from disk.
-        let sessions_required = u64::from(min_age_sessions.max(1));
-        let age_secs_required = inner.cfg.min_wall_age_secs.max(MIN_WALL_AGE_SECS);
-        let current_session = inner.ledger.session();
-        let session_start_seq = inner.ledger.session_start_seq();
-
-        let candidates = inner
-            .ledger
-            .claims_by_hash(hash, device)
-            .map_err(DeletionDenied::Ledger)?;
-        let mut too_recent: Option<DeletionDenied> = None;
-        let mut not_verified: Option<NotVerifiedReason> = None;
-        for rec in &candidates {
-            let sessions_elapsed = current_session.saturating_sub(rec.committed_session);
-            let age_ms = now.saturating_sub(rec.committed_unix_ms);
-            let age_secs = age_ms.div_euclid(1_000);
-            let old_enough = rec.committed_session < current_session
-                && sessions_elapsed >= sessions_required
-                && rec.committed_seq < session_start_seq
-                && age_secs >= 0
-                && age_secs as u64 >= age_secs_required;
-            if !old_enough {
-                too_recent.get_or_insert(DeletionDenied::TooRecent {
-                    committed_session: rec.committed_session,
-                    current_session,
-                    sessions_required,
-                    age_secs,
-                    age_secs_required,
-                });
-                continue;
-            }
-            // The wall clock says enough time has passed. If the file was
-            // stored while this process was running, the process knows how
-            // much time can really have passed, and a clock that was set
-            // ahead does not get past that.
-            if let Some(at_most) = inner.real_age_at_most_secs(rec.committed_seq) {
-                if at_most < age_secs_required {
-                    too_recent.get_or_insert(DeletionDenied::ClockDisagrees {
-                        wall_age_secs: age_secs,
-                        real_age_at_most_secs: at_most,
-                    });
-                    continue;
-                }
-            }
-
-            let probe = inner.probe(rec, &mut |_| ControlFlow::Continue(()));
-            inner
-                .apply_probe(rec, &probe)
+        // 5. The record: this device's, and exactly the one the phone names.
+        if req.commit_seq > owner.commit_hwm {
+            // The phone holds a receipt this ledger never issued.
+            let block = inner
+                .rolled_back(device, req.commit_seq, owner.commit_hwm)
                 .map_err(DeletionDenied::Ledger)?;
-            match probe {
-                Probe::Match { unbuffered: true } => {
-                    // A problem found on another copy a moment ago blocks this one too.
-                    if let Some(block) =
-                        inner.ledger.block_info().map_err(DeletionDenied::Ledger)?
-                    {
-                        return Err(DeletionDenied::Blocked(block));
-                    }
-                    // The name the file was read under must be on the device,
-                    // not only in the cache. If that flush did not succeed
-                    // when the file was stored, it has to succeed now.
-                    if !rec.dir_synced {
-                        if let Err(why) = inner.flush_name(rec) {
-                            not_verified = Some(NotVerifiedReason::NameNotFlushed(why));
-                            continue;
-                        }
-                        inner
-                            .ledger
-                            .set_dir_synced(rec.id, inner.now())
-                            .map_err(DeletionDenied::Ledger)?;
-                    }
-                    // 7. No record of the verification, no proof.
-                    let verified_seq = inner
-                        .ledger
-                        .mark_verified(rec.id, "deletion_verified", Some(device), inner.now())
-                        .map_err(DeletionDenied::Ledger)?;
-                    return Ok(DeletionProof {
-                        file: inner.stored_file(rec, true),
-                        sessions_elapsed,
-                        age_secs: age_secs as u64,
-                        verified_seq,
-                    });
-                }
-                other => not_verified = Some(other.reason()),
+            return Err(DeletionDenied::Blocked(block));
+        }
+        let Some(rec) = inner
+            .ledger
+            .device_record(device, req.key, &req.hash, req.size, req.commit_seq)
+            .map_err(DeletionDenied::Ledger)?
+        else {
+            return Err(DeletionDenied::NoRecord);
+        };
+        if rec.fm == FmState::UserRemoved {
+            return Err(DeletionDenied::RemovedByUser);
+        }
+        // The file must lie inside this device's own folder. A record that
+        // says otherwise is damage, and is treated as such.
+        let in_own_folder = SafeRelPath::from_stored(&rec.rel_path).is_some_and(|rel| {
+            rel.depth() >= 2
+                && rel.components()[0].collision_key()
+                    == crate::sanitize::collision_key(&owner.folder_name)
+        });
+        if !in_own_folder {
+            inner
+                .apply_probe(&rec, &Probe::InvalidRecord)
+                .map_err(DeletionDenied::Ledger)?;
+            return Err(DeletionDenied::NotVerified(
+                NotVerifiedReason::InvalidRecord,
+            ));
+        }
+
+        // 6. Old enough, by this device's sessions and by the clock.
+        let sessions_required = u64::from(req.min_age_sessions.max(1));
+        let age_secs_required = inner.cfg.min_wall_age_secs.max(MIN_WALL_AGE_SECS);
+        let sessions_elapsed = owner.session_seq.saturating_sub(rec.committed_session);
+        let age_secs = now.saturating_sub(rec.committed_unix_ms).div_euclid(1_000);
+        let old_enough = rec.committed_session < owner.session_seq
+            && sessions_elapsed >= sessions_required
+            && rec.committed_seq < owner.session_start_seq
+            && age_secs >= 0
+            && age_secs as u64 >= age_secs_required;
+        if !old_enough {
+            return Err(DeletionDenied::TooRecent {
+                committed_session: rec.committed_session,
+                current_session: owner.session_seq,
+                sessions_required,
+                age_secs,
+                age_secs_required,
+            });
+        }
+        // The wall clock says enough time has passed. If the file was stored
+        // while this process was running, the process knows how much time
+        // can really have passed, and a clock that was set ahead does not
+        // get past that.
+        if let Some(at_most) = inner.real_age_at_most_secs(device, rec.committed_seq) {
+            if at_most < age_secs_required {
+                return Err(DeletionDenied::ClockDisagrees {
+                    wall_age_secs: age_secs,
+                    real_age_at_most_secs: at_most,
+                });
             }
         }
 
-        Err(match (too_recent, not_verified) {
-            // Something exists that will qualify with time: say so.
-            (Some(denied), _) => denied,
-            (None, Some(reason)) => DeletionDenied::NotVerified(reason),
-            (None, None) => DeletionDenied::NoRecord,
+        // 7. One unbuffered pass over the file: the hash that is compared
+        // with the record, and the keyed proof, from the same bytes.
+        let mut mac = blake3::Hasher::new_keyed(&req.proof_key);
+        let probe = inner.probe_at(
+            inner.root(),
+            &rec.rel_path,
+            rec.size,
+            &rec.hash,
+            &mut |chunk| {
+                mac.update(chunk);
+                ControlFlow::Continue(())
+            },
+        );
+        inner
+            .apply_probe(&rec, &probe)
+            .map_err(DeletionDenied::Ledger)?;
+        match probe {
+            Probe::Match { unbuffered: true } => {}
+            other => return Err(DeletionDenied::NotVerified(other.reason())),
+        }
+        // A problem found a moment ago blocks this file too.
+        if let Some(block) = inner.ledger.block_info().map_err(DeletionDenied::Ledger)? {
+            return Err(DeletionDenied::Blocked(block));
+        }
+        // The name the file was read under must be on the device, not only
+        // in the cache. If that flush did not succeed when the file was
+        // stored, it has to succeed now.
+        if !rec.dir_synced {
+            if let Err(why) = inner.flush_name(&rec) {
+                return Err(DeletionDenied::NotVerified(
+                    NotVerifiedReason::NameNotFlushed(why),
+                ));
+            }
+            inner
+                .ledger
+                .set_dir_synced(rec.id, inner.now())
+                .map_err(DeletionDenied::Ledger)?;
+        }
+
+        // 8. No flushed record of the verification, no proof. One
+        // transaction per confirmation; never batched.
+        let verified_seq = inner
+            .ledger
+            .mark_reverified(rec.id, device, inner.now())
+            .map_err(DeletionDenied::Ledger)?;
+        let copies = 1 + inner
+            .ledger
+            .mirror_copies_of(rec.id)
+            .map_err(DeletionDenied::Ledger)?;
+        Ok(DeletionProof {
+            file: inner.stored_file(&rec, true),
+            proof: *mac.finalize().as_bytes(),
+            copies,
+            sessions_elapsed,
+            age_secs: age_secs as u64,
+            verified_seq,
         })
     }
 }

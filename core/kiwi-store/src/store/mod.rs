@@ -1,5 +1,6 @@
 //! The storage engine: one destination root, one ledger.
 
+mod fm;
 mod incoming;
 mod mirror;
 mod pipeline;
@@ -7,18 +8,21 @@ mod recovery;
 mod scan;
 mod verify;
 
+pub use fm::{AuditStatus, StoredRecord};
 pub use incoming::{CommitOutcome, CommitReceipt, FileRequest, IncomingFile};
 pub use mirror::{
     CopyCounts, MirrorAbsent, MirrorError, MirrorFailure, MirrorId, MirrorInfo, MirrorOptions,
-    MirrorPending, MirrorPolicy, MirrorPresence, MirrorRun, MirrorRunReport, MirrorScan,
-    MirrorScanReport, Repair, RepairDirection, UnmirroredCommit, WrongDisk, MIRROR_MARKER_FILE,
+    MirrorPending, MirrorPresence, MirrorRun, MirrorRunReport, MirrorScan, MirrorScanReport,
+    Repair, RepairDirection, UnmirroredCommit, WrongDisk, MAX_MIRRORS, MIRROR_MARKER_FILE,
 };
 pub use recovery::RecoveryReport;
 pub use scan::{
     CancelToken, FindingKind, ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict,
     MAX_LISTED_FINDINGS,
 };
-pub use verify::{DeletionDenied, DeletionProof, NotVerifiedReason, StoredFile, StoredStatus};
+pub use verify::{
+    DeletionDenied, DeletionProof, NotVerifiedReason, StoredFile, StoredStatus, VerifyRequest,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -60,6 +64,7 @@ pub const MIN_WALL_AGE_SECS: u64 = 24 * 60 * 60;
 pub const MAX_PATH_UTF16: usize = 32_000;
 
 const MARKER_FILE: &str = "id";
+const WITNESS_FILE: &str = "commits";
 const ROOT_LOCK_FILE: &str = "lock";
 const LEDGER_LOCK_FILE: &str = "ledger.lock";
 
@@ -111,8 +116,6 @@ pub struct StoreConfig {
     pub defer_recovery: bool,
     /// What the integrity checks treat as alarming.
     pub scan_policy: ScanPolicy,
-    /// When a disk counts as failing during mirror runs and scans.
-    pub mirror_policy: MirrorPolicy,
 }
 
 impl StoreConfig {
@@ -127,7 +130,6 @@ impl StoreConfig {
             min_wall_age_secs: MIN_WALL_AGE_SECS,
             defer_recovery: false,
             scan_policy: ScanPolicy::default(),
-            mirror_policy: MirrorPolicy::default(),
         }
     }
 }
@@ -150,6 +152,14 @@ pub enum OpenNote {
     /// The destination's identity marker was missing and has been rewritten.
     /// If the ledger had records, final move has been blocked.
     MarkerRecreated,
+    /// The ledger is older than the destination folder remembers: it was
+    /// restored from a backup or a system image. It has been given a new
+    /// identifier (every receipt issued so far is void) and final move has
+    /// been blocked.
+    LedgerRolledBack {
+        /// What gave it away.
+        detail: String,
+    },
 }
 
 /// Asks the platform about the volume holding a path. Replaced in tests to
@@ -226,8 +236,14 @@ pub(crate) struct Inner {
     pub(crate) dest: Destination,
     pub(crate) fs: Arc<dyn Fs>,
     pub(crate) volume_probe: VolumeProbe,
-    /// The sessions begun in this process, oldest first.
-    pub(crate) session_marks: Mutex<Vec<SessionMark>>,
+    /// When this process opened the store.
+    pub(crate) open_mark: SessionMark,
+    /// The sessions each device has begun in this process, oldest first.
+    pub(crate) device_marks: Mutex<HashMap<String, Vec<SessionMark>>>,
+    /// The tag in the names of the temp files this run creates.
+    temp_tag: String,
+    /// Every temp-file tag the ledger has recorded, this run's included.
+    pub(crate) known_tags: Mutex<HashSet<String>>,
     /// One mirror run or mirror scan at a time.
     pub(crate) mirror_lock: Mutex<()>,
     pub(crate) clock: Arc<dyn Clock>,
@@ -242,7 +258,6 @@ pub(crate) struct Inner {
     /// One integrity scan at a time: its progress record is a single row.
     pub(crate) scan_lock: Mutex<()>,
     temp_counter: AtomicU64,
-    temp_salt: u64,
     recovery: Mutex<Option<RecoveryReport>>,
     notes: Vec<OpenNote>,
     _root_lock: File,
@@ -405,11 +420,17 @@ impl Store {
                 .into());
             }
         }
+        let fresh_ledger = ledger.max_file_id()? == 0 && ledger.devices()?.is_empty();
         ledger.start_session(now)?;
-        let first_mark = SessionMark {
+        let open_mark = SessionMark {
             start_seq: ledger.session_start_seq(),
             monotonic_ms: clock.monotonic_ms(),
         };
+        // This run's temp-file tag is in the ledger, flushed, before any temp
+        // file can carry it.
+        let temp_tag = format!("{:016x}", random_u64());
+        ledger.add_temp_tag(&temp_tag, now)?;
+        let known_tags = ledger.temp_tags()?;
         let mut notes = Vec::new();
         match (marker, ledger_id) {
             (None, None) => {
@@ -469,6 +490,27 @@ impl Store {
             });
         }
 
+        // A ledger that is behind what the destination folder remembers was
+        // restored from an older copy while the folder was not.
+        let witness_path = store_dir.join(WITNESS_FILE);
+        if !fresh_ledger {
+            if let Some(detail) = rolled_back(&ledger, &witness_path)? {
+                for (device, hwm) in read_witness(&witness_path).map(|w| w.1).unwrap_or_default() {
+                    ledger.raise_commit_hwm(
+                        &device,
+                        hwm,
+                        "the destination remembers this commit",
+                        now,
+                    )?;
+                }
+                ledger.renew_ledger_id(&detail, now)?;
+                let reason =
+                    format!("the ledger was rolled back (restored from an older copy): {detail}");
+                ledger.block(BlockKind::LedgerRollback, &reason, now)?;
+                notes.push(OpenNote::LedgerRolledBack { detail });
+            }
+        }
+
         let defer_recovery = cfg.defer_recovery;
         let store = Store {
             inner: Arc::new(Inner {
@@ -476,7 +518,10 @@ impl Store {
                 dest,
                 fs,
                 volume_probe,
-                session_marks: Mutex::new(vec![first_mark]),
+                open_mark,
+                device_marks: Mutex::new(HashMap::new()),
+                temp_tag,
+                known_tags: Mutex::new(known_tags),
                 mirror_lock: Mutex::new(()),
                 clock,
                 ledger,
@@ -485,13 +530,13 @@ impl Store {
                 commit_lock: Mutex::new(()),
                 scan_lock: Mutex::new(()),
                 temp_counter: AtomicU64::new(0),
-                temp_salt: random_u64(),
                 recovery: Mutex::new(None),
                 notes,
                 _root_lock: root_lock,
                 _ledger_lock: ledger_lock,
             }),
         };
+        store.inner.write_witness();
         if !defer_recovery {
             store.run_recovery(&CancelToken::new())?;
         }
@@ -503,43 +548,83 @@ impl Store {
         &self.inner.dest
     }
 
-    /// The current session's number. It grows by one every time the store is
-    /// opened and with every [`Store::new_session`], and is what "an earlier
-    /// session" means in [`Store::verify_for_deletion`].
-    pub fn session(&self) -> u64 {
+    /// The number of this run of the store: it grows by one every time the
+    /// store is opened. It is **not** what "an earlier session" means in
+    /// [`Store::verify_for_deletion`]; that is a device's own session, see
+    /// [`Store::new_session`].
+    pub fn run_number(&self) -> u64 {
         self.inner.ledger.session()
     }
 
-    /// Ends the current session and begins the next one. Returns its number.
+    /// The random identifier of the ledger. Receipts are only good for the
+    /// ledger that issued them; a ledger found to have been restored from an
+    /// older copy gets a new identifier (see [`OpenNote::LedgerRolledBack`]).
+    pub fn ledger_id(&self) -> Result<String, StoreError> {
+        Ok(self.inner.ledger.ledger_id()?)
+    }
+
+    /// Begins a new session **of one device**. Returns its number.
     ///
-    /// A session is one meeting between the PC and a phone. A program that
-    /// runs for weeks opens the store once and calls this at the start of
-    /// every transfer session, so that "stored in an earlier session" does
-    /// not have to wait for a restart.
+    /// A session is one established connection of one phone. The transfer
+    /// layer calls this once per connection, when both sides have agreed on
+    /// the session number, and passes that number; without a number the
+    /// device's own counter is advanced by one. Opening the store, starting
+    /// the program, or another phone connecting is **not** a new session for
+    /// this phone, and nothing but this call advances its counter.
     ///
-    /// The counter is in the ledger and survives restarts; the call does not
+    /// The counter is in the ledger and survives restarts. The call does not
     /// return before the new session is on the device, and with it every
     /// batched record (see [`IncomingFile::finish_batched`]).
     ///
     /// What it means for [`Store::verify_for_deletion`]:
     ///
-    /// * a file recorded before this call belongs to an earlier session from
-    ///   now on; a file whose transfer began before the call and is finished
-    ///   after it belongs to the new session;
-    /// * `min_age_sessions = n` is satisfied once `n` sessions have begun
-    ///   since the one that recorded the file, by whichever of
-    ///   [`Store::open`] and `new_session`;
+    /// * a file this device stored before the call belongs to an earlier
+    ///   session from now on; a file whose transfer began before the call and
+    ///   is finished after it belongs to the new session;
+    /// * `min_age_sessions = n` is satisfied once the device's session number
+    ///   is at least `n` above that of the session that recorded the file;
     /// * calling this again and again buys nothing: the 24 hours are counted
     ///   separately, on the wall clock, and for files stored while this
     ///   process has been running also on a clock that cannot be set, so a
     ///   wall clock that jumps ahead does not shorten the wait.
-    pub fn new_session(&self) -> Result<u64, StoreError> {
+    ///
+    /// Fails if the device is unknown or unpaired, or if `session_seq` is not
+    /// above the device's current session number (or above 2^53 - 1).
+    pub fn new_session(
+        &self,
+        device: &DeviceId,
+        session_seq: Option<u64>,
+    ) -> Result<u64, StoreError> {
         let inner = &self.inner;
-        let session = inner.ledger.start_session(inner.now())?;
-        lock(&inner.session_marks).push(SessionMark {
-            start_seq: inner.ledger.session_start_seq(),
-            monotonic_ms: inner.clock.monotonic_ms(),
-        });
+        let id = device.as_str();
+        match inner.ledger.device(id)? {
+            None => return Err(StoreError::UnknownDevice(id.to_owned())),
+            Some(d) if d.detached => return Err(StoreError::DeviceDetached(d.device_id)),
+            Some(_) => {}
+        }
+        let outcome = inner
+            .ledger
+            .start_device_session(id, session_seq, inner.now())?;
+        let session = match outcome {
+            None => return Err(StoreError::UnknownDevice(id.to_owned())),
+            Some(Err(current)) => {
+                return Err(StoreError::SessionNotNewer {
+                    current,
+                    requested: session_seq.unwrap_or(current.saturating_add(1)),
+                })
+            }
+            Some(Ok(session)) => session,
+        };
+        if let Some(record) = inner.ledger.device(id)? {
+            lock(&inner.device_marks)
+                .entry(id.to_owned())
+                .or_default()
+                .push(SessionMark {
+                    start_seq: record.session_start_seq,
+                    monotonic_ms: inner.clock.monotonic_ms(),
+                });
+        }
+        inner.write_witness();
         Ok(session)
     }
 
@@ -616,28 +701,33 @@ impl Store {
             .detach_device(id.as_str(), note, self.inner.now())?)
     }
 
-    /// The commit high-water mark: the highest commit sequence number
-    /// ([`CommitReceipt::seq`]) this ledger has ever issued, to any device.
-    /// It is stored in the ledger and never decreases.
+    /// A device's commit high-water mark: the highest commit number
+    /// ([`CommitReceipt::seq`]) this ledger has ever issued to it. Commit
+    /// numbers are counted per device (1, 2, 3, ...); the mark is stored in
+    /// the ledger and never decreases.
     ///
     /// The transfer layer sends it to the phone when they connect; the phone
-    /// compares it with the highest sequence number it holds a receipt for.
-    /// A phone that holds a higher one has proof that this ledger was rolled
+    /// compares it with the highest commit number it holds a receipt for. A
+    /// phone that holds a higher one has proof that this ledger was rolled
     /// back (restored from a backup or a system image): see
-    /// [`Store::check_peer_commit_seq`]. The per-device value is
-    /// [`DeviceRecord::commit_hwm`].
-    pub fn commit_hwm(&self) -> Result<u64, StoreError> {
-        Ok(self.inner.ledger.commit_hwm()?)
+    /// [`Store::check_peer_commit_seq`].
+    pub fn commit_hwm(&self, device: &DeviceId) -> Result<u64, StoreError> {
+        self.inner
+            .ledger
+            .device(device.as_str())?
+            .map(|d| d.commit_hwm)
+            .ok_or_else(|| StoreError::UnknownDevice(device.as_str().to_owned()))
     }
 
-    /// Checks the highest commit sequence number a phone holds a receipt for
-    /// against what the ledger remembers issuing to it.
+    /// Checks the highest commit number a phone holds a receipt for against
+    /// what the ledger remembers issuing to it.
     ///
     /// If the phone's number is higher, the ledger has lost commits it once
     /// acknowledged: it was rolled back. That is recorded, final move is
-    /// blocked ([`BlockKind::LedgerRollback`]) and
-    /// [`RollbackCheck::RolledBack`] is returned; the transfer layer should
-    /// treat the phone's receipts as void and offer everything again.
+    /// blocked ([`BlockKind::LedgerRollback`]), the device's mark is raised
+    /// to the phone's number (so that no commit number is ever issued twice)
+    /// and [`RollbackCheck::RolledBack`] is returned; the transfer layer
+    /// should treat the phone's receipts as void and offer everything again.
     pub fn check_peer_commit_seq(
         &self,
         device: &DeviceId,
@@ -653,13 +743,7 @@ impl Store {
                 device_commit_hwm: record.commit_hwm,
             });
         }
-        let reason = format!(
-            "the ledger was rolled back: device {} holds a receipt for commit {peer_commit_seq},              but the highest commit the ledger remembers issuing to it is {}",
-            record.device_id, record.commit_hwm
-        );
-        let block = inner
-            .ledger
-            .block(BlockKind::LedgerRollback, &reason, inner.now())?;
+        let block = inner.rolled_back(&record.device_id, peer_commit_seq, record.commit_hwm)?;
         Ok(RollbackCheck::RolledBack {
             peer_commit_seq,
             device_commit_hwm: record.commit_hwm,
@@ -680,11 +764,11 @@ impl Store {
 
     /// Flushes the ledger: every record written by
     /// [`IncomingFile::finish_batched`] so far is on the device when this
-    /// returns. Returns the commit high-water mark, which is then durable:
-    /// every receipt with a sequence number up to it may be acknowledged to
-    /// the phone.
-    pub fn flush_batch(&self) -> Result<u64, StoreError> {
-        Ok(self.inner.ledger.flush(self.inner.now())?)
+    /// returns, and their receipts may be acknowledged to the phone.
+    pub fn flush_batch(&self) -> Result<(), StoreError> {
+        self.inner.ledger.flush(self.inner.now())?;
+        self.inner.write_witness();
+        Ok(())
     }
 
     /// How many batched records are waiting for [`Store::flush_batch`].
@@ -757,16 +841,57 @@ impl Inner {
         self.dest.root()
     }
 
-    /// A fresh temp-file name.
+    /// A fresh temp-file name: `.kiwi-tmp-<tag>-<n>-<random>.part`, with the
+    /// tag of this run.
     pub(crate) fn temp_name(&self) -> String {
         let n = self.temp_counter.fetch_add(1, Ordering::Relaxed);
-        let mix = random_u64() ^ self.temp_salt.rotate_left((n % 61) as u32);
         format!(
-            "{TEMP_PREFIX}{:x}-{:x}-{:016x}{TEMP_SUFFIX}",
-            self.ledger.session(),
+            "{TEMP_PREFIX}{}-{:x}-{:016x}{TEMP_SUFFIX}",
+            self.temp_tag,
             n,
-            mix
+            random_u64()
         )
+    }
+
+    /// Records a proven rollback for one device: block, and raise the
+    /// device's mark so the numbers the phone has seen are never used again.
+    pub(crate) fn rolled_back(
+        &self,
+        device: &str,
+        peer_commit_seq: u64,
+        known: u64,
+    ) -> Result<BlockInfo, LedgerError> {
+        let reason = format!(
+            "the ledger was rolled back: device {device} holds a receipt for commit {peer_commit_seq}, \
+             but the highest commit the ledger remembers issuing to it is {known}"
+        );
+        let block = self
+            .ledger
+            .block(BlockKind::LedgerRollback, &reason, self.now())?;
+        self.ledger
+            .raise_commit_hwm(device, peer_commit_seq, &reason, self.now())?;
+        self.write_witness();
+        Ok(block)
+    }
+
+    /// Writes down, inside the destination folder, the highest commit number
+    /// of every device. Called only when the ledger has just been flushed,
+    /// so the note is never ahead of the ledger. A ledger that is later
+    /// found behind this note was restored from an older copy. Best effort:
+    /// without the note only this one way of noticing is lost.
+    pub(crate) fn write_witness(&self) {
+        let (Ok(ledger_id), Ok(devices)) = (self.ledger.ledger_id(), self.ledger.devices()) else {
+            return;
+        };
+        let mut text = format!("kiwi-commits 1 {ledger_id}\n");
+        for device in devices {
+            text.push_str(&format!("{} {}\n", device.device_id, device.commit_hwm));
+        }
+        let path = self.root().join(STORE_DIR).join(WITNESS_FILE);
+        let fresh = path.with_extension("new");
+        if std::fs::write(&fresh, text).is_ok() {
+            let _ = std::fs::rename(&fresh, &path);
+        }
     }
 
     /// Walks from `root` (the destination or a mirror) down `dir`, refusing reparse points and anything
@@ -913,10 +1038,55 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         // A clean shutdown leaves no batched record at the mercy of a power cut.
-        if self.ledger.pending_batched() > 0 {
-            let _ = self.ledger.flush(self.clock.now_unix_ms());
+        if self.ledger.pending_batched() > 0 && self.ledger.flush(self.clock.now_unix_ms()).is_ok()
+        {
+            self.write_witness();
         }
     }
+}
+
+/// The note the destination folder keeps of the ledger's commit numbers: the
+/// ledger id it was written for, and each device's highest commit number.
+fn read_witness(path: &Path) -> Option<(String, Vec<(String, u64)>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let ledger_id = lines.next()?.strip_prefix("kiwi-commits 1 ")?.to_owned();
+    let mut devices = Vec::new();
+    for line in lines {
+        let (device, hwm) = line.split_once(' ')?;
+        devices.push((device.to_owned(), hwm.parse().ok()?));
+    }
+    Some((ledger_id, devices))
+}
+
+/// Compares a ledger that has been used before with the destination's note.
+/// Returns what is wrong if the ledger is behind it.
+fn rolled_back(ledger: &Ledger, witness_path: &Path) -> Result<Option<String>, StoreError> {
+    let Some((noted_id, noted)) = read_witness(witness_path) else {
+        return Ok(None);
+    };
+    if noted_id != ledger.ledger_id()? {
+        return Ok(Some(
+            "the destination was last used with a later state of this ledger".to_owned(),
+        ));
+    }
+    let known: HashMap<String, u64> = ledger
+        .devices()?
+        .into_iter()
+        .map(|d| (d.device_id, d.commit_hwm))
+        .collect();
+    for (device, hwm) in noted {
+        let have = known.get(&device).copied();
+        if hwm > 0 && have.is_none_or(|have| have < hwm) {
+            return Ok(Some(format!(
+                "the destination remembers commit {hwm} of device {device}; the ledger knows {}",
+                have.map_or("nothing of that device".to_owned(), |h| format!(
+                    "only up to {h}"
+                ))
+            )));
+        }
+    }
+    Ok(None)
 }
 
 fn acquire(lock_path: &Path) -> Result<File, StoreError> {
@@ -1028,7 +1198,12 @@ mod tests {
     #[test]
     fn temp_names_are_recognised_and_unique() {
         use super::pipeline::is_temp_name;
-        assert!(is_temp_name(".kiwi-tmp-1-0-0123456789abcdef.part"));
+        assert!(is_temp_name(
+            ".kiwi-tmp-00112233aabbccdd-0-0123456789abcdef.part"
+        ));
+        assert!(is_temp_name(
+            ".kiwi-tmp-00112233aabbccdd-1f-0123456789abcdef.part"
+        ));
         for not in [
             ".kiwi-tmp-.part",
             ".kiwi-tmp-x",
@@ -1037,10 +1212,11 @@ mod tests {
             ".KIWI-TMP-1.part",
             ".kiwi-tmp-1.part",
             ".kiwi-tmp-notes.part",
-            ".kiwi-tmp-1-0-0123456789abcde.part",
-            ".kiwi-tmp-1-0-0123456789ABCDEF.part",
-            ".kiwi-tmp-1-0-0123456789abcdef-1.part",
-            ".kiwi-tmp-1-0-0123456789abcdef.part.jpg",
+            ".kiwi-tmp-1-0-0123456789abcdef.part",
+            ".kiwi-tmp-00112233aabbccdd-0-0123456789abcde.part",
+            ".kiwi-tmp-00112233AABBCCDD-0-0123456789abcdef.part",
+            ".kiwi-tmp-00112233aabbccdd-0-0123456789abcdef-1.part",
+            ".kiwi-tmp-00112233aabbccdd-0-0123456789abcdef.part.jpg",
             "",
         ] {
             assert!(!is_temp_name(not), "{not:?}");

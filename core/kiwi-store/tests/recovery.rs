@@ -32,11 +32,11 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     // created: somebody's, not ours. (Before the intent rows existed, every
     // one of these was deleted on the strength of its name alone.)
     let debris = [
-        ".kiwi-tmp-1-0-00000000deadbeef.part",
-        "Pixel 8/.kiwi-tmp-2-7-0123456789abcdef.part",
-        "Pixel 8/DCIM/Camera/.kiwi-tmp-3-1-aaaaaaaaaaaaaaaa.part",
-        "Pixel 8/DCIM/Camera/.kiwi-tmp-3-2-bbbbbbbbbbbbbbbb.part",
-        "Some Folder The User Made/deeper/.kiwi-tmp-9-9-cccccccccccccccc.part",
+        ".kiwi-tmp-00000000deadbeef-0-00000000deadbeef.part",
+        "Pixel 8/.kiwi-tmp-0123456789abcdef-7-0123456789abcdef.part",
+        "Pixel 8/DCIM/Camera/.kiwi-tmp-aaaaaaaaaaaaaaaa-1-aaaaaaaaaaaaaaaa.part",
+        "Pixel 8/DCIM/Camera/.kiwi-tmp-bbbbbbbbbbbbbbbb-2-bbbbbbbbbbbbbbbb.part",
+        "Some Folder The User Made/deeper/.kiwi-tmp-cccccccccccccccc-9-cccccccccccccccc.part",
     ];
     for (i, rel) in debris.iter().enumerate() {
         std::fs::create_dir_all(w.path(rel).parent().unwrap()).unwrap();
@@ -55,9 +55,12 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
         std::fs::write(w.path(rel), b"not a temp file").unwrap();
     }
     // A directory with a temp-file name is not a file to delete.
-    std::fs::create_dir_all(w.path("Pixel 8/.kiwi-tmp-5-5-dddddddddddddddd.part/inside")).unwrap();
+    std::fs::create_dir_all(
+        w.path("Pixel 8/.kiwi-tmp-dddddddddddddddd-5-dddddddddddddddd.part/inside"),
+    )
+    .unwrap();
     std::fs::write(
-        w.path("Pixel 8/.kiwi-tmp-5-5-dddddddddddddddd.part/inside/file.txt"),
+        w.path("Pixel 8/.kiwi-tmp-dddddddddddddddd-5-dddddddddddddddd.part/inside/file.txt"),
         b"x",
     )
     .unwrap();
@@ -65,7 +68,7 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     let inside_store_dir = w
         .root
         .join(STORE_DIR)
-        .join(".kiwi-tmp-0-0-eeeeeeeeeeeeeeee.part");
+        .join(".kiwi-tmp-eeeeeeeeeeeeeeee-0-eeeeeeeeeeeeeeee.part");
     std::fs::write(&inside_store_dir, b"x").unwrap();
 
     let store = w.open();
@@ -103,7 +106,9 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     let mut expected: Vec<String> = bystanders.iter().map(|s| s.to_string()).collect();
     expected.extend(debris.iter().map(|s| s.to_string()));
     expected.push("Pixel 8/DCIM/Camera/keep.jpg".to_owned());
-    expected.push("Pixel 8/.kiwi-tmp-5-5-dddddddddddddddd.part/inside/file.txt".to_owned());
+    expected.push(
+        "Pixel 8/.kiwi-tmp-dddddddddddddddd-5-dddddddddddddddd.part/inside/file.txt".to_owned(),
+    );
     expected.sort();
     assert_eq!(w.files(), expected);
     assert!(inside_store_dir.exists());
@@ -164,7 +169,7 @@ fn records_of_vanished_files_are_marked_and_block_final_move() {
     assert_eq!(block.kind, BlockKind::IntegrityProblems);
     // Even the intact file cannot be confirmed for deletion while blocked.
     assert!(matches!(
-        store.verify_for_deletion(&phone(), &hashes[0], 1),
+        verify(&store, &hashes[0], 1),
         Err(DeletionDenied::Blocked(_))
     ));
     assert!(store
@@ -203,7 +208,7 @@ fn records_of_vanished_files_are_marked_and_block_final_move() {
     store
         .clear_final_move_block("the user deleted these on purpose")
         .unwrap();
-    assert!(store.verify_for_deletion(&phone(), &hashes[0], 1).is_ok());
+    assert!(verify(&store, &hashes[0], 1).is_ok());
     drop(store);
     let store = w.open();
     assert!(
@@ -366,7 +371,7 @@ fn sessions_count_every_open() {
     let w = World::new("sessions");
     for expected in 1..=5 {
         let store = w.open();
-        assert_eq!(store.session(), expected);
+        assert_eq!(store.run_number(), expected);
         assert_eq!(
             store.open_notes().contains(&OpenNote::NewDestination),
             expected == 1
@@ -390,7 +395,7 @@ fn a_ledger_that_lost_its_records_is_noticed() {
     let block = store.final_move_block().unwrap().expect("blocked");
     assert_eq!(block.kind, BlockKind::LedgerLost);
     assert!(matches!(
-        store.verify_for_deletion(&phone(), &hash, 1),
+        verify(&store, &hash, 1),
         Err(DeletionDenied::Blocked(_))
     ));
     assert!(matches!(
@@ -435,7 +440,7 @@ fn a_folder_that_lost_its_marker_is_noticed() {
         "{block:?}"
     );
     assert!(matches!(
-        store.verify_for_deletion(&phone(), &hash, 1),
+        verify(&store, &hash, 1),
         Err(DeletionDenied::Blocked(_))
     ));
     assert!(store.events_after(0, 1_000).unwrap().iter().any(|e| e
@@ -475,8 +480,8 @@ fn a_ledger_cannot_be_used_with_another_folder() {
         other => panic!("expected DestinationMismatch, got {:?}", other.map(|_| ())),
     }
     // Both are still usable with their own ledgers.
-    assert_eq!(a.open().session(), 2);
-    assert_eq!(b.open().session(), 2);
+    assert_eq!(a.open().run_number(), 2);
+    assert_eq!(b.open().run_number(), 2);
 }
 
 #[test]
