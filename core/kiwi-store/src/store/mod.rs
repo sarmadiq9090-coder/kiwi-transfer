@@ -7,7 +7,7 @@ mod verify;
 
 pub use incoming::{CommitOutcome, CommitReceipt, FileRequest, IncomingFile};
 pub use recovery::RecoveryReport;
-pub use scan::{CancelToken, ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict};
+pub use scan::{CancelToken, FindingKind, ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict, MAX_LISTED_FINDINGS};
 pub use verify::{DedupeScope, DeletionDenied, DeletionProof, NotVerifiedReason, StoredFile, StoredStatus};
 
 use std::collections::{HashMap, HashSet};

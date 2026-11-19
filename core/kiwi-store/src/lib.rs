@@ -71,8 +71,8 @@ pub use sanitize::{sanitize_component, sanitize_rel_path, SafeName, SafeRelPath,
 pub use store::Seams;
 pub use store::{
     CancelToken, CommitOutcome, CommitReceipt, DedupeScope, DeletionDenied, DeletionProof, DeviceId, FileRequest,
-    IncomingFile, NotVerifiedReason, OpenNote, RecoveryReport, ScanFinding, ScanOptions, ScanPolicy, ScanReport,
-    ScanVerdict, Store, StoreConfig, StoredFile, StoredStatus, DEFAULT_SAFETY_MARGIN_BYTES, MAX_PATH_UTF16,
-    MIN_WALL_AGE_SECS, STORE_DIR, TEMP_PREFIX, TEMP_SUFFIX,
+    FindingKind, IncomingFile, NotVerifiedReason, OpenNote, RecoveryReport, ScanFinding, ScanOptions, ScanPolicy,
+    ScanReport, ScanVerdict, Store, StoreConfig, StoredFile, StoredStatus, DEFAULT_SAFETY_MARGIN_BYTES,
+    MAX_LISTED_FINDINGS, MAX_PATH_UTF16, MIN_WALL_AGE_SECS, STORE_DIR, TEMP_PREFIX, TEMP_SUFFIX,
 };
 pub use template::{CaptureTime, CivilDate, Template, TemplateError};

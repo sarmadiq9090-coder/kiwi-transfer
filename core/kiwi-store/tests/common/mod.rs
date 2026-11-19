@@ -37,7 +37,11 @@ fn no_change(_: &mut StoreConfig) {}
 impl World {
     /// A fresh, empty world. `name` must be unique within the test binary.
     pub fn new(name: &str) -> World {
-        let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{}-{name}", module_path!().replace("::", "-")));
+        // KIWI_STORE_TEST_TMP moves the test worlds elsewhere (for example to
+        // a volume with different properties); the default is Cargo's own
+        // per-target temp directory.
+        let parent = std::env::var_os("KIWI_STORE_TEST_TMP").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
+        let base = parent.join(format!("{}-{name}", module_path!().replace("::", "-")));
         if base.exists() {
             remove_tree(&base);
         }
@@ -140,13 +144,16 @@ pub fn is_link(meta: &std::fs::Metadata) -> bool {
 /// Removes a test tree without following links out of it.
 pub fn remove_tree(path: &Path) {
     let Ok(meta) = std::fs::symlink_metadata(path) else { return };
-    if meta.is_dir() && !is_link(&meta) {
+    if is_link(&meta) {
+        // Remove the link itself, never what it points to. A junction or
+        // directory link goes with remove_dir, a file link with remove_file.
+        if std::fs::remove_dir(path).is_err() {
+            std::fs::remove_file(path).unwrap();
+        }
+    } else if meta.is_dir() {
         for entry in std::fs::read_dir(path).unwrap() {
             remove_tree(&entry.unwrap().path());
         }
-        std::fs::remove_dir(path).unwrap();
-    } else if meta.is_dir() {
-        // A junction or directory link: remove the link itself.
         std::fs::remove_dir(path).unwrap();
     } else {
         std::fs::remove_file(path).unwrap();
