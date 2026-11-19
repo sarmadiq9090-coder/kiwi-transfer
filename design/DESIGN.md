@@ -1,6 +1,6 @@
 # Kiwi Transfer 1.0 — design system
 
-Kiwi Transfer copies or moves photos, videos and files from an Android phone to a Windows PC over the home Wi‑Fi. No cloud, no account, no ads, open source.
+Kiwi Transfer copies photos, videos, files and phone data from Android phones to a Windows PC over the home Wi‑Fi, and keeps only the recent part on the phone. No cloud, no account, no ads, open source. "Home" means one thing only: the paired PC answers on the network the phone is on.
 
 The mock-ups are the reference: `phone.html` (Android) and `pc.html` (Windows). Open them in any browser; ع / EN switches language and the moon/sun switches theme. `SCREENS.md` lists every screen and what it is for.
 
@@ -10,7 +10,7 @@ The owner asked for a design that is "premium, simple and clear, like Apple's de
 
 1. **Clarity first.** Every screen answers one question ("are my photos safe?", "what will be deleted?") in a single sentence, in large type.
 2. **One clear action per screen.** One filled button. Other actions are text buttons, list rows or tucked into Settings.
-3. **Works with zero setup.** Defaults are safe and useful: copy (never delete), camera and screenshots on, back up automatically on Wi‑Fi, year/month folders on the largest fixed drive. Final move is off everywhere until the user turns it on per folder.
+3. **Works with zero setup.** Defaults are safe and useful: camera and screenshots on, everything copied straight away, one folder per phone (year/month inside) on the largest fixed drive. The only real choice is asked once at setup: how long things stay on the phone («أبقِ على هاتفي آخر: شهر»). Before anything leaves the phone the user ticks one honest checkbox, and can always choose "just copy for now". Favourites and items marked «أبقِه على الهاتف» never move.
 4. **Defer to content.** Photos and the status line are the heroes. Chrome is quiet: no gradients on controls, no decorative borders, one accent colour.
 5. **Depth with meaning.** Shadows only for things that float (dialogs, sheets, menus). Cards are flat on light, tinted on dark.
 6. **Calm, meaningful motion.** Motion shows where something goes (a photo travels phone → PC) or where something came from (a sheet rises from the bottom). Nothing bounces, spins for fun or celebrates.
@@ -140,12 +140,31 @@ Rules:
 4. No jargon in the main flow: "Wi‑Fi", "PC", "phone", "trash" — not "LAN", "host", "client", "hash". The technical words live only in Settings › Advanced and in the report preview.
 5. Arabic is written natively (Modern Standard, light and friendly), not translated word by word. Use «حاسوب», «هاتف», «نسخ», «نقل نهائي», «سلة المهملات» consistently.
 6. Errors say what to do next: «جرّب الشبكة الرئيسية» / "Try your main network".
-7. Device names are the user's own; sample data uses invented names only (هاتف سارة / Sara's phone, هاتف كريم / Karim's phone, حاسوب البيت / Home PC).
+7. Device names are the user's own; sample data uses invented names only (هاتف سارة / Sara's phone, هاتف أحمد / Ahmed's phone, حاسوب البيت / Home PC).
+8. One status, said the same way everywhere: «على هاتفك: آخر شهر · على حاسوبك: كل شيء» and «نسختان: 4,812 · نسخة واحدة: 37». "Two copies" means on both PC disks; it never counts the phone.
+9. Reminders start calm and get firmer only when a real deadline nears (the phone's 30-day trash). Problems say what still works first: «النسخ مستمر».
+10. Permissions are explained only when the switch that needs them is turned on, in one sentence: what we read, where it goes, «لا تُرسل إلى أي مكان آخر».
+11. Say what cannot be done: «بيانات التطبيقات وإعدادات النظام لا يمكن نسخها».
+
+**Fixed phrases (use them word for word):**
+
+| Topic | Arabic | English |
+|---|---|---|
+| Keep period | «أبقِ على هاتفي آخر: شهر» · «كل شيء يُنسخ إلى حاسوبك فوراً. الأقدم من شهر يُنقل من الهاتف بعد التأكد من نسخته.» | "Keep on my phone the last: month" · "Everything is copied to your PC straight away. Anything older than a month leaves the phone once its copy is checked." |
+| Never moves | «أبقِه على الهاتف» · «المفضلة وما تعلّمه «أبقِه على الهاتف» لا يُنقل أبداً.» | "Keep on phone" · "Favourites and anything you mark “Keep on phone” never leave." |
+| Weekly code missed | «إن مرّ الأسبوع دون تأكيد، يستمر النسخ، ويتوقف النقل النهائي، والتصفّح والإرجاع، والاستلام من الحاسوب، حتى تكتب الرمز.» (PC: «…والإرسال إلى الهاتف، حتى يُكتب الرمز.») | "If the week passes without it, copying continues; final moves, browsing and restoring, and receiving from the PC pause until you enter the code." |
+| Second disk problem | «أوقفنا النقل النهائي من الهواتف. النسخ مستمر.» · «اختر قرصاً جديداً لإعادة بناء النسخة» | "We paused final moves from the phones. Copying continues." · "Choose a new disk to rebuild the copy" |
+| Send to phone | «أرسل إلى الهاتف» · «ينتظر اتصال الهاتف» · «اقبل دائماً من هذا الحاسوب» | "Send to phone" · "Waiting for the phone to connect" · "Always accept from this PC" |
+| Restore | «أعد إلى الهاتف» · «جهات الاتصال والتقويم تُدمج: لا يُحذف شيء من هاتفك.» | "Bring back to phone" · "Contacts and calendar are merged: nothing is deleted from your phone." |
+| Public network | «اسمح على هذه الشبكة» · «السماح يفتح الطريق لـ Kiwi Transfer وحده على هذه الشبكة.» | "Allow on this network" · "Allowing opens the way for Kiwi Transfer only, on this network only." |
+| Pairing | «اكتب الرقم الظاهر على الهاتف» · «اربط» | "Type the number shown on the phone" · "Pair" |
+| Folders | «افتح المجلد» (folders have no passwords or locks; files are plain and open in Explorer) | "Open folder" |
+| Detach | «افصل هذا الهاتف» · «ملفاته تبقى في مجلده. لا يُحذف شيء.» | "Detach this phone" · "Its files stay in its folder. Nothing is deleted." |
 
 ## 8. Platform notes
 
 **Android (Material 3):** top app bar, filled / tonal / text buttons, list rows, switches, radio buttons, bottom sheets, dialogs, segmented buttons. Edge-to-edge with the gesture bar. The share-sheet entry ("Send to PC") is a normal Android share target.
 
-**Windows (Fluent):** Mica title bar and navigation pane, accent button, standard buttons, toggle switches, radio buttons, ContentDialog with the action bar at the bottom, an expander for advanced settings, and a tray icon with a context menu. Caption buttons and the whole layout mirror in Arabic, as Windows does.
+**Windows (Fluent):** Mica title bar and navigation pane, accent button, standard buttons, toggle switches, radio buttons, ContentDialog with the action bar at the bottom, InfoBar for disk reminders and problems, breadcrumb for per-phone pages, an expander for advanced settings, a tray icon with a context menu, and an Explorer right-click entry «أرسل إلى الهاتف» with a submenu of phones. Caption buttons and the whole layout mirror in Arabic, as Windows does.
 
 **Both:** light and dark follow the system by default; Arabic first (RTL), English second; text scales to 200 %.
