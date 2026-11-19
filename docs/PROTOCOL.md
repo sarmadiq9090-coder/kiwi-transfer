@@ -2810,7 +2810,12 @@ without ever overwriting one (6.9), so:
 | 6 APK files | **Saved only**, to `Download/Kiwi Transfer/Apps/<package>/`. Installing is something the user does afterwards, app by app, from a file manager, through Android's own installer and its prompts. Apps that consist of several APK files need an installer that accepts split packages; the app list tells the user which apps to get again from their store. | Start an installation; request the install-packages permission; restore any app data. |
 | 7 app backup | Written to `Download/Kiwi Transfer/Restored/WhatsApp/` with the original folder structure and original names. Where Android lets the app write into WhatsApp's folder (open item V5), "Put back in place" is offered, create-new only. | Overwrite a file in another app's folder. |
 
-Write access to contacts and calendars is requested only when the user starts such a restore.
+Write access to contacts and calendars is requested only when the user starts such a restore. The phone
+parses a vCard or iCalendar file only then, inside the app's sandbox, with memory-safe code and fixed
+limits (file at most 256 MiB, one card or event at most 16 MiB, at most 1 000 000 entries); a file that
+breaks a limit or does not parse is refused as a whole and nothing is written. These two parsers are
+fuzzed as a release gate (11.3). A restored APK file comes from the PC's disk and is exactly as
+trustworthy as that PC; the restore screen says so.
 
 ### 9.7 The files on the PC are plain files
 
@@ -2832,7 +2837,8 @@ so that nothing can ever be lost to a forgotten password.
 4. What this means, said plainly in the product and in the threat model (R22 to R24): everyone who can use
    that Windows account, every administrator of that PC, and anyone who holds the disk (when Windows does
    not encrypt it) can read every backed-up photo, file, contact and calendar entry. The weekly code
-   protects nothing at rest. A second disk that leaves the house is as readable as the first.
+   protects nothing at rest. A second disk that leaves the house is as readable as the first: when a second
+   disk is added, the program says so and points to Windows' own disk encryption.
 5. The same holds on the phone side: the app has no lock of its own (R19); Android's screen lock is the
    lock.
 
@@ -3116,7 +3122,8 @@ injection at the named point, then the assertion "nothing is deleted"). The inte
   step of 8.4 to 8.7 changes its result when a second copy is present or absent;
 - shell-active names end with `.kiwi-blocked` on disk and come back under their original name;
 - the thumbnail helper cannot open a second file or a socket;
-- contacts restore run twice adds nothing twice and changes no existing contact.
+- contacts restore run twice adds nothing twice and changes no existing contact; the vCard and
+  iCalendar parsers of the phone are fuzzed.
 
 ### 11.4 Platform independence (iOS later)
 
