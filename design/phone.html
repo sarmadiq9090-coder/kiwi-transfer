@@ -326,10 +326,11 @@ const SCREENS = [
           ['folder',T('صور واتساب','WhatsApp images'),'2,031 · 1.9 GB','',T('متوقف','Off')],
           ['video',T('فيديوهات واتساب','WhatsApp videos'),'164 · 2.7 GB','',T('متوقف','Off')],
           ['download',T('التنزيلات','Downloads'),'88 · 0.4 GB','',T('متوقف','Off')],
-          ['doc',T('المستندات','Documents'),'37 · 0.1 GB','',T('متوقف','Off')]]
+          ['doc',T('المستندات','Documents'),'37 · 0.1 GB','',T('متوقف','Off')],
+          ['storage',T('بطاقة الذاكرة · DCIM','SD card · DCIM'),'318 · 1.2 GB','',T('متوقف','Off')]]
          .map(([ic,a,b,c,d])=>row(ic,a,b,`<span class="pill ${c}">${d}</span>`,'folder')).join('')}
      </div>
-     <p class="cap" style="margin-top:14px;text-align:center">${T('النقل النهائي متوقف في كل المجلدات إلى أن تشغّله بنفسك.','Final move stays off in every folder until you turn it on.')}</p>
+     <p class="cap" style="margin-top:14px;text-align:center">${T('النقل النهائي متوقف في كل المجلدات إلى أن تشغّله بنفسك. مجلدات واتساب وبطاقة الذاكرة تُنسخ فقط.','Final move stays off in every folder until you turn it on. WhatsApp and SD‑card folders are copy only.')}</p>
    </div>
    ${foot(btn(T('تم','Done'),'home'))}`},
  { id:'folder', base:'folders', n:['مجلد: نسخ أم نقل نهائي','Folder: copy or final move'], r:()=>`
@@ -522,7 +523,7 @@ function settings(adv){
    ${g(T('المظهر','Appearance'), row('globe',T('اللغة','Language'),T('العربية','English'),chev)+row('palette',T('المظهر','Theme'),T('حسب النظام','System'),chev))}
    ${g(T('المساعدة','Help'), row('wifi',T('لا أجد حاسوبي','Can’t find my PC'),'',chev,'trouble')+row('flag',T('الإبلاغ عن مشكلة','Report a problem'),'',chev,'report')+row('info',T('حول التطبيق','About'),'1.0.0',chev,'about'))}
    <div class="card list" style="margin-top:22px">${row('settings',T('خيارات متقدمة','Advanced'),adv?'':T('6 خيارات','6 options'),`<span class="chev">${I(adv?'collapse':'expand')}</span>`,adv?'settings':'settingsAdv')}
-   ${adv? row('',T('النسخ على بيانات الجوال','Back up on mobile data'),T('قد يستهلك باقتك','May use your data plan'),sw(false))
+   ${adv? row('',T('شبكات Wi‑Fi المسموحة','Allowed Wi‑Fi networks'),T('Home‑5G فقط','Home‑5G only'),chev)
         + row('',T('أثناء الشحن فقط','Only while charging'),'',sw(false))
         + row('',T('الفيديو على Wi‑Fi فقط','Videos on Wi‑Fi only'),'',sw(true))
         + row('',T('مدة سلة المهملات','Trash period'),T('30 يوماً','30 days'),chev)
