@@ -522,7 +522,9 @@ paired phones, a phone at most `MAX_PCS` (4) paired PCs. These are local policy,
 ## 3. Weekly session re-confirmation
 
 Owner requirement: every 7 days a link must be re-confirmed with a 2-digit code shown in the PC program and
-typed on the phone.
+typed on the phone. The check is **per phone**: each link has its own state, its own code and its own
+expiry. Its scope is **narrow** (owner decision, 3.5): an expired check never stops backup copying; it
+pauses the things that remove data from the phone or give data out of the PC.
 
 ### 3.1 What it is, and what it is not
 
@@ -532,7 +534,8 @@ typed on the phone.
 - It is **not a secret and not authentication**. The channel is already mutually authenticated (section 1).
   A 2-digit code has 100 values; its strength comes only from the attempt limits and from the fact that a
   code exists only while it is displayed on the PC (3.4).
-- It limits how long a stolen phone, or a copied phone identity, stays useful without access to the PC screen.
+- It limits how long a stolen phone, or a copied phone identity, can make the phone-side of final move run,
+  read the phone's namespace on the PC, or receive files from the PC, without access to the PC screen.
 
 ### 3.2 Link clock (rollback-resistant time)
 
@@ -543,32 +546,70 @@ Each device keeps, per installation, a persistent non-decreasing counter `LC` in
 2. A checkpoint `(LC, wall_time, boot_id, monotonic_reading)` is written durably at least every 5 minutes
    while running and at clean shutdown.
 3. At start, with the last checkpoint:
-   - same boot (`boot_id` unchanged *(platform: Android `Settings.Global.BOOT_COUNT`; Windows boot time)*):
-     `LC += monotonic_now - monotonic_reading`;
-   - otherwise `gap = wall_now - wall_time`. If `gap >= 0`: `LC += gap`. If `gap < 0` (the wall clock went
-     backwards): `LC` is left unchanged and the persistent flag `clock_anomaly` is set.
-4. A wall clock set forward makes `LC` jump forward (things expire early: fail closed). A wall clock set back
-   is either detected (`clock_anomaly`) or, at worst, hides the time the device was off; rule 3.3(3) then
+   - same boot: `boot_id` is unchanged **and** `monotonic_now >= monotonic_reading`. Then
+     `LC += monotonic_now - monotonic_reading`.
+   - otherwise `gap = wall_now - wall_time`. If `gap >= 0`: `LC += gap`. If `-CLOCK_TOLERANCE <= gap < 0`
+     (`CLOCK_TOLERANCE` = 300 s; a routine time correction after a quick restart): `LC` is left unchanged.
+     If `gap < -CLOCK_TOLERANCE` (the wall clock went backwards): `LC` is left unchanged and the device
+     sets `clock_anomaly` on **every** link it has (KT-30).
+   - `boot_id` MUST NOT be derived from the wall clock *(platform: Android `Settings.Global.BOOT_COUNT`;
+     Windows: a random marker kept in a volatile registry key, which the system discards at shutdown; never
+     "boot time", which is wall clock minus uptime and moves whenever the time service steps the clock)*.
+     A marker that is lost more often than at a restart (for example at sign-out) only sends the device
+     down the wall-clock branch, which is the safe one.
+4. A wall clock set forward makes `LC` jump forward: weekly checks come due early (fail closed). It does
+   **not** make anything safe to delete early: the delay rules of section 8 also use the other device's
+   clock, and 8.6 refuses to trash while the two wall clocks disagree (KT-11). A wall clock set back is
+   either detected (`clock_anomaly`) or, at worst, hides the time the device was off; rule 3.3(4) then
    corrects it from the other device.
-5. `LC` values are local. Only **differences** of `LC` are ever sent or compared.
+5. `LC` values are local. Only **differences** of `LC` are ever sent or compared. `LC` saturates at 2^53.
 
-Each side also keeps per link: `confirm_epoch` (u64, the number of confirmations so far) and
-`confirm_lc` (its own `LC` at the last confirmation). `confirm_age = LC - confirm_lc`.
+Each side also keeps, **per link**, durably:
+
+| Value | Range | Meaning |
+|---|---|---|
+| `confirm_epoch` | 1 .. 2^53 | Number of the last confirmation this side knows. |
+| `age_base` | 0 .. `AGE_CAP` (2^32) | Confirmation age in seconds at the moment `age_lc` was written. |
+| `age_lc` | an `LC` value | This side's own `LC` when `age_base` was written. |
+| `need_confirm` | bool | Set whenever this side found the link `REQUIRED` for any reason. **Cleared only by a successful code exchange (3.4)** or by the adoption rule 3.3(1). |
+| `clock_anomaly` | bool | Set by rule 3 above. Cleared only by a successful code exchange. |
+
+```
+confirm_age = min(AGE_CAP, age_base + (LC - age_lc))        saturating; never negative
+              if LC < age_lc (damaged state): confirm_age = AGE_CAP and need_confirm = true
+```
+
+There is no stored value that is ever moved backwards and no subtraction that can go below zero (KT-01).
 
 ### 3.3 Confirmation state (computed at every session start, 5.3)
 
-Both sides send `confirm_epoch`, `confirm_age` and `clock_anomaly` in `HELLO`. Then, identically on both sides:
+Both sides send `confirm_epoch`, `confirm_age`, `clock_anomaly` and `need_confirm` in `HELLO`. A
+`confirm_epoch` above 2^53 or equal to 0 closes the connection with code `1`. A received `confirm_age`
+above `AGE_CAP` is read as `AGE_CAP`. Then, identically on both sides, with `x_ph` and `x_pc` the two
+sides' values:
 
-1. **Epoch agreement.** If `epoch_pc == epoch_ph`: agreed. If `epoch_pc == epoch_ph + 1` (the phone missed
-   the last result): PH adopts `epoch_pc` and `confirm_age_pc`. Any other difference (one side lost or
-   restored state): the link is `REQUIRED`.
-2. **Anomaly.** If either side reports `clock_anomaly`: the link is `REQUIRED`.
-3. **Age.** `age = max(confirm_age_ph, confirm_age_pc)`. Each side then moves its own `confirm_lc` back so
-   that its `confirm_age` equals `age` (ages never decrease by talking to the peer).
-4. The link is `CONFIRMED` if 1 and 2 hold and `age < CONFIRM_PERIOD` (604 800 s); otherwise `REQUIRED`.
+1. **Missed result.** If `epoch_pc > epoch_ph` and `epoch_pc - epoch_ph == 1` and `need_confirm_pc` is
+   false and `clock_anomaly_ph` is false: the phone missed the last `RECONFIRM_RESULT`. PH adopts, durably:
+   `confirm_epoch = epoch_pc`, `age_base = confirm_age_pc`, `age_lc = LC`, `need_confirm = false`. Both
+   sides continue with the adopted values in place of the phone's.
+2. **Epoch agreement.** If the epochs still differ (one side lost or restored state): `REQUIRED`.
+3. **Flags.** If either side reports `clock_anomaly` or `need_confirm`: `REQUIRED`.
+4. **Age.** `age = max(confirm_age_ph, confirm_age_pc)`, at most `AGE_CAP`. Each side stores
+   `age_base = age`, `age_lc = LC` (ages never decrease by talking to the peer; a side that was switched
+   off or had its clock set back is corrected by the other).
+5. The link is `CONFIRMED` if rules 2 and 3 pass and `age < CONFIRM_PERIOD` (604 800 s); otherwise
+   `REQUIRED`.
+6. **Durable.** Whenever the result is `REQUIRED`, each side sets its `need_confirm = true` before it does
+   anything else. From then on no value received from the peer, and no later arithmetic, can make the link
+   `CONFIRMED` again; only 3.4 can.
 
-During a long session each side re-evaluates with its own `LC` before every data-plane request; the PC
-pushes `STATUS` when the state changes. A wall-clock timestamp is never an input to this decision.
+During a long session each side re-evaluates `confirm_age` with its own `LC` before every request of a
+paused class (3.5); when it reaches `CONFIRM_PERIOD` it applies rule 6, and the PC pushes `STATUS`. A
+wall-clock timestamp is never an input to this decision.
+
+What a holder of a copied phone key can do to this state: send any epoch, age or flag. Sending a larger
+epoch or age, or a set flag, gives `REQUIRED`. Sending a smaller age changes nothing (`max`). Nothing it
+can send clears the PC's `need_confirm`.
 
 ### 3.4 Code exchange
 
@@ -576,17 +617,25 @@ Runs on the control stream of a normal session. The code never travels from PC t
 
 1. PH sends `RECONFIRM_BEGIN` (allowed at any time, also before expiry).
 2. PC creates a challenge: `code` uniform in `00..99` (CSPRNG with rejection sampling), `challenge_id`,
-   3 attempts. PC replies `RECONFIRM_CHALLENGE(state)`.
-3. **Arming.** The PC accepts answers only while the challenge is *armed*: the code is being shown inside
-   the PC program's own visible window, in an interactive, unlocked user session, and a person at the PC
-   caused that window to be shown (opening the program, or clicking the "weekly number" notice). The code
-   MUST NOT appear in a notification, a tooltip, a log or the lock screen. Arming starts a `RECONFIRM_TTL`
-   (300 s, monotonic) timer. PC pushes `RECONFIRM_STATE` to PH when the challenge becomes armed or dies.
+   3 attempts. PC replies `RECONFIRM_CHALLENGE(state = waiting)`.
+3. **Arming.** The PC accepts answers only while the challenge is *armed*. A challenge becomes armed only
+   when a person at the PC clicks **"Show the weekly number for <phone>"** inside the PC program's own
+   window, in an interactive, unlocked user session. Opening the program does not arm anything and shows no
+   number (KT-30). The code MUST NOT appear in a notification, a tooltip, a log or the lock screen. Arming
+   starts a `RECONFIRM_TTL` (300 s, monotonic) timer. PC pushes `RECONFIRM_STATE` to PH when the challenge
+   becomes armed or dies.
 4. The user types the two digits on the phone. PH sends `RECONFIRM_ANSWER(challenge_id, code)`.
-5. PC, if armed and not expired: on match, it durably stores `confirm_epoch += 1`, `confirm_lc = LC`,
-   clears its `clock_anomaly`, then replies `RECONFIRM_RESULT(ok, new_epoch)`. PH stores the same
-   (`confirm_lc = its own LC`, clears its `clock_anomaly`) and sends `RECONFIRM_ACK`.
-   On mismatch: `attempts_left -= 1`, reply `RECONFIRM_RESULT(not ok, attempts_left)`.
+5. PC, if armed and not expired, compares with `ct_eq`.
+   - Match: `new_epoch = max(epoch_pc, epoch_ph) + 1`, where `epoch_ph` is the value from this session's
+     `HELLO` (KT-08: the result is larger than both, also when the PC was restored to an older state). The
+     PC durably stores `confirm_epoch = new_epoch`, `age_base = 0`, `age_lc = LC`, `need_confirm = false`,
+     `clock_anomaly = false`, and then replies `RECONFIRM_RESULT(ok, new_epoch)`.
+   - PH, on `ok`: it requires `new_epoch > confirm_epoch` and `new_epoch <= 2^53` (otherwise it ignores the
+     result and stays `REQUIRED`), then durably **sets** `confirm_epoch = new_epoch` (it does not increment
+     its own), `age_base = 0`, `age_lc = LC`, `need_confirm = false`, `clock_anomaly = false`, and then
+     sends `RECONFIRM_ACK(new_epoch)`. If the result is lost on the way, rule 3.3(1) repairs it at the next
+     session.
+   - Mismatch: `attempts_left -= 1`, reply `RECONFIRM_RESULT(not ok, attempts_left)`.
 6. Limits: 3 attempts per challenge. After the third wrong answer, or TTL expiry, the challenge is dead.
    A **new challenge after a failed one requires a click on the PC** ("Show a new number"), and the PC
    shows "A wrong number was entered 3 times from phone <name>". After 3 dead challenges in a row the link
@@ -595,33 +644,45 @@ Runs on the control stream of a normal session. The code never travels from PC t
 7. Honest strength statement: a person with the phone but without sight of the PC screen has at most 3
    guesses (3 %) per challenge that somebody at the PC armed, and each failure is displayed at the PC.
 
-### 3.5 Effect of `REQUIRED`
+### 3.5 Effect of `REQUIRED` (narrow scope)
 
-While a link is `REQUIRED`:
+While a link is `REQUIRED`, **copying to the PC goes on**; everything that removes data from the phone or
+hands data out of the PC waits for the code. This applies to that one phone only.
 
-| Area | Behaviour |
+| Area | Behaviour while `REQUIRED` |
 |---|---|
-| Allowed messages | Session setup, `STATUS`, `PING`, `RECONFIRM_*`, `UNPAIR`, `BYE`. Every other request is refused with `E_CONFIRM_REQUIRED`. |
-| Automatic backup | Paused. The phone shows a notification ("Weekly check needed to continue backup"). Nothing is queued for deletion. |
-| Final move | No verification, no trashing, no purging (8.8). Purges of the app trash folder are **suspended**, not cancelled: retention keeps counting, deletion waits. |
-| Deletion | **Nothing is deleted** on either device because a link expired. No file, ledger entry, pin or partial transfer is removed. |
-| Transfers in progress | An item whose data stream is already open may finish and commit; no new item starts. |
+| **Backup copying, phone to PC** | **Continues.** `OFFER` with purpose 1 (backup), 5 (repair) and purpose 2 from the phone ("Send to PC"), their data streams, `ITEM_RESULT`, `XFER_CANCEL`, `XFER_END`, `AUDIT`, `REPAIR_REQUEST`. Receipts of every level are issued as usual. |
+| **State reporting** | **Continues.** `STATUS`, `PHONE_STATUS`, `FM_STATE` (the phone must still be able to tell the PC that Android emptied its trash), `PING`, `RECONFIRM_*`, `UNPAIR`, `BYE`, `ERROR`. |
+| **Final move** | **Paused.** `FM_VERIFY` (both stages) is refused with `E_CONFIRM_REQUIRED`: no second verification, no trashing (8.8). |
+| **Trash purges** (Android 7-10) | **Suspended**, not cancelled: retention keeps counting, deletion waits (8.7). |
+| **Browse and restore** | **Paused.** `BROWSE`, `THUMB`, `FETCH`, and `OFFER` with purpose 3 or 4 are refused with `E_CONFIRM_REQUIRED`. |
+| **PC-to-phone delivery** | **Paused.** The PC sends no `OFFER` with purpose 2; its outbox keeps the items queued (9.1). |
+| **Clipboard** | **Paused** in both directions (`CLIP` refused). |
+| **PC-only work** | Continues: integrity scan (8.9), second copy (8.13). They need no phone. |
+| **Deletion** | **Nothing is deleted** on either device because a link expired. No file, ledger entry, pin or partial transfer is removed. |
+| Transfers of a paused class already running | An item whose data stream is already open may finish and commit; no new item of that class starts. |
 | After re-confirmation | Everything resumes from where it stopped. No re-pairing is needed. |
 
+Why copying may continue: a thief, or a holder of a copied phone key, gains nothing by uploading files
+into that phone's own folder within its quota, while a paused backup creates exactly the loss the product
+exists to prevent.
+
 Limit that cannot be removed: on Android 11+ the *system* trash deletes its items on its own schedule
-(8.6). The app cannot suspend that; 8.6 defines the warning the app must give instead.
+(8.6). The app cannot suspend that; 8.6 defines the warning the app must give instead, and names the due
+weekly check as the reason.
 
 ### 3.6 Several paired devices
 
-- Confirmation state, epoch, challenge and lockout are **per link**. Confirming one phone does nothing for
-  another phone; a PC with three phones can show up to three numbers, each labelled with the phone's name.
+- Confirmation state, epoch, flags, challenge and lockout are **per link**. Confirming one phone does
+  nothing for another phone; a PC with three phones lists three phones, each with its own "Show the weekly
+  number" button, and never shows two numbers under one label.
 - A code is bound to its link: an answer is checked only against the challenge of the link it arrives on.
 - A phone paired with two PCs confirms each PC separately; one PC being expired does not pause the other.
 - Final move for a folder targets exactly one PC (8.1); only that link's state matters for that folder.
 
 ---
 
-## 4. Discovery
+## 4. Discovery and networks
 
 Discovery only produces **candidate addresses**. A candidate is never trusted: every candidate passes the
 address filter (4.4) and then the TLS pin (1.4). A wrong or forged answer can only cause a failed attempt.
@@ -636,75 +697,159 @@ address filter (4.4) and then the TLS pin (1.4). A wrong or forged answer can on
 | SRV target | `k<same 16 hex>.local.` MUST NOT be the Windows host name. |
 | SRV port | The PC's QUIC UDP port. |
 | Rotation | A new random instance name at every program start, at every network change, and at least every 24 h. |
-| Advertised when | The program runs and (at least one phone is paired, or a pairing window with SAS is open). |
+| Advertised when | The program runs and (at least one phone is paired, or a pairing window with SAS is open), **and only on eligible interfaces** (4.4, 4.5 rule 4). |
 
 ### 4.2 TXT record
 
 | Key | Value | Meaning |
 |---|---|---|
 | `v` | `1` | Protocol major version(s) supported, comma-separated decimal. |
-| `h` | 16 lowercase hex characters | Hint: first 8 bytes of `MAC(KDF("kiwi/1 discovery hint", ID_pc), instance_name_ascii)`. Lets a paired phone recognise its PC without trial handshakes. Changes with every instance name, so a passive observer who does not know `ID_pc` cannot link two advertisements. |
-| `pm` | `1` | Present only while a pairing window that accepts method SAS is open. |
+| `h` | 128 lowercase hex characters | `HINT_SLOTS` (8) hints of 8 bytes each, concatenated. Lets a paired phone recognise its PC without trial handshakes. |
+| `pm` | `1` | Present only while a pairing window that accepts method SAS is open, and only in answers sent on **Private** interfaces. |
+
+The hint of one link, for the current instance name (KT-24):
+
+```
+K_hint = KDF("kiwi/1 discovery hint", discovery_key)          discovery_key: 32 random bytes per link (2.6)
+hint   = MAC(K_hint, instance_name_ascii)[0..8]
+```
+
+The PC fills the 8 slots with the hints of its paired phones in a random order and fills the unused slots
+with `RAND(8)`, so the record always has the same size and does not show how many phones are paired. A
+phone recognises its PC when any slot equals its own expected hint. The key is a per-link secret that only
+the two paired devices hold, so:
+
+- a host that merely probed the PC (and so knows its public key, R7) cannot link two advertisements;
+- a phone that was unpaired can no longer recognise the PC: its slot is random from then on;
+- on a Public network this record is all the PC says about itself: a random name, a port and a keyed hint.
 
 No other key is sent. Readers MUST ignore unknown keys. A phone that gets no TXT data (resolver quirk) MAY
-still try the candidate.
+still try the candidate. What stays linkable on one link regardless of rotation: the PC's MAC address and
+its stable UDP port (threat model R7).
 
 ### 4.3 Phone behaviour
 
 1. *(platform)* Android browses with `NsdManager`, only while it needs a PC (app in foreground, or a
    backup attempt is running), and passes results (instance name, addresses, port, TXT) to the core.
 2. Candidate order for a paired PC: (a) the last address and port that worked, if still on-link;
-   (b) mDNS instances whose `h` matches that PC; (c) mDNS instances without a usable `h`.
+   (b) mDNS instances with a hint slot that matches that PC; (c) mDNS instances without a usable `h`.
 3. At most 3 addresses per instance are tried, 2 s each, IPv4 first. At most 8 instances per browse.
 4. Candidates may also come from a pairing QR. All sources are treated the same.
 5. *(platform)* The socket MUST be bound to the local (non-cellular, non-VPN) network that owns the on-link
    prefix. If the system would route the packet through a VPN or mobile data, the attempt MUST fail closed.
+   Tethering interfaces (the phone's own hotspot, USB tethering) have no Android `Network` object: for
+   those the core binds the socket to the interface's own address and checks, after `connect`, that the
+   chosen source address belongs to that interface; otherwise the attempt fails closed.
+6. **Fallback browse on tethering interfaces.** `NsdManager` is not known to browse on the phone's own
+   tethering interfaces. When such an interface is up and rule 2(a) gave nothing, the core runs its own
+   mDNS query for the service type on that interface only (multicast lock held for the duration), with the
+   same result handling. The QR remains a candidate source in every case.
+7. On a network where no paired PC answered, the phone SHOULD probe again no more often than after 15
+   minutes, 1 hour, then every 6 hours, and at once when the app is opened: a probe tells the local
+   network that this phone uses Kiwi Transfer.
 
-### 4.4 Address filter (both sides)
+### 4.4 Address filter and eligible networks (both sides)
 
 An address is acceptable only if it is **on-link**: it lies inside a connected prefix (address + prefix
 length) of a local interface that is eligible. This is the rule that makes "no internet mode" a property of
 the protocol and not only of the user interface.
 
-- Eligible interface on the phone *(platform)*: Wi-Fi, Ethernet, USB tethering, the phone's own hotspot
-  interface. Never cellular, never VPN.
-- Eligible interface on the PC *(platform)*: an interface whose Windows network category is **Private**
-  (`INetworkListManager`, `NLM_NETWORK_CATEGORY_PRIVATE`). Public and Domain networks are not eligible in 1.0.
+**Eligible interface on the phone** *(platform)*: Wi-Fi, Ethernet, USB tethering, the phone's own hotspot
+interface. Never cellular, never VPN.
+
+**Eligible interface on the PC** *(platform)*, by the Windows network category of the network the
+interface is connected to (`INetworkListManager`):
+
+| Category | Eligible | Pairing allowed |
+|---|---|---|
+| Private | Yes. | QR and SAS. |
+| Public | **Only after the PC user has enabled Kiwi Transfer for that network**: one click in the PC program ("Use Kiwi Transfer on this network"), no administrator rights, remembered per network by its Network List Manager network id, and revocable in the same place. Default: not eligible. | QR only (with the typed number). Never SAS, never `pm=1`. |
+| Domain | Never. | None. |
+| Unidentified, or category unknown | Treated as Public. | As Public. |
+
+The program never changes a network's category and never asks the user to. (Asking users to set a network
+to Private also opens Windows file sharing and network discovery on it, which is a larger exposure than
+this protocol's listener; see the review's answer to Q1 and decision D29.) The program shows, for every
+network it is used on, its Windows category and whether it was enabled by hand. The authentication of
+`kiwi/1` does not depend on the category; what a Public network adds is reach to the pre-authentication
+surface (5.9) and to the PC's certificate (R7).
+
+**Rules for every address:**
+
 - Always rejected: loopback, unspecified, multicast, broadcast, and any address outside every eligible
   on-link prefix. IPv6 link-local addresses are acceptable only with the scope of the interface they were
   learned on. Global IPv6 addresses are acceptable when on-link.
+- **Wide prefixes are narrowed (KT-25).** An on-link attacker can announce an absurdly wide prefix (a forged
+  IPv6 Router Advertisement with `::/0`, a rogue DHCP mask of `0.0.0.0`), which would make remote addresses
+  look on-link. For this filter a connected IPv6 prefix shorter than /64 is replaced by the /64 that
+  contains the interface's own address, and a connected IPv4 prefix shorter than /16 by the /16 that
+  contains the interface's own address. (Draft 1's reviewer proposed to ignore such prefixes; narrowing is
+  used instead so that a home network configured as `10.0.0.0/8` keeps working for devices in the same
+  /16.)
 - The PC applies the same rule to the **source address** of every incoming packet before any other
   processing: a packet whose source is not on-link for the interface it arrived on is dropped silently
   (this also defeats a router port-forward).
-- Both sides SHOULD set the IP TTL / IPv6 hop limit of their QUIC sockets to 1, so that a packet can never
-  be forwarded by a router even if a rule above is implemented wrongly (open question Q9).
+- **Hop limit 1 is a MUST.** Both sides set the IP TTL / IPv6 hop limit of their QUIC sockets to 1. Every
+  peer this filter accepts is one hop away, so the rule breaks nothing that is allowed, and no packet of
+  this protocol can be forwarded by a router even if another rule is implemented wrongly or a prefix was
+  forged. There is no setting to change it.
 
 ### 4.5 PC listener *(platform)*
 
 1. One UDP socket per eligible unicast address (never `0.0.0.0` or `::`), re-evaluated on every network
    change notification. If no interface is eligible, the PC listens nowhere and tells the user why
-   ("This network is set to Public in Windows").
-2. Port: chosen once at first run (preferred `47474`; if busy, an OS-assigned port), stored, and reused.
+   ("This network is Public. Use Kiwi Transfer on this network?" with the one-click choice of 4.4, or
+   "Work (domain) networks are not supported").
+2. Port: chosen once at installation (preferred `47474`; if busy, an OS-assigned port), stored, and reused.
    The phone always learns the port from the QR, mDNS or its cache; it never assumes it.
-3. The installer adds one Windows Firewall rule: inbound UDP, this program only, Private profile only,
-   remote address `LocalSubnet`. The built-in Windows mDNS rules are used as they are (spike section 4).
-4. mDNS answers sent on an interface contain only that interface's addresses.
+3. **Firewall rule.** The installer, running elevated once, adds exactly one Windows Firewall rule:
+   inbound, allow, protocol UDP, **this program** (full path), **local port = the stored port**, remote
+   address `LocalSubnet`, profiles **Private and Public** (not Domain), edge traversal off. The rule
+   exists whether or not a Public network was ever enabled; what makes a Public network usable is the
+   program's own per-network switch (it does not bind a socket there otherwise), so the click needs no
+   administrator rights. The uninstaller removes the rule.
+4. **mDNS runs only on eligible interfaces (KT-18).** The responder is given an explicit per-interface
+   enable list, re-evaluated on every network change; it sends nothing on any other interface (Domain
+   networks, Public networks that are not enabled, VPN and virtual adapters), and it stops entirely when no
+   interface is eligible. An answer sent on an interface contains only that interface's addresses. The
+   built-in Windows mDNS firewall rules are used as they are (spike section 4); the installer does not add
+   or change any.
+5. **Per-user installation.** If the program was installed without elevation, no rule could be added and
+   Windows shows its own firewall prompt at the first bind. "Cancel" there creates a *block* rule that
+   overrides any allow rule. The program MUST detect a block rule for its path (and the absence of an allow
+   rule), explain it in plain words, and offer the elevated repair step; it MUST NOT silently appear to
+   work.
+6. One program instance owns the port. If another Windows user's session already runs the program, the
+   second instance says so and does not listen.
 
 ### 4.6 Hotspot and USB tethering
 
 When the PC joins the phone's hotspot, or the phone shares its connection over USB, the two devices are on
 one IP link and everything above applies unchanged: same discovery, same filter, same TLS. Transfers on that
-link do not use mobile data. Windows usually classifies such a new network as Public; the user must set it
-to Private (open question Q1). mDNS browsing by `NsdManager` on the phone's own tethering interfaces is not
-verified (open question Q7); the cached address and the QR remain available as candidate sources.
+link do not use mobile data. Windows classifies such a new network as Public; the PC program then offers
+the one-click choice of 4.4 (some tethering connections get a new network id every time and need the click
+again). Browsing on the phone's own tethering interfaces uses 4.3 rule 6; the cached address and the QR
+remain available as candidate sources.
 
 ### 4.7 Android local-network permission *(platform)*
 
-The app declares `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`, and the local-network permission
-introduced for Android 17 (`ACCESS_LOCAL_NETWORK`, nearby-devices group). On systems that enforce it, the
-permission is requested, with an explanation, before the first browse or dial; if it is refused, discovery
-and transfer are unavailable and the app says so (it MUST NOT fall back to any other path). Exact behaviour
-per API level is to be verified when the target SDK is fixed (open question Q8).
+The app declares `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`,
+and the local-network permission introduced for Android 17 (`ACCESS_LOCAL_NETWORK`, nearby-devices group).
+On systems that enforce it, it is requested as a runtime permission, in context, with an explanation,
+before the first browse or dial; if it is refused, discovery and transfer are unavailable and the app says
+so (it MUST NOT fall back to any other path). The exact name and behaviour are fixed when the target SDK is
+fixed, before the beta, and tested on that level (open item V3 in section 13).
+
+### 4.8 "Home"
+
+The phone needs to know when it is "at home" (to start an automatic backup, to say "connect at home").
+It does not read Wi-Fi names and does not ask for the location permission (decision D30):
+
+- **Home, for a link, means: that paired PC answers on the network the phone is on now**, that is, a
+  candidate passed the address filter and the TLS pin. Nothing else is a sign of home.
+- There is no list of "allowed Wi-Fi networks" on the phone in 1.0. Where the PC may be used is decided on
+  the PC, per network (4.4).
+- The PC's local policy is keyed by the Network List Manager network id; the phone's by the pin.
 
 ---
 
