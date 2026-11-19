@@ -12,7 +12,6 @@ edition = "2024"
 rust-version = "1.100"
 license = "Apache-2.0"
 authors = ["FastKiwi (Sarmad)"]
-repository = "https://github.com/fastkiwi/kiwi-transfer"
 publish = false
 
 [workspace.lints.rust]
