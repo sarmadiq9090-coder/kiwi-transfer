@@ -144,7 +144,7 @@ jobs:
           cache-disabled: true # release builds neither read nor write a cache
       - name: Unit tests
         run: ./gradlew --no-daemon :app:testDebugUnitTest
-      - name: Build release APK (no keystore here: it is signed in the publish job)
+      - name: Build release APK (signed later, in the publish job)
         env:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
