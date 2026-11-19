@@ -1051,6 +1051,7 @@ The ack is sent after every item of the transfer has had its `ITEM_RESULT`.
 | 1 | `stage` | uint | R | 1 before trashing, 2 before purging / pre-expiry check. |
 | 2 | `nonce` | Nonce | R | Fresh `RAND(32)` per batch. |
 | 3 | `items` | array of FmItem | R | 1 to 500. |
+| 4 | `min_age` | uint | O | Stage 2 before a purge: seconds that must have passed on the PC's link clock since the PC recorded these items as trashed; otherwise status 5 (8.7). |
 
 **`FmItem`**: `0 key` (ItemKey, R); `1 hash` (Hash, R); `2 size` (uint, R); `3 commit_seq` (uint, R).
 
@@ -1069,7 +1070,8 @@ The ack is sent after every item of the transfer has had its `ITEM_RESULT`.
 
 **`FM_STATE` (0x42)**: `0 events` (array of FmEvent, R, 1 to 500). **`FmEvent`**: `0 key` (ItemKey, R);
 `1 hash` (Hash, R); `2 state` (uint, R: 1 trashed, 2 restored to the phone, 3 purged from the phone);
-`3 session_seq` (uint, R: session in which it happened). **`FM_STATE_ACK` (0x43)**: `0 count` (uint, R).
+`3 session_seq` (uint, R: session in which it happened); `4 expires` (Time, O: when the trash is expected
+to delete it; display only). **`FM_STATE_ACK` (0x43)**: `0 count` (uint, R).
 
 **`REPAIR_REQUEST` (0x44)**: `0 items` (array of `{0 key (ItemKey, O), 1 hash (Hash, R), 2 size (uint, R)}`,
 R). **`REPAIR_REPLY` (0x45)**: `0 available` (array of Hash, R: the items the phone still holds with exactly
@@ -1184,9 +1186,9 @@ Rules:
    and the streamed content hashes differently, the receiver treats it as `E_CHANGED`.
 3. **The ledger is never trusted for deletion.** A `have` answer, or any receipt below level 2, only saves
    a re-send. It never makes an item eligible for final move. To upgrade, the PC re-reads the stored file
-   unbuffered from disk; if the hash matches it sends `ITEM_RESULT` with a level-2 receipt (new
-   `commit_seq`, current `session_seq`); if it does not match, that is an integrity alert (8.9) and the
-   next offer of the item is answered `send`.
+   from disk as in section 7, step 6; if the hash matches it sends `ITEM_RESULT` with a receipt of the level
+   that section 7 allows for that volume (new `commit_seq`, current `session_seq`); if it does not match,
+   that is an integrity alert (8.9) and the next offer of the item is answered `send`.
 4. A level-2 receipt is only ever issued in the session in which the PC has just read those bytes back
    from the disk, unbuffered.
 5. Consent: the PC accepts purposes 1, 2 and 5 from a `CONFIRMED` paired phone without a prompt. The phone
@@ -1381,4 +1383,357 @@ PC read the file from the disk again (8.5).
 
 ---
 
-<!-- PART-2C -->
+## 8. Final move
+
+Final move frees space on the phone by removing items whose copy on the PC has been verified. It is the
+only feature that removes user data and it is **off by default**.
+
+### 8.1 Principles and invariants
+
+- It is off for every folder until the user turns it on for that folder on the phone, after the
+  explanation screen and the acknowledgement checkbox. The phone reports `HELLO.fm_in_use`; the PC then
+  shows a permanent notice that it holds the only copy of some of that phone's files.
+- Two triggers, one state machine, no shortcut: (a) a folder in "Final move" mode (automatic), and
+  (b) "Free up space" on items already backed up from "Copy" folders (the user confirms a count).
+- A folder has exactly one final-move target PC. Other paired PCs play no part.
+
+Invariants (normative; every rule below serves them):
+
+| | Invariant |
+|---|---|
+| I1 | The phone never permanently deletes an item directly. An item leaves its place only by going to a trash. |
+| I2 | Before an item goes to the trash, the PC copy has been verified twice from the disk: at commit (level-2 receipt) and again at least `FM_DELAY` (24 h) later, in a later session. |
+| I3 | The second verification proves that the bytes the PC holds **now** equal the bytes the phone holds **now** (keyed proof with a fresh nonce). A ledger entry, a cached hash or an old receipt proves nothing. |
+| I4 | Every doubt resolves to "do not delete": any error, timeout, mismatch, missing precondition, unknown state or crash leaves the item where it is. |
+| I5 | An action is journaled durably before it is taken, and its real outcome is read back from the system afterwards, never assumed. |
+| I6 | No message from the PC deletes anything on the phone. The phone decides from its own computation. |
+| I7 | The PC never deletes, renames or modifies a committed file. `kiwi/1` has no message that asks it to. |
+
+### 8.2 Eligibility
+
+**Destination** (decided by the PC, reported as `Root.fm_capable`, re-evaluated at every session start and
+before every verification). All must hold:
+
+1. `GetDriveType` is `DRIVE_FIXED`. Not a network share, UNC path, mapped or substituted drive.
+2. The storage bus (`IOCTL_STORAGE_QUERY_PROPERTY`) is not USB, IEEE 1394, SD, MMC, iSCSI or a file-backed
+   virtual disk, and the device does not report removable media. (External USB disks report
+   `DRIVE_FIXED`; the bus type is what excludes them.)
+3. The file system is `NTFS` or `ReFS`.
+4. The root is not inside a cloud-synchronised folder (OneDrive, Dropbox, Google Drive and similar: a
+   cloud-files sync root, or cloud reparse/placeholder attributes). A sync client may replace local files
+   with online-only placeholders or delete them, and it uploads them to a cloud.
+5. Unbuffered reads (`FILE_FLAG_NO_BUFFERING`) work on the volume.
+6. The volume identity (volume GUID) is the one recorded when the files were committed. If the root was
+   moved or the volume replaced, final move stays off until a full integrity scan (8.9) has passed there.
+
+A destination that fails any rule is copy-only: backups work as usual, final move is refused
+(`fm_reason`, `E_FM_NOT_CAPABLE`).
+
+**Item** (decided by the phone). All must hold:
+
+1. The item is on the primary shared storage volume and is accessed through MediaStore with **full** media
+   permission.
+2. It is not in a copy-only class: anything reached through the Storage Access Framework; anything on a
+   removable volume (SD card, USB storage); app-owned media folders (`Android/media/<package>/...`, which
+   includes WhatsApp) and the legacy `WhatsApp/` tree. For these the phone UI offers "Copy" only.
+3. It is not flagged `redacted`, not pending, not trashed.
+4. The phone holds a level-2 receipt for it from the target PC; the receipt's `ledger_id` is the PC's
+   current `ledger_id`; the receipt's root is `fm_capable` now.
+5. The source is unchanged since that backup: `size`, `mtime` and `generation` equal the values stored with
+   the receipt. (A changed item is a new version: it goes back to `LOCAL` and is backed up again.)
+6. Delay, "by sequence, not by wall clock": the current `session_seq` is greater than the receipt's
+   `session_seq`, **and** at least `FM_DELAY` has passed on the phone's link clock since the phone stored
+   the receipt. (The PC applies the same test with its own link clock in 8.5.)
+7. The link is `CONFIRMED` (section 3); the PC reports `integrity_block = false` and
+   `scan_age <= SCAN_MAX_AGE` (14 days); the phone has no final-move block of its own (8.8).
+8. The item was not restored from the trash by the user (restored items are kept on the phone until the
+   user says otherwise).
+
+### 8.3 States
+
+Phone, per item version:
+
+```mermaid
+stateDiagram-v2
+    [*] --> LOCAL
+    LOCAL --> SENT: streamed, trailer sent
+    SENT --> LOCAL: failure, or source changed
+    SENT --> COMMITTED: receipt stored
+    COMMITTED --> LOCAL: source changed (new version)
+    COMMITTED --> VERIFYING: every rule of 8.2 holds
+    VERIFYING --> COMMITTED: any failure, timeout or mismatch
+    VERIFYING --> VERIFIED: proofs equal, journal row written
+    VERIFIED --> COMMITTED: trash not done (cancelled, crash, validity over)
+    VERIFIED --> TRASHED: trash outcome read back from the system
+    TRASHED --> COMMITTED: restored by the user (kept on phone from now on)
+    TRASHED --> PURGED: retention over and purge rules of 8.7 hold
+    PURGED --> [*]
+```
+
+| State | Where the bytes are on the phone | Meaning |
+|---|---|---|
+| `LOCAL` | Original place | No usable receipt. |
+| `SENT` | Original place | Streamed, receipt not yet stored. |
+| `COMMITTED` | Original place | Receipt stored (any level). **Final state for "Copy" mode.** Only a level-2 receipt lets the item go further (8.2 item 4). |
+| `VERIFYING` | Original place | Second verification running. |
+| `VERIFIED` | Original place | Second verification passed in this process, at most `FM_VERIFY_VALIDITY` (900 s) ago. |
+| `TRASHED` | Trash (system trash, or the app trash folder) | Recoverable by the user. |
+| `PURGED` | Nowhere | The PC holds the only copy. |
+
+PC, per stored file:
+
+| State | Entered when | Notes |
+|---|---|---|
+| `PARTIAL` | Section 7, step 1 | Temporary file only. |
+| `COMMITTED` | Section 7, step 10 | With its `verify_level`. |
+| `REVERIFIED` | A stage-1 `FM_VERIFY` returned status 1 for it | Records session and PC link clock. |
+| `SOLE_COPY` | `FM_STATE(trashed)` or `(purged)` received | Scanned first; shown as "only copy" in the PC program. Goes back to `COMMITTED` on `FM_STATE(restored)`. |
+| `DAMAGED` | Missing, changed or unreadable (8.9) | Raises the integrity block. The file, if present, is left untouched. |
+| `USER_REMOVED` | The PC user acknowledged a missing or changed file | Closes the alert for that file. |
+
+### 8.4 Step 1: verified copy
+
+This is the normal backup of sections 6 and 7. For final move it must end in a level-2 receipt (directly, or
+by the upgrade of 6.3(3)). The phone stores, durably, with
+the receipt: `key`, `hash`, `size`, `mtime`, `generation`, `commit_seq`, `session_seq`, `ledger_id`,
+`root_id`, and its own link clock value.
+
+### 8.5 Step 2: delayed second verification
+
+```
+PH                                                              PC
+ |-- FM_VERIFY (stage 1, nonce, items) ------------------------>|
+ |  for each item, one read pass over the local file:           |  for each item, checks, then one unbuffered
+ |    local_hash  = BLAKE3(content)                             |  read pass over the stored file:
+ |    local_proof = MAC(K_v, content)                           |    disk_hash = BLAKE3(content)
+ |                                                              |    proof     = MAC(K_v, content)
+ |<------------------ FM_VERIFY_RESULT (status, proof) parts ---|
+ |  per item: ct_eq(local_proof, proof)                         |
+```
+
+```
+K_v = KDF("kiwi/1 fm verify", nonce || ID_ph || ID_pc || u8(stage) || hash || u64be(size))
+```
+
+**PC, per item, in this order** (the first failing check gives the status):
+
+| Check | Status if it fails |
+|---|---|
+| The link is `CONFIRMED` | Whole request: `ERROR(E_CONFIRM_REQUIRED)` |
+| No integrity block | 8 blocked |
+| `scan_age <= SCAN_MAX_AGE` | 9 scan overdue |
+| A ledger record of this link exists with this `key`, `hash`, `size`, `commit_seq` | 6 unknown item |
+| The record is level 2 and its root is `fm_capable` now | 4 not capable |
+| Stage 1 only: current `session_seq` > the record's `session_seq`, and at least `FM_DELAY` on the PC link clock since the record reached level 2 | 5 too early |
+| Stage 2 with `min_age`: at least `min_age` on the PC link clock since the PC recorded the item as trashed | 5 too early |
+| The file opens (unbuffered) and reads to the end | 2 missing / 7 read error |
+| `disk_hash == hash` and the size matches | 3 mismatch |
+| (all passed) | 1 ok, with `proof` |
+
+The PC MUST compute `proof` from the bytes of that read pass. It MUST NOT answer from the ledger, from a
+cache, or from an earlier result. Statuses 2, 3 and 7 raise the integrity block (8.9). On status 1 the PC
+records `REVERIFIED`.
+
+**Phone, per item:**
+
+1. Re-check the source metadata against the receipt (8.2 item 5).
+2. One read pass: `local_hash` and `local_proof`. Re-check the metadata again after the pass.
+3. Require `local_hash == hash` of the receipt. If not, the item is a new version: `LOCAL`.
+4. Require PC status 1 and `ct_eq(local_proof, proof)`.
+5. Only then: write a journal row (`key`, `hash`, batch, link clock, `session_seq`) with a durable commit,
+   and enter `VERIFIED`.
+6. Anything else: back to `COMMITTED`. If the PC returned status 2, 3 or 7, or returned status 1 with a
+   proof that does not match while `local_hash` is correct, the phone sets its own final-move block for the
+   link and alerts the user (8.8).
+
+`VERIFIED` expires after `FM_VERIFY_VALIDITY` (900 s, monotonic) and does not survive the process: a
+`VERIFIED` row found at start is resolved by reading the real state of the item (if it is in the trash:
+`TRASHED`; otherwise `COMMITTED`, and the verification must be done again).
+
+### 8.6 Step 3: move to the trash
+
+Common rules:
+
+1. Immediately before the trash call, re-check each item's metadata once more (size, mtime, generation,
+   not pending, not already trashed). A changed item is dropped from the batch.
+2. Order: journal "trashing batch B" durably, call the system, read the outcome back per item, journal
+   `TRASHED` per item that really is in the trash. Items that are not, stay `COMMITTED`.
+3. Batches hold at most 500 items.
+4. The phone reports `FM_STATE(trashed)` to the PC, in this session or the next. The PC marks `SOLE_COPY`.
+5. The final-move path contains no call that permanently deletes media before step 4 (8.7). On API 30+
+   the app never calls `createDeleteRequest` and never asks for `MANAGE_MEDIA`.
+
+**Android 11 and later (API 30+)** *(platform)*:
+
+1. `MediaStore.createTrashRequest(resolver, uris, true)`, one request per batch. Android shows **its own
+   dialog for each batch**; the user can refuse. Refusal or dismissal: nothing happens, items return to
+   `COMMITTED`.
+2. After `RESULT_OK`, the app queries every item including trashed ones and records as `TRASHED` only
+   those with `IS_TRASHED = 1`, together with the system's `DATE_EXPIRES`.
+3. Restore from the app: `createTrashRequest(..., false)` (system dialog), then `FM_STATE(restored)`.
+4. Retention is **the system's** (normally 30 days) and the system deletes expired items by itself. The
+   app cannot extend, suspend or shorten it. The "trash period" setting does not apply on API 30+.
+5. Required warning: for every item in the system trash the app tries a stage-2 verification (8.7) between
+   day 20 and the expiry date. If, 7 days before `DATE_EXPIRES`, and again 2 days before, no stage-2
+   verification has succeeded since the item was trashed (PC unreachable, link `REQUIRED`, integrity block,
+   mismatch), the app MUST notify the user that Android will remove the items on that date and that the PC
+   copy could not be checked, with a one-tap restore.
+6. When an expired item has disappeared, the app records `PURGED` and reports `FM_STATE(purged)`.
+
+**Android 7 to 10 (API 24-29)** *(platform)*: a visible trash folder on shared storage, with path access
+(`WRITE_EXTERNAL_STORAGE` on API 24-28; legacy external storage on API 29).
+
+1. Location: `Kiwi Transfer Trash/` at the top of primary shared storage, visible in any file manager,
+   containing `.nomedia` (so that trashed items leave the gallery) and a plain-text index
+   (`kiwi-trash.json`: original path, hash, size, date) rewritten atomically after each batch. The index is
+   for people and for a reinstalled app to *list* items; it is never an authority for deleting.
+2. Each batch gets a new sub-directory, created with a create-exclusive `mkdir`; items keep their original
+   relative path below it. The move is a single `rename` on the same file system. It MUST NOT fall back to
+   copy-and-delete, and MUST NOT replace an existing file: the target is checked not to exist immediately
+   before, and `renameat2(RENAME_NOREPLACE)` is used where the file system supports it.
+3. Outcome read-back: the target exists with the expected size and the source path no longer exists. Then
+   the media scanner is asked to re-scan both paths. `ContentResolver.delete` is never used in this flow
+   (on these versions it deletes the underlying file).
+4. Each `TRASHED` record stores: trash path, original path, `hash`, `size`, the `session_seq`, the phone
+   link clock and the wall-clock time of trashing.
+5. Restore: `rename` back to the original path if it is free, otherwise to `name (restored n).ext`;
+   re-scan; `FM_STATE(restored)`.
+6. Retention: default `TRASH_RETENTION` = 30 days (user setting, minimum 7 days), enforced by 8.7.
+
+### 8.7 Step 4: purge (API 24-29), and the stage-2 check (all versions)
+
+Stage 2 is the same exchange as 8.5 with `stage = 2`; the phone computes its side over the **trashed**
+copy. It is used before every purge on API 24-29, and as the pre-expiry check on API 30+.
+
+An item in the app trash folder is permanently deleted only if **all** hold:
+
+1. Time: at least the retention period has passed on the phone link clock since trashing, **and** by the
+   phone's wall clock.
+2. Sequence: the current `session_seq` is greater than the `session_seq` of trashing.
+3. Second clock: the PC, with `min_age` = the retention period, does not answer "too early" (the PC's own
+   link clock agrees that the period has passed since it recorded the item as trashed).
+4. The stage-2 verification of this item succeeded in the current session, within `FM_VERIFY_VALIDITY`.
+5. No block of 8.8 is active.
+
+Order: journal "purging", unlink the file in the trash folder, read back, journal `PURGED`, send
+`FM_STATE(purged)`. A crash in between is resolved from the real state: file still there means `TRASHED`.
+
+If a condition fails, **nothing is deleted** and the item stays in the trash, for longer than 30 days if
+necessary. There is no automatic exception for low storage. Version 1.0 has no in-app "empty the trash
+now" that bypasses these rules.
+
+After `PURGED` the PC holds the only copy. No protocol rule can protect that copy against the later loss of
+the PC's disk; the application says so when final move is turned on and recommends a second copy.
+
+### 8.8 Blocks
+
+| Condition | New verification (stage 1) | Trashing | Purging (API 24-29) |
+|---|---|---|---|
+| Link `REQUIRED` (weekly check due, clock anomaly, epoch mismatch) | No | No | Suspended |
+| PC not reachable | No | No | Suspended |
+| PC reports `integrity_block` | No | No | Suspended |
+| PC scan overdue (`scan_age > SCAN_MAX_AGE`) | No | No | Suspended |
+| PC `ledger_id` differs from the receipts | No: receipts are void, items go back to `LOCAL` | No | Suspended until stage 2 passes against the new ledger |
+| PC identity changed, or link unpaired | No | No | Suspended for good; the user decides (8.10) |
+| Destination no longer `fm_capable` | No | No | Suspended |
+| Media permission partial, or storage permission missing | No | No | Suspended |
+| Phone ledger was reset | All items `LOCAL` | No | Found items are never purged automatically |
+| Phone saw status 2, 3 or 7, or a proof mismatch | No, until the user has seen the alert and the PC reports a completed scan with no block | No | Suspended |
+
+"Suspended" never cancels or deletes: the item waits. Blocks are re-evaluated at each session start and
+before each batch.
+
+### 8.9 PC integrity scan, and the rule that a mismatch blocks everything
+
+1. **Scan.** The PC re-reads every committed file of every link from the disk, unbuffered, at low I/O
+   priority, and compares `BLAKE3` and size with the ledger. `SOLE_COPY` files first. A full scan runs at
+   least every `SCAN_PERIOD` (7 days) while the PC is on, and on demand ("Check now"). Each completed full
+   scan increments `scan_seq`.
+2. **Per file result.** OK; or *moved* (not at its path, but a file with the same size and hash exists
+   elsewhere under the root: the ledger path is updated, result OK); or `DAMAGED`: missing, changed
+   (hash or size differs), unreadable.
+3. **Block.** Any `DAMAGED` result, from the scan or from any other check (section 7 step 7, crash recovery,
+   6.9(4), an `FM_VERIFY` status 2, 3 or 7, a failed ledger integrity check), sets `integrity_block = true`.
+   The flag is durable and **applies to all phones of that PC**: a damaged file means the disk or the
+   folder is not trustworthy. The PC pushes `STATUS`, shows a persistent alert in its window and a Windows
+   notification; each phone alerts its user at its next session.
+4. **While blocked**: every `FM_VERIFY` item gets status 8, so no phone can trash or purge. **Normal copying
+   continues.** Nothing is deleted on either side.
+5. **Resolution, per file**: (a) *repair*: the PC sends `REPAIR_REQUEST`; if the phone still has exactly
+   that content (in place or in its trash) it sends it with purpose 5, and it is committed as a new file
+   through section 7 (the damaged file is left as it is and its record marked superseded); or (b) the PC
+   user acknowledges the file as removed, changed on purpose, or lost.
+6. **Clearing**: `integrity_block` returns to false only when no unresolved file remains, a full scan has
+   completed after the last finding, and the PC user has clicked to resume final moves.
+7. The PC shows, for each damaged file, where another copy is known to be (still on the phone, in the
+   phone's trash with its expiry, or nowhere), from the `FM_STATE` events it has received.
+
+### 8.10 Special situations
+
+| Situation | Behaviour |
+|---|---|
+| **Partial media permission** (Android 14+ "selected photos") | Final move is suspended for the whole app: an item that disappears from view may only have been deselected. Copy continues for the visible items. Items already in the system trash are unaffected. |
+| **Permission revoked** (Android stops the process) | At next start every `VERIFYING`/`VERIFIED` item returns to `COMMITTED`. No trashing. On API 24-29 the trash folder cannot be read: purge and restore wait, the app asks for the permission again. Nothing is deleted. |
+| **Phone app reinstalled** | The wrapping key is gone, so the identity is new (1.6): the user pairs again and gets a **new link**. Nothing is inherited: every item is `LOCAL`. Offers are answered `have` where the PC user attached the old device folder to the new link (9.4), then upgraded to level 2 by a disk re-read, then the normal 24 h delay applies. A trash folder left by the old installation (API 24-29) is shown as "found items": restorable, never purged automatically. On API 30+ the system trash keeps its own schedule. |
+| **Phone ledger lost** (identity intact) | New phone `ledger_id`. All items `LOCAL`; the trash folder becomes "found items". The PC, seeing the new `ledger_id`, keeps its files and marks final-move states of that link as unknown. |
+| **PC ledger lost** (identity intact) | New PC `ledger_id`. The phone voids all receipts (`LOCAL`), suspends purges, and tells the user. The PC rebuilds its ledger by scanning and hashing its destination; items are then re-offered and deduplicated. Trashed items can be purged later only after a stage-2 verification against the rebuilt ledger. |
+| **PC reinstalled, replaced, or its Windows profile reset** | The PC has a new identity: the phone's pin no longer matches and the link is dead. The phone alerts the user: items in its trash exist otherwise only on that PC, and it offers to restore them. Purges for that link never run. After pairing again (new link), nothing is eligible until the full flow has run again. |
+| **Unpaired** (either side) | Same as the previous row for final move: no purge, restore offered. No file is deleted on either device. |
+| **Destination moved or volume changed** | `fm_capable` false until a full scan passes at the new place (8.2 rule 6). |
+| **Clock set back or forward** | 3.2: anomaly forces the weekly check; forward jumps are witnessed by the second device's clock (8.2 item 6, 8.7 item 3). |
+| **User edits or deletes a phone item after backup** | An edited item is a new version (`LOCAL`). A deleted item is simply gone from the phone by the user's own action; the PC copy stays. |
+| **User moves or deletes files on the PC** | Found by the scan (8.9): moved files are followed; deleted files raise the block until acknowledged. |
+
+### 8.11 Failure points and guaranteed outcomes
+
+"Nothing is deleted" means: no item leaves its place on the phone, no trashed item is purged by the app,
+and no committed file is touched on the PC.
+
+| # | Failure point | Detected by | Guaranteed outcome |
+|---|---|---|---|
+| 1 | Phone read error while streaming | Sender I/O error | Stream reset; item stays `LOCAL`. Nothing is deleted. |
+| 2 | Source changes while it is streamed | 6.5(4): `changed` in the trailer | PC discards the data; item `LOCAL`. Nothing is deleted. |
+| 3 | A chunk is corrupted in memory or transit | Per-chunk hash (6.6) | Item fails with `E_VERIFY`; retried. Nothing is deleted. |
+| 4 | Connection lost during transfer | QUIC timeout | Partial kept for resume; no receipt. Nothing is deleted. |
+| 5 | PC crash or power loss before the flush | No ledger record; crash recovery | Partial re-verified from disk and resumed; no receipt. Nothing is deleted. |
+| 6 | `FlushFileBuffers` fails, or disk full | API error | `E_IO` / `E_NO_SPACE`; no rename, no receipt. Nothing is deleted. |
+| 7 | The disk returns different bytes than were written | Unbuffered re-read (section 7, step 7) | Temporary file removed, `E_VERIFY`, integrity block raised. Nothing is deleted. |
+| 8 | Final name already exists | Create-new rename | Next free name. No overwrite. Nothing is deleted. |
+| 9 | A junction or link was planted in the destination | Reparse checks (6.8) | Item fails with `E_NAME`, PC user alerted. Nothing is deleted. |
+| 10 | PC crash after the rename, before the ledger write | Intent row in the ledger (section 7) | Re-read and adopted, or left alone with an alert. No receipt was sent. Nothing is deleted. |
+| 11 | Ledger write fails | SQLite error | No receipt. Nothing is deleted. |
+| 12 | Receipt lost (connection drops after the commit) | Phone has no receipt | Item `SENT`; re-offered; `have`, then level 2 after a disk re-read. Nothing is deleted. |
+| 13 | Phone crash after receiving the receipt, before storing it | Phone has no receipt | Same as 12. Nothing is deleted. |
+| 14 | Destination is removable, a share, exFAT, or cloud-synchronised | 8.2 destination rules | Copy only; `E_FM_NOT_CAPABLE`. Nothing is deleted. |
+| 15 | Item is on SD card, behind SAF, or in an app-owned folder (WhatsApp) | 8.2 item rule 2 | Copy only. Nothing is deleted. |
+| 16 | Location metadata was withheld by Android | `redacted` flag | Never eligible. Nothing is deleted. |
+| 17 | Less than 24 h, or the same session | 8.2 item 6 and the PC's "too early" | Verification refused. Nothing is deleted. |
+| 18 | Weekly check due, or clock anomaly | 3.3 | `E_CONFIRM_REQUIRED`; verification, trashing and purging stop. Nothing is deleted. |
+| 19 | PC file missing at the second verification | Status 2 | Block raised; item `COMMITTED`; user alerted. Nothing is deleted. |
+| 20 | PC file changed on disk (bit rot, another program) | Status 3, or the scan | Block raised on all links; repair offered from the phone. Nothing is deleted. |
+| 21 | PC answers from a stale ledger (implementation fault) | Keyed proof needs the real bytes | Proof mismatch; phone blocks final move. Nothing is deleted. |
+| 22 | Phone item edited since the backup | Metadata checks and `local_hash` | New version, backed up again. Nothing is deleted. |
+| 23 | Connection lost during verification | Timeout | Items `COMMITTED`. Nothing is deleted. |
+| 24 | Phone crash between `VERIFIED` and the trash call | Journal row; real state read at start | Back to `COMMITTED`; verification repeated later. Nothing is deleted. |
+| 25 | User refuses or dismisses the Android trash dialog | Activity result, then read-back | Items `COMMITTED`. Nothing is deleted. |
+| 26 | The trash request succeeds for only some items | Per-item read-back | Only items really in the trash are `TRASHED`; the rest `COMMITTED`. Nothing is deleted. |
+| 27 | Move to the trash folder fails (API 24-29) | `rename` error; read-back | Item stays in place. No copy-and-delete fallback. Nothing is deleted. |
+| 28 | Media permission becomes partial, or is revoked | Permission check at start and before each batch | Final move suspended. Nothing is deleted. |
+| 29 | PC unreachable during the retention period | No session | Purge suspended (API 24-29); warning before system expiry (API 30+). Nothing is deleted by the app. |
+| 30 | PC ledger lost | `ledger_id` changed | Receipts void; purges suspended; user told. Nothing is deleted. |
+| 31 | PC reinstalled or replaced | Pin mismatch | Link dead; restore from trash offered; purges never run. Nothing is deleted. |
+| 32 | Phone app reinstalled or phone ledger lost | New identity or new `ledger_id` | New link or reset states; old trash folder listed, never purged automatically. Nothing is deleted. |
+| 33 | Integrity scan finds a problem with any file | 8.9 | All final moves on that PC blocked; user alerted; copying continues. Nothing is deleted. |
+| 34 | Phone crash during a purge | Journal row; real state read at start | File still present: `TRASHED`; absent: `PURGED`. No other item is affected. |
+| 35 | Unpairing while items are in the trash | Link state | Purge never runs for that link; restore offered. Nothing is deleted. |
+
+Two cases where data can be lost, stated honestly (see the threat model, section 5):
+
+| # | Case | Why the protocol cannot prevent it |
+|---|---|---|
+| A | **Android 11+ system trash expires** while the PC copy could not be re-checked. | The operating system deletes expired trash by itself; the app can only warn and offer restore (8.6, API 30+ rule 5). By then the PC copy had passed two disk verifications. |
+| B | **The PC's disk fails, or its files are destroyed, after the phone copy is purged.** | After the purge the PC holds the only copy. The weekly scan can detect damage but cannot undo it. The user is told to keep a second copy. |
+
+---
+
+<!-- PART-3 -->
