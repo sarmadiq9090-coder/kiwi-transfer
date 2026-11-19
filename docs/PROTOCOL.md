@@ -2569,34 +2569,58 @@ rotation.
 
 ## 9. Other features
 
-All features of this section need a `CONFIRMED` link and the matching capability.
+Each feature needs its capability. Features that hand data out of the PC (9.1 PC to phone, 9.2, 9.3, 9.4)
+also need a `CONFIRMED` link; features that only copy from the phone to the PC (9.1 phone to PC, 9.6) work
+while the link is `REQUIRED` too (3.5).
 
 ### 9.1 Sending files (PC to phone, and phone to PC)
 
 **PC to phone.**
 
-1. The PC user chooses files and a phone. With an open session the PC sends `OFFER` (purpose 2) at once.
-   Without one, the PC keeps a reference to the files in an **outbox** for up to 7 days (not a copy) and
-   reports the count in `STATUS.outbox`. Because the phone never listens (decision D3) and there is no push
-   service, delivery happens when the phone next opens a session; the PC program says "Open Kiwi Transfer
-   on your phone".
-2. The phone shows a dialog: "<PC name> wants to send N files", with cleaned names, sizes and the save
-   folder. Accept or Decline, for the whole offer. Decline answers every item `declined` (`E_DECLINED`).
-   There is no automatic accept in 1.0. The dialog is only shown while the app is in the foreground.
-3. `Item.name` is the base name only; `path` is absent. The PC as sender follows 6.5 (one read, hash what
-   is streamed, re-check size and modification time).
-4. Phone commit *(platform)*: write into a pending MediaStore entry (API 29+) or a temporary name (API
-   24-28) under `Download/Kiwi Transfer/`; verify every chunk; `fsync`; read the whole file back and compare
-   its `BLAKE3` with `trailer.hash`; publish with create-new semantics (6.9); record it in the phone ledger;
-   send `ITEM_RESULT` with a level-1 receipt.
-5. **Never auto-open.** The phone does not open, preview with another app, or install a received file by
-   itself. "Open" is a user tap and goes through the system chooser. The app never asks the system to
-   install a received APK.
+1. **Starting.** The PC user drops files onto the program's window (onto one phone, or onto "All phones"),
+   or right-clicks files in Explorer and chooses "Send to phone" *(platform: a per-user "Send to" entry or
+   shell verb that hands the file paths to the running program and does nothing else)*. The target is
+   **one paired phone or all of them**; "all" creates one independent queue entry per phone.
+2. **Queue.** With an established, `CONFIRMED` session the PC sends `OFFER` (purpose 2) at once. Otherwise
+   the files wait in that phone's **outbox** until the phone connects: the outbox holds a reference to each
+   file (path, size, modification time), not a copy, and reports its count in `STATUS.outbox`. Because the
+   phone never listens (decision D3) and there is no push service, delivery happens when the phone next
+   opens a session; the PC program says "Open Kiwi Transfer on your phone". An entry leaves the outbox when
+   it was delivered, declined, cancelled by the PC user, when the phone is unpaired, or when the file is
+   gone or its size or modification time changed since it was queued (the PC user is told; nothing else is
+   sent in its place). There is no silent expiry. An outbox holds at most `OUTBOX_MAX` (10 000) entries.
+   While the link is `REQUIRED` the outbox waits.
+3. **Accepting, per transfer.** The phone shows a dialog: "<PC name> wants to send N files", with cleaned
+   names, sizes and the save folder. Accept or Decline, for the whole offer. Decline answers every item
+   `declined` (`E_DECLINED`). The dialog is shown only while the app is in the foreground. An `OFFER` that
+   waits for a person has a response time of `ACCEPT_TIMEOUT` (300 s) instead of 60 s; unanswered, the
+   items stay in the outbox.
+4. **"Always accept from this PC"** is an optional switch in that dialog and in the phone's settings,
+   per PC, **off by default** (`PHONE_STATUS.auto_accept`). When it is on, offers of purpose 2 from that
+   PC are accepted without a dialog; the phone shows a notification with the count afterwards. It applies
+   only to a `CONFIRMED` link, never changes where files are saved or the free-space rule (5.10), never
+   opens anything, and is reset to off when the link is unpaired or paired again.
+5. **Where files are saved.** `Item.name` is the base name only; `path` is absent; `kind` is 2. The phone
+   chooses the folder, never the PC: **pictures go to `Pictures/Kiwi Transfer/` and videos to
+   `Movies/Kiwi Transfer/`, so they appear in the gallery; everything else goes to
+   `Download/Kiwi Transfer/`.** What counts as a picture or a video is decided by the phone from the
+   cleaned file extension against a fixed list (`jpg jpeg png gif webp heic heif avif bmp dng`;
+   `mp4 m4v mov 3gp mkv webm`), never from the `mime` field.
+6. Phone commit *(platform)*: write into a pending MediaStore entry (API 29+) or a temporary name (API
+   24-28) in that folder; verify every chunk; `fsync`; read the whole file back and compare its `BLAKE3`
+   with `trailer.hash`; publish with create-new semantics (6.9); record it in the phone ledger; send
+   `ITEM_RESULT` with a level-1 receipt. The PC as sender follows 6.5 (one read, hash what is streamed,
+   re-check size and modification time).
+7. **Never auto-open.** The phone does not open, preview with another app, or install a received file by
+   itself, with or without "always accept". "Open" is a user tap and goes through the system chooser. The
+   app never asks the system to install a received APK and does not hold the permission to do so.
 
 **Phone to PC** ("Send to PC" in the share sheet): `OFFER` with purpose 2. The PC accepts without a prompt
-from a `CONFIRMED` phone, stores the files in that phone's "sent files" folder through the full commit of
-section 7, and lists them in its history. Shared content without a name or date gets a generated name and
-the current time. The PC never opens the files.
+from a paired phone, stores the files in that phone's "Sent files" folder (inside its namespace) through
+the full commit of section 7, and lists them in its history. Shared content without a name or date gets a
+generated name and the current time. **What the PC does with such files (KT-17):** it never opens,
+previews or runs them; shell-active names are stored with the `.kiwi-blocked` suffix (6.8 rule 9); every
+file gets the Mark-of-the-Web (6.8 rule 13), so that Windows and Office treat it as a file from outside.
 
 ### 9.2 Clipboard text and links
 
@@ -2620,44 +2644,62 @@ the current time. The PC never opens the files.
 
 ### 9.3 Browsing the PC from the phone (read-only)
 
-1. **Chosen folders only.** The PC user decides which folders each phone may see (roots of kind 2).
-   Default: none. A phone can always browse its own backup folder (kind 1).
+1. **A phone sees its own namespace, and nothing of any other phone.** The roots a phone gets are: its own
+   backup folder (kind 1); a namespace the PC user handed over to it (kind 3, 9.4); and folders of the PC
+   that the PC user chose to share with this phone (kind 2; default: none). A shared folder MUST NOT be,
+   contain, or lie inside any phone's namespace (linked or unlinked), a second-copy folder (8.13), or the
+   program's own data directory; the PC checks this, on resolved paths and component by component, when
+   the share is created and at every session start, and withdraws a share that fails. No root, handle or
+   message therefore reaches another phone's files.
 2. **Handles, not paths.** The phone never sends a path. `BROWSE` names a root and, below it, an `entry`
    handle taken from an earlier reply. Handles are random 16-byte values that the PC maps to canonical
    paths in a per-session table; an unknown handle is `E_NOT_FOUND`. Path traversal is therefore not
    expressible.
 3. The PC lists a directory but omits: hidden and system entries; reparse points of any kind (junctions,
    symbolic links, mount points); online-only cloud placeholder files (reading them would start a download
-   from the internet); the temporary directory; anything whose resolved path is outside the root.
+   from the internet); names that begin with `.kiwi-`; anything whose resolved path is outside the root.
 4. **Read-only.** No message can create, change, rename or delete anything in a browse root.
-5. **Thumbnails** (`THUMB`): made by the PC with the Windows imaging components, as JPEG, longest edge at
-   most 320 px, at most 65 536 bytes, with all metadata removed (no location in thumbnails). The PC limits
-   its own work: image and video types only, source at most 256 MiB and 100 megapixels, 5 s per thumbnail,
-   8 at a time. The phone checks the byte size and the JPEG header dimensions (at most 320 x 320) before
-   decoding, and keeps thumbnails only in its cache directory (cleared on unpair).
+5. **Thumbnails** (`THUMB`) are made from files a phone uploaded, so the decoder's input is chosen by
+   whoever holds that phone's key (KT-15). The PC therefore decodes **only in a separate helper process**
+   that has: a low-integrity or AppContainer token with no capabilities (no network, no access to the
+   user's files); a job object limiting memory (512 MiB), CPU time and child processes (none); and, as its
+   only input, a read-only handle to the one file, passed by the main process (the helper opens no path).
+   It returns a JPEG, longest edge at most 320 px, at most 65 536 bytes, with all metadata removed (no
+   location in thumbnails), over a pipe. The main process reads the image dimensions from the file header
+   before it starts the helper (image and video types only, source at most 256 MiB and 100 megapixels),
+   allows 5 s per thumbnail and 8 at a time, kills a helper that exceeds a limit, and never decodes a
+   phone-supplied file itself. If the helper cannot be started with these restrictions, `Entry.thumb` is
+   false everywhere. The phone checks the byte size and the JPEG header dimensions (at most 320 x 320)
+   before decoding, and keeps thumbnails only in its cache directory (cleared on unpair).
 6. **Fetching** (`FETCH`, purpose 3): the PC answers with `OFFER`s of purpose 3; the phone stores the files
-   as in 9.1(4). The user asked for them, so there is no accept dialog; the phone still enforces its free
-   space rule.
+   as in 9.1 rules 5 and 6. The user asked for them, so there is no accept dialog; the phone still enforces
+   its free space rule.
 
-### 9.4 Full restore to a new phone
+### 9.4 Restore
 
-1. A new phone has a new identity. It pairs like any phone and gets a **new link**.
-2. On the PC, the user explicitly attaches an existing backup to the new link ("This phone replaces
-   <old phone>"). This is consent given at the PC; a phone cannot request it. Effects: the old backup is
-   offered to the new link as a root of kind 3 (restore source, read-only), and the PC may adopt the old
-   folder as the new link's destination by copying the ledger records to the new link with
-   `verify_level = 0` (so later backups deduplicate; nothing becomes eligible for final move by this).
-3. The phone sends `FETCH` (purpose 4) for the root or for chosen entries. The PC sends `OFFER`s of purpose
-   4, at most 500 items each, with `hash`, `path`, `mtime` and `media` from the ledger. The phone answers
-   `have` for content it already holds (same hash), `send` otherwise. Resume works as in 6.7.
-4. The PC as sender hashes what it streams (6.5). If the streamed hash differs from the ledger hash, the
+1. **To the same phone.** `FETCH` with purpose 4 on entries of its own roots. The PC sends `OFFER`s of
+   purpose 4, at most 500 items each, with `hash`, `path`, `mtime`, `kind`, `media` and the original name
+   from the ledger. The phone answers `have` for content it already holds (same hash), `send` otherwise.
+2. **To a new phone.** A new phone has a new identity. It pairs like any phone and gets a **new link** with
+   an empty namespace. On the PC, the user explicitly hands an existing namespace over to the new link
+   ("This phone replaces <old phone>"). This is consent given at the PC; a phone cannot request it. It is
+   possible only for a namespace that is unlinked, or whose phone is unpaired in the same step: **a
+   namespace belongs to at most one live link**, so two phones never share one. Effects: the old backup is
+   offered to the new link as a root of kind 3 (restore source, read-only); its records are re-assigned to
+   the new link with `verify_level = 0`, keeping their marks (`SOLE_COPY` stays `SOLE_COPY`), so later
+   backups deduplicate. Nothing becomes eligible for final move by this.
+3. The PC as sender hashes what it streams (6.5). If the streamed hash differs from the ledger hash, the
    item fails (`E_CHANGED`) and the PC raises an integrity alert: the stored file is damaged.
-5. Phone commit as in 9.1(4), into a "restored" folder (media under `DCIM/`, other files under
-   `Download/`), with album sub-folders from the cleaned `path`. Modification times are restored where the
-   platform allows; capture dates are inside the untouched files.
-6. Restored items are entered in the phone ledger with their hash and a level-0 receipt: they are not
-   uploaded again, and they become eligible for final move only through the complete flow of section 8.
-7. The dialog on the PC offers to unpair the old phone (a lost phone should not stay paired).
+4. Phone commit as in 9.1 rule 6. Media go to a "Restored" folder under `DCIM/`, other files under
+   `Download/Kiwi Transfer/Restored/`, with album sub-folders from the cleaned `path`; items of kind 3 to 7
+   follow 9.6. Modification times are restored where the platform allows; capture dates are inside the
+   untouched files. A file stored on the PC under a neutralised name comes back under its original name.
+5. **Restored items are new arrivals (KT-33).** They are entered in the phone ledger as `LOCAL`, with the
+   hash that was just verified as a cached hash and with `restored_at` = now. The next backup round offers
+   them with that `hash`, the PC answers `have` and then upgrades the receipt to level 2 by reading its
+   file (6.3 rule 4). They become eligible for final move only through the complete flow of section 8, and
+   their keep-on-phone period starts at the restore (8.12 rule 6).
+6. Restore needs a `CONFIRMED` link (3.5): it hands the phone's whole backup out of the PC.
 
 ### 9.5 Rules for the surfaces around the protocol *(platform)*
 
@@ -2668,13 +2710,131 @@ These are not wire rules, but the threat model relies on them:
 2. Items shared into the app ("Send to PC") are read only through the content resolver with the sharing
    app's grant. `file:` URIs, and URIs that resolve to the app's own provider or private directories, are
    refused (another app must not be able to make Kiwi Transfer send its own private files).
-3. Buttons that give consent (turn on final move, "numbers match", accept files, free up space) ignore
-   touches while another window covers the app (protection against overlays).
+3. Buttons that give consent (turn on final move, "the PC said the number was correct", accept files,
+   "always accept from this PC", free up space, restore contacts) ignore touches while another window
+   covers the app (protection against overlays).
 4. Notifications show counts and device names, never file names, and use private lock-screen visibility.
-5. The PC window (WebView2) loads only the program's own local files, blocks navigation and requests to any
-   remote origin, uses a content security policy without inline script, and receives peer text only as
-   plain text (5.8). The native host accepts a small, typed set of UI commands.
-6. The weekly code, the pairing QR and the SAS are shown only inside the program's own window (3.4).
+5. The PC window (WebView2) loads only the program's own local files; every other request is refused in
+   `WebResourceRequested` and `NavigationStarting`; it uses a content security policy without inline
+   script, and receives peer text only as plain text (5.8). The native host accepts a small, typed set of
+   UI commands. SmartScreen reputation checks (`IsReputationCheckingRequired = false`), general autofill
+   and password autosave are switched off.
+6. The weekly code and the pairing QR are shown only inside the PC program's own window (3.4, 2.2). The
+   pairing number is shown only on the phone, inside the app, and is typed into the PC program's own
+   window.
+7. The Explorer entry "Send to phone" passes file paths to the running program over a per-user channel and
+   has no other function; the program registers no URI scheme and no file association (in particular none
+   for `.kiwi-blocked`).
+8. Android permissions are asked for when the feature that needs them is turned on, with the reason:
+   contacts and calendar read access for those data sets, write access only when the user starts a
+   restore of them; all-files access for "all files" and for WhatsApp's folder; the app-list permission
+   for the app list. The app never requests SMS, call-log, location or install-packages permissions.
+
+### 9.6 Data backup beyond media
+
+Besides photos and videos the phone can copy other data to the PC and bring it back. Every item is a file
+that travels through section 6 and is committed through section 7; the PC treats its content as opaque
+bytes and **never parses a phone's contacts, calendars, manifests or packages**. Each data set is switched
+on separately on the phone (default: off) and needs capability 8.
+
+| `kind` | Name | What it is | Source on the phone *(platform)* | Removal from the phone |
+|---|---|---|---|---|
+| 1 | media | Photos, videos, audio | MediaStore | Final move, if the user turned it on (section 8) |
+| 2 | file | Any other file on shared storage ("all files": documents, downloads, recordings) | All-files access (API 30+), storage permission (API 24-29), or folders granted through the Storage Access Framework | **Never.** Copy and restore only |
+| 3 | contacts | A snapshot of all contacts: one vCard file | Contacts provider, read access | **Never deleted from the phone** |
+| 4 | calendar | A snapshot of one calendar: one iCalendar file per calendar | Calendar provider, read access | **Never deleted from the phone** |
+| 5 | app list | A manifest of the installed user apps (JSON, below) | Package manager | Not applicable |
+| 6 | APK file | The package files of an installed user app (base and split APKs) | The app's `sourceDir` and `splitSourceDirs` | Not applicable. **No app data is backed up** |
+| 7 | app backup file | Backup files another app wrote to its shared folder. In 1.0: WhatsApp's own backup (`Databases`, `Backups` and `Media` under its folder) | All-files access or a folder grant | **Never.** Copy and restore only |
+
+**Not included, by decision:** SMS and MMS messages, the call log (the app requests neither permission),
+app-private data, accounts and system settings.
+
+**Snapshots and versioned items.** Kinds 3, 4 and 5 are generated by the phone; the database files of
+kind 7 are rewritten by their app every night. For these the PC must be able to keep several versions
+without ever overwriting one (6.9), so:
+
+1. The sender puts the snapshot time into the name: `name` = `<stem> <time>.<ext>` with the time as
+   `YYYY-MM-DDThhmmZ` in UTC (`contacts 2026-11-19T0930Z.vcf`, `calendar Family 2026-11-19T0930Z.ics`,
+   `apps 2026-11-19T0930Z.json`, `msgstore.db 2026-11-19T0200Z.crypt15`), sets `snapshot_time`, and, where
+   the file has a real name at its source (kind 7), sends that name as `orig_name`.
+2. A new snapshot of kind 3, 4 or 5 is made only when the data changed since the last committed snapshot
+   (its hash differs) and at most once per `SNAPSHOT_MIN_INTERVAL` (24 h). A versioned kind-7 file is sent
+   at most once per `APP_BACKUP_MIN_INTERVAL` (7 days; a phone setting, never below 24 h). WhatsApp's own
+   dated copies of its database (`msgstore-YYYY-MM-DD...`) are skipped: they are older versions of the same
+   file.
+3. The PC stores them in fixed sub-folders of the phone's namespace (`Contacts`, `Calendar`, `Apps`,
+   `WhatsApp`; the names are a PC setting). Older versions stay (I7). The PC user can remove old versions
+   by hand; the PC program removes none by itself (open question N3).
+4. In `BROWSE` and restore offers these files carry `item_kind` and `snapshot_time`, so the phone can show
+   "contacts as of 19 November" without parsing names.
+
+**Formats.**
+
+- **Contacts (kind 3):** vCard 3.0 (RFC 2426), UTF-8, all contacts in one file, one `VCARD` per contact,
+  photos embedded, MIME `text/vcard`, extension `.vcf`. Names, phone numbers, e-mail and postal addresses,
+  organisation, notes, dates, web addresses, nicknames and group membership (`CATEGORIES`) are carried;
+  what vCard cannot express is carried in `X-` properties or left out. It is a copy for safekeeping that
+  any contacts program can open, not a synchronisation format.
+- **Calendar (kind 4):** iCalendar (RFC 5545), UTF-8, one `VCALENDAR` per calendar with its display name
+  (`X-WR-CALNAME`), every event as a `VEVENT` with its `UID`, recurrence rules and exceptions, reminders
+  and attendees. The user chooses which calendars; synchronised calendars are copied too.
+- **App list (kind 5):** JSON, UTF-8. User-installed apps only. No account name and no device identifier.
+
+  ```json
+  { "schema": 1, "taken": "2026-11-19T09:30:00Z", "android_sdk": 34,
+    "apps": [
+      { "package": "org.example.app", "label": "Example", "version_name": "2.3.1", "version_code": 231,
+        "installer": "org.fdroid.fdroid", "signer_sha256": ["<hex>"],
+        "apks": [ { "name": "base.apk", "size": 12345678, "blake3": "<hex>" },
+                  { "name": "split_config.arm64_v8a.apk", "size": 2345678, "blake3": "<hex>" } ] } ] }
+  ```
+
+  `apks` is empty when the user did not turn on APK backup. The manifest is what a restore shows; it is
+  data, and no field of it is ever used as a path or a command.
+- **APK files (kind 6):** `path` = [`<package>`, `<version_code>`], `name` = the file's own name. One
+  version of an app never changes, so its files are sent once.
+- **App backup files (kind 7):** `path` = the folders below the app's folder; `name` / `orig_name` as
+  above. WhatsApp encrypts its database files itself; Kiwi Transfer copies them as they are and cannot
+  read them. Whether WhatsApp accepts a restored backup is decided by WhatsApp (same phone number, its own
+  key); the app says so before the user relies on it.
+
+**Restore** (always started by the phone's user, per data set; needs a `CONFIRMED` link):
+
+| Kind | What restore does | What it never does |
+|---|---|---|
+| 1, 2 | 9.4: files written to the "Restored" folders, create-new. | Overwrite a file. |
+| 3 contacts | **Merge, add-only: the default and the only mode in 1.0.** The user picks a snapshot (newest first) and where new contacts go. The app parses the vCard in its own sandbox and compares each card with the contacts on the phone by a fingerprint (normalised display name, the set of phone numbers in normalised form, the set of e-mail addresses in lower case). A card whose fingerprint already exists is skipped; the others are **added** as new contacts. The app shows "N will be added, M are already on this phone" and asks before it writes. Running it twice adds nothing twice. | Change, merge into, or delete an existing contact. There is no "replace" mode: the app contains no code path that deletes a contact. |
+| 4 calendar | **Add-only, into a new local calendar** named "Restored <date> - <name>". Events whose `UID` is already in that calendar are skipped. The user can undo the whole restore by deleting that one calendar in the calendar app. | Write into an existing or a synchronised calendar; change or delete an existing event. |
+| 5 app list | Shown as a list: name, version, where it was installed from. | Install or download anything. |
+| 6 APK files | **Saved only**, to `Download/Kiwi Transfer/Apps/<package>/`. Installing is something the user does afterwards, app by app, from a file manager, through Android's own installer and its prompts. Apps that consist of several APK files need an installer that accepts split packages; the app list tells the user which apps to get again from their store. | Start an installation; request the install-packages permission; restore any app data. |
+| 7 app backup | Written to `Download/Kiwi Transfer/Restored/WhatsApp/` with the original folder structure and original names. Where Android lets the app write into WhatsApp's folder (open item V5), "Put back in place" is offered, create-new only. | Overwrite a file in another app's folder. |
+
+Write access to contacts and calendars is requested only when the user starts such a restore.
+
+### 9.7 The files on the PC are plain files
+
+Owner decision: **no password, no encryption and no lock of the program's own for the files on the PC**,
+so that nothing can ever be lost to a forgotten password.
+
+1. Every file the PC stores for a phone, on the primary destination and on every second disk, is an
+   ordinary file in an ordinary folder. Its content is byte-identical to what the phone sent. Its name is
+   the phone's name after cleaning (with the `.kiwi-blocked` suffix for the few shell-active types). It can
+   be opened, copied and backed up with Explorer or any other program, **without Kiwi Transfer being
+   installed, running or paired**, and without the ledger.
+2. The PC program MUST NOT: encrypt stored files; put them into a container, archive, database or "vault";
+   ask for a password, PIN or Windows Hello before it shows them or hands them back to their phone; lock
+   its window; or set attributes that hide them. There is no such feature to switch on.
+3. What does protect them is Windows: the account's sign-in, the folder permissions (the program creates
+   the destination so that only this account, SYSTEM and Administrators have access, 8.2 rule 8), and
+   Windows' own disk encryption (BitLocker, device encryption) where the user has it on. The program does
+   not require or manage that; it MAY show whether the volume is encrypted, as information.
+4. What this means, said plainly in the product and in the threat model (R22 to R24): everyone who can use
+   that Windows account, every administrator of that PC, and anyone who holds the disk (when Windows does
+   not encrypt it) can read every backed-up photo, file, contact and calendar entry. The weekly code
+   protects nothing at rest. A second disk that leaves the house is as readable as the first.
+5. The same holds on the phone side: the app has no lock of its own (R19); Android's screen lock is the
+   lock.
 
 ---
 
