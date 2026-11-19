@@ -376,9 +376,19 @@ fn to_u64(v: i64) -> u64 {
 }
 
 impl Ledger {
-    /// Opens (creating if absent) the ledger in `dir`, checks its integrity,
-    /// migrates it, and starts a new session.
+    /// Opens the ledger and starts a session in one step.
+    #[cfg(test)]
     pub(crate) fn open(dir: &Path, now_ms: i64) -> Result<Ledger> {
+        let mut ledger = Ledger::open_unstarted(dir)?;
+        ledger.start_session(now_ms)?;
+        Ok(ledger)
+    }
+
+    /// Opens (creating if absent) the ledger in `dir`, checks its integrity
+    /// and migrates it. No session is started: the caller first decides
+    /// whether this ledger belongs to its destination at all, so that a
+    /// refused open leaves the session counter alone.
+    pub(crate) fn open_unstarted(dir: &Path) -> Result<Ledger> {
         let path = dir.join(LEDGER_FILE);
         let map = |e: rusqlite::Error| map_sqlite(&path, e);
 
@@ -447,7 +457,25 @@ impl Ledger {
             }
         }
 
-        // Start the session: bump the counter and log it, durably.
+        #[cfg(not(test))]
+        let _ = fresh;
+        Ok(Ledger {
+            conn: Mutex::new(conn),
+            path,
+            session: 0,
+            session_start_seq: 0,
+            #[cfg(test)]
+            fresh,
+        })
+    }
+
+    /// Starts this open's session: bumps the counter and logs it, durably.
+    /// Must be called exactly once, before anything is written.
+    pub(crate) fn start_session(&mut self, now_ms: i64) -> Result<()> {
+        debug_assert_eq!(self.session, 0, "a session is started once");
+        let path = self.path.clone();
+        let map = |e: rusqlite::Error| map_sqlite(&path, e);
+        let conn = self.conn.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner());
         let tx = conn.transaction().map_err(map)?;
         let previous = match meta_get(&tx, "session_counter").map_err(map)? {
             None => 0,
@@ -472,17 +500,9 @@ impl Ledger {
         )
         .map_err(map)?;
         tx.commit().map_err(map)?;
-
-        #[cfg(not(test))]
-        let _ = fresh;
-        Ok(Ledger {
-            conn: Mutex::new(conn),
-            path,
-            session,
-            session_start_seq: seq,
-            #[cfg(test)]
-            fresh,
-        })
+        self.session = session;
+        self.session_start_seq = seq;
+        Ok(())
     }
 
     /// Moves a damaged ledger (and its journal files) aside so a fresh one

@@ -301,12 +301,19 @@ impl Store {
         let ledger_lock = acquire(&ledger_dir.join(LEDGER_LOCK_FILE))?;
 
         let now = clock.now_unix_ms();
-        let ledger = Ledger::open(&ledger_dir, now)?;
+        let mut ledger = Ledger::open_unstarted(&ledger_dir)?;
 
-        // Bind the ledger to the destination folder.
+        // Bind the ledger to the destination folder. A ledger that belongs to
+        // another folder is refused before a session is started in it.
         let marker_path = store_dir.join(MARKER_FILE);
         let marker = read_marker(&marker_path);
         let ledger_id = ledger.destination_id()?;
+        if let (Some(marker), Some(ledger_id)) = (&marker, &ledger_id) {
+            if marker != ledger_id {
+                return Err(LedgerError::DestinationMismatch { ledger_id: ledger_id.clone(), marker_id: marker.clone() }.into());
+            }
+        }
+        ledger.start_session(now)?;
         let mut notes = Vec::new();
         match (marker, ledger_id) {
             (None, None) => {
@@ -318,11 +325,7 @@ impl Store {
                 write_marker(&marker_path, &id)?;
                 notes.push(OpenNote::NewDestination);
             }
-            (Some(marker), Some(ledger_id)) => {
-                if marker != ledger_id {
-                    return Err(LedgerError::DestinationMismatch { ledger_id, marker_id: marker }.into());
-                }
-            }
+            (Some(_), Some(_)) => {}
             (Some(marker), None) => {
                 // The folder was used before, but this ledger knows nothing.
                 ledger.set_destination_id(&marker, now)?;
