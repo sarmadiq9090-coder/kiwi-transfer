@@ -13,7 +13,7 @@ has its own pairing, folder, settings, quota and weekly code.
 Contents: 0 Conventions - 1 Identities and transport security - 2 Pairing - 3 Weekly re-confirmation -
 4 Discovery and networks - 5 Session and streams - 6 File transfer - 7 Durable commit on the PC - 8 Final move
 (8.12 keep-on-phone period, 8.13 second copy) - 9 Other features (9.1 sending, 9.6 data backup beyond media,
-9.7 plain files on the PC) - 10 Update check, release signing, problem report, endpoint list - 11 Versioning
+9.7 plain files on the PC) - 10 Update check, problem report, endpoint list, release signing - 11 Versioning
 and test vectors - 12 Decisions - 13 Open questions - Appendix A constants - Appendix B context strings.
 
 ---
@@ -1806,7 +1806,7 @@ characters and invisible formatting characters (Windows would read such a name a
 15. A component that starts with `.` gets the prefix `_` (no hidden files, and `.nomedia` cannot be planted
     to hide a folder from the gallery).
 16. A component whose last extension is `.apk`, `.apks`, `.xapk` or `.apkm` is stored as it is, but 9.1
-    rule 6 applies: the app never asks the system to install it.
+    rule 7 applies: the app never asks the system to install it.
 17. The destination base folder is chosen by the phone, never by the peer (9.1 rule 5, 9.4, 9.6). `path`
     only adds sub-folders below that base.
 18. API 29+: files are created through MediaStore with a relative path built from the cleaned components
