@@ -48,7 +48,10 @@ pub struct CaptureTime {
 impl CaptureTime {
     /// A UTC time.
     pub fn utc(unix_seconds: i64) -> Self {
-        Self { unix_seconds, utc_offset_seconds: 0 }
+        Self {
+            unix_seconds,
+            utc_offset_seconds: 0,
+        }
     }
 }
 
@@ -58,7 +61,11 @@ impl CivilDate {
     /// `-29719/04`).
     pub fn from_capture_time(t: CaptureTime) -> Option<CivilDate> {
         // Real-world offsets are within +-14 h; anything else is ignored.
-        let offset = if t.utc_offset_seconds.unsigned_abs() <= 18 * 3600 { t.utc_offset_seconds as i64 } else { 0 };
+        let offset = if t.utc_offset_seconds.unsigned_abs() <= 18 * 3600 {
+            t.utc_offset_seconds as i64
+        } else {
+            0
+        };
         let local = t.unix_seconds.checked_add(offset)?;
         let days = local.div_euclid(86_400);
         // Howard Hinnant's civil_from_days.
@@ -74,7 +81,11 @@ impl CivilDate {
         if !(1601..=9999).contains(&year) {
             return None;
         }
-        Some(CivilDate { year: year as i32, month: month as u8, day: day as u8 })
+        Some(CivilDate {
+            year: year as i32,
+            month: month as u8,
+            day: day as u8,
+        })
     }
 }
 
@@ -172,7 +183,10 @@ impl Template {
             return Err(TemplateError::TooLong);
         }
         let bytes = source.as_bytes();
-        if bytes[0] == b'/' || bytes[0] == b'\\' || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':') {
+        if bytes[0] == b'/'
+            || bytes[0] == b'\\'
+            || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        {
             return Err(TemplateError::NotRelative);
         }
 
@@ -186,7 +200,10 @@ impl Template {
         if segments.len() > MAX_DEPTH {
             return Err(TemplateError::TooDeep);
         }
-        Ok(Template { source: source.to_owned(), segments })
+        Ok(Template {
+            source: source.to_owned(),
+            segments,
+        })
     }
 
     /// The text the template was parsed from.
@@ -209,7 +226,9 @@ impl Template {
                     last_was_undated = false;
                 }
                 Segment::Pieces(pieces) => {
-                    let dated = pieces.iter().any(|p| matches!(p, Piece::Year | Piece::Month | Piece::Day));
+                    let dated = pieces
+                        .iter()
+                        .any(|p| matches!(p, Piece::Year | Piece::Month | Piece::Day));
                     if dated && ctx.date.is_none() {
                         if !last_was_undated {
                             parts.push(sanitize_component(UNDATED)?);
@@ -225,7 +244,9 @@ impl Template {
                             (Piece::Year, Some(d)) => text.push_str(&format!("{:04}", d.year)),
                             (Piece::Month, Some(d)) => text.push_str(&format!("{:02}", d.month)),
                             (Piece::Day, Some(d)) => text.push_str(&format!("{:02}", d.day)),
-                            (Piece::Year | Piece::Month | Piece::Day, None) => unreachable!("handled above"),
+                            (Piece::Year | Piece::Month | Piece::Day, None) => {
+                                unreachable!("handled above")
+                            }
                         }
                     }
                     parts.push(sanitize_component(&text)?);
@@ -269,7 +290,10 @@ fn parse_segment(raw: &str) -> Result<Segment, TemplateError> {
                 }
             }
             '}' => return Err(TemplateError::UnbalancedBrace),
-            c if c == '\0' || c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') => {
+            c if c == '\0'
+                || c.is_control()
+                || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') =>
+            {
                 return Err(TemplateError::ForbiddenCharacter(c));
             }
             c => literal.push(c),
@@ -279,12 +303,25 @@ fn parse_segment(raw: &str) -> Result<Segment, TemplateError> {
         pieces.push(Piece::Literal(literal));
     }
     if has_phone_dir {
-        return if pieces.is_empty() { Ok(Segment::PhoneDir) } else { Err(TemplateError::PhoneDirNotAlone) };
+        return if pieces.is_empty() {
+            Ok(Segment::PhoneDir)
+        } else {
+            Err(TemplateError::PhoneDirNotAlone)
+        };
     }
     // A segment of pure literal text must already be a clean name; otherwise
     // the user would get a folder that differs from what they typed.
     if pieces.iter().all(|p| matches!(p, Piece::Literal(_))) {
-        let text: String = pieces.iter().map(|p| if let Piece::Literal(s) = p { s.as_str() } else { "" }).collect();
+        let text: String = pieces
+            .iter()
+            .map(|p| {
+                if let Piece::Literal(s) = p {
+                    s.as_str()
+                } else {
+                    ""
+                }
+            })
+            .collect();
         match sanitize_component(&text) {
             Ok(_) => {}
             Err(_) => return Err(TemplateError::DotSegment),
@@ -299,14 +336,30 @@ mod tests {
     use crate::sanitize::sanitize_rel_path;
 
     fn date(y: i32, m: u8, d: u8) -> Option<CivilDate> {
-        Some(CivilDate { year: y, month: m, day: d })
+        Some(CivilDate {
+            year: y,
+            month: m,
+            day: d,
+        })
     }
 
     fn render(template: &str, device: &str, date: Option<CivilDate>, phone_dir: &str) -> String {
         let device = sanitize_component(device).unwrap();
-        let phone_dir = if phone_dir.is_empty() { SafeRelPath::empty() } else { sanitize_rel_path(phone_dir).unwrap() };
-        let ctx = TemplateContext { device_folder: &device, date, phone_dir: &phone_dir };
-        Template::parse(template).unwrap().render(&ctx).unwrap().to_slash_string()
+        let phone_dir = if phone_dir.is_empty() {
+            SafeRelPath::empty()
+        } else {
+            sanitize_rel_path(phone_dir).unwrap()
+        };
+        let ctx = TemplateContext {
+            device_folder: &device,
+            date,
+            phone_dir: &phone_dir,
+        };
+        Template::parse(template)
+            .unwrap()
+            .render(&ctx)
+            .unwrap()
+            .to_slash_string()
     }
 
     #[test]
@@ -334,7 +387,12 @@ mod tests {
     fn local_offset_decides_the_day() {
         // 2024-12-31T22:30:00Z is already New Year's Day in UTC+3.
         let utc = 1_735_684_200;
-        let at = |off| CivilDate::from_capture_time(CaptureTime { unix_seconds: utc, utc_offset_seconds: off });
+        let at = |off| {
+            CivilDate::from_capture_time(CaptureTime {
+                unix_seconds: utc,
+                utc_offset_seconds: off,
+            })
+        };
         assert_eq!(at(0), date(2024, 12, 31));
         assert_eq!(at(3 * 3600), date(2025, 1, 1));
         assert_eq!(at(-8 * 3600), date(2024, 12, 31));
@@ -345,33 +403,72 @@ mod tests {
 
     #[test]
     fn presets() {
-        assert_eq!(render(Template::by_date().source(), "Pixel", date(2024, 3, 9), "DCIM/Camera"), "2024/03");
-        assert_eq!(render(Template::per_device().source(), "Pixel", date(2024, 3, 9), "DCIM/Camera"), "Pixel");
         assert_eq!(
-            render(Template::keep_phone_structure().source(), "Pixel", date(2024, 3, 9), "DCIM/Camera"),
+            render(
+                Template::by_date().source(),
+                "Pixel",
+                date(2024, 3, 9),
+                "DCIM/Camera"
+            ),
+            "2024/03"
+        );
+        assert_eq!(
+            render(
+                Template::per_device().source(),
+                "Pixel",
+                date(2024, 3, 9),
+                "DCIM/Camera"
+            ),
+            "Pixel"
+        );
+        assert_eq!(
+            render(
+                Template::keep_phone_structure().source(),
+                "Pixel",
+                date(2024, 3, 9),
+                "DCIM/Camera"
+            ),
             "Pixel/DCIM/Camera"
         );
-        assert_eq!(render(Template::keep_phone_structure().source(), "Pixel", None, ""), "Pixel");
+        assert_eq!(
+            render(Template::keep_phone_structure().source(), "Pixel", None, ""),
+            "Pixel"
+        );
     }
 
     #[test]
     fn custom_templates() {
         let d = date(2023, 11, 5);
-        assert_eq!(render("{year}/{month}/{device}", "Pixel 8", d, ""), "2023/11/Pixel 8");
+        assert_eq!(
+            render("{year}/{month}/{device}", "Pixel 8", d, ""),
+            "2023/11/Pixel 8"
+        );
         assert_eq!(render("{year}-{month}-{day}", "P", d, ""), "2023-11-05");
-        assert_eq!(render("Photos/{year}/{month} ({device})", "P", d, ""), "Photos/2023/11 (P)");
+        assert_eq!(
+            render("Photos/{year}/{month} ({device})", "P", d, ""),
+            "Photos/2023/11 (P)"
+        );
         assert_eq!(render("{device}\\{year}", "P", d, ""), "P/2023");
         assert_eq!(render("صور/{year}", "P", d, ""), "صور/2023");
         assert_eq!(render("{phone_dir}", "P", d, "a/b"), "a/b");
         assert_eq!(render("{phone_dir}", "P", d, ""), "");
-        assert_eq!(render("{device}/{phone_dir}/{year}", "P", d, "a/b"), "P/a/b/2023");
+        assert_eq!(
+            render("{device}/{phone_dir}/{year}", "P", d, "a/b"),
+            "P/a/b/2023"
+        );
     }
 
     #[test]
     fn missing_dates_use_one_undated_folder() {
-        assert_eq!(render("{year}/{month}/{device}", "P", None, ""), "undated/P");
+        assert_eq!(
+            render("{year}/{month}/{device}", "P", None, ""),
+            "undated/P"
+        );
         assert_eq!(render("{year}/{month}/{day}", "P", None, ""), "undated");
-        assert_eq!(render("{year}-{month}/{device}/{day}", "P", None, ""), "undated/P/undated");
+        assert_eq!(
+            render("{year}-{month}/{device}/{day}", "P", None, ""),
+            "undated/P/undated"
+        );
         assert_eq!(render("Photos {year}", "P", None, ""), "undated");
         assert_eq!(render("{device}", "P", None, ""), "P");
     }
@@ -384,7 +481,10 @@ mod tests {
         assert_eq!(render("{device}.", "Pixel", None, ""), "Pixel");
         assert_eq!(render("{device} ", "Pixel", None, ""), "Pixel");
         assert_eq!(render("NUL{device}", "x", None, ""), "NULx");
-        assert_eq!(render("{device}/{year}", "../../evil", date(2024, 1, 1), ""), ".._.._evil/2024");
+        assert_eq!(
+            render("{device}/{year}", "../../evil", date(2024, 1, 1), ""),
+            ".._.._evil/2024"
+        );
         // A device named like a reserved name in a compound segment.
         assert_eq!(render("{device}.txt", "aux", None, ""), "_aux.txt");
         // Over-long results are shortened like any other name.
@@ -426,9 +526,16 @@ mod tests {
             ("a\0b", ForbiddenCharacter('\0')),
         ];
         for (input, expected) in cases {
-            assert_eq!(&Template::parse(input).unwrap_err(), expected, "template {input:?}");
+            assert_eq!(
+                &Template::parse(input).unwrap_err(),
+                expected,
+                "template {input:?}"
+            );
         }
-        assert_eq!(Template::parse(&"a".repeat(MAX_TEMPLATE_BYTES + 1)).unwrap_err(), TooLong);
+        assert_eq!(
+            Template::parse(&"a".repeat(MAX_TEMPLATE_BYTES + 1)).unwrap_err(),
+            TooLong
+        );
         let deep = vec!["a"; MAX_DEPTH + 1].join("/");
         assert_eq!(Template::parse(&deep).unwrap_err(), TooDeep);
     }
@@ -437,7 +544,11 @@ mod tests {
     fn deep_phone_dirs_cannot_exceed_the_depth_limit() {
         let device = sanitize_component("P").unwrap();
         let phone_dir = sanitize_rel_path(&vec!["d"; MAX_DEPTH].join("/")).unwrap();
-        let ctx = TemplateContext { device_folder: &device, date: None, phone_dir: &phone_dir };
+        let ctx = TemplateContext {
+            device_folder: &device,
+            date: None,
+            phone_dir: &phone_dir,
+        };
         let err = Template::keep_phone_structure().render(&ctx).unwrap_err();
         assert!(matches!(err, SanitizeError::TooDeep { .. }));
     }

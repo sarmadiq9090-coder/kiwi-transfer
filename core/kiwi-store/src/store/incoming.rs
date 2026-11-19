@@ -124,7 +124,9 @@ impl Drop for ActiveFile {
         }
         let mut in_flight = lock(&self.inner.in_flight);
         in_flight.temps.remove(&self.temp_path);
-        in_flight.bytes_remaining = in_flight.bytes_remaining.saturating_sub(self.declared.saturating_sub(self.written));
+        in_flight.bytes_remaining = in_flight
+            .bytes_remaining
+            .saturating_sub(self.declared.saturating_sub(self.written));
         if let Some(entry) = in_flight.per_device.get_mut(&self.device) {
             entry.0 = entry.0.saturating_sub(self.declared);
             entry.1 = entry.1.saturating_sub(1);
@@ -139,7 +141,12 @@ impl Drop for ActiveFile {
 /// for a moment, so a refusal is retried briefly; what is left behind is
 /// removed by the next recovery pass.
 fn remove_temp(inner: &Inner, path: &std::path::Path) {
-    debug_assert!(is_temp_name(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    debug_assert!(is_temp_name(
+        &path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
     for attempt in 0..3u64 {
         match inner.fs.remove_file(path) {
             Ok(()) => return,
@@ -151,7 +158,9 @@ fn remove_temp(inner: &Inner, path: &std::path::Path) {
 
 /// Whether `name` is one of the engine's temp-file names.
 pub(crate) fn is_temp_name(name: &str) -> bool {
-    name.len() > TEMP_PREFIX.len() + TEMP_SUFFIX.len() && name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)
+    name.len() > TEMP_PREFIX.len() + TEMP_SUFFIX.len()
+        && name.starts_with(TEMP_PREFIX)
+        && name.ends_with(TEMP_SUFFIX)
 }
 
 fn system_time_from_unix_ns(ns: i64) -> Option<SystemTime> {
@@ -186,8 +195,15 @@ impl std::fmt::Debug for IncomingFile {
 }
 
 enum Placed {
-    Stored { name: SafeName, dir_synced: bool },
-    Adopted { name: SafeName, record: Option<FileRecord>, unbuffered: bool },
+    Stored {
+        name: SafeName,
+        dir_synced: bool,
+    },
+    Adopted {
+        name: SafeName,
+        record: Option<FileRecord>,
+        unbuffered: bool,
+    },
 }
 
 impl Store {
@@ -199,7 +215,10 @@ impl Store {
     /// between the root and the target directory.
     pub fn begin_file(&self, req: FileRequest<'_>) -> Result<IncomingFile, StoreError> {
         let inner = &self.inner;
-        let unsafe_name = |source| StoreError::UnsafeName { name: req.name.chars().take(200).collect(), source };
+        let unsafe_name = |source| StoreError::UnsafeName {
+            name: req.name.chars().take(200).collect(),
+            source,
+        };
 
         let device = inner
             .ledger
@@ -214,22 +233,36 @@ impl Store {
 
         // Where it goes.
         let source = sanitize_rel_path(req.name).map_err(unsafe_name)?;
-        let name = source.file_name().expect("a sanitised path is never empty").clone();
+        let name = source
+            .file_name()
+            .expect("a sanitised path is never empty")
+            .clone();
         let phone_dir = source.parent();
         let date = req
             .capture_time
-            .or_else(|| req.mtime_unix_ns.map(|ns| CaptureTime::utc(ns.div_euclid(1_000_000_000))))
+            .or_else(|| {
+                req.mtime_unix_ns
+                    .map(|ns| CaptureTime::utc(ns.div_euclid(1_000_000_000)))
+            })
             .and_then(CivilDate::from_capture_time);
         let dir_rel = inner
             .cfg
             .layout
-            .render(&TemplateContext { device_folder: &device_folder, date, phone_dir: &phone_dir })
+            .render(&TemplateContext {
+                device_folder: &device_folder,
+                date,
+                phone_dir: &phone_dir,
+            })
             .map_err(unsafe_name)?;
 
         let root_len = utf16_len(&inner.dest.display_root());
-        let path_len = root_len + 1 + dir_rel.utf16_len() + 1 + name.utf16_len().max(TEMP_PREFIX.len() + 64);
+        let path_len =
+            root_len + 1 + dir_rel.utf16_len() + 1 + name.utf16_len().max(TEMP_PREFIX.len() + 64);
         if path_len > MAX_PATH_UTF16 {
-            return Err(StoreError::PathTooLong { utf16_len: path_len, max: MAX_PATH_UTF16 });
+            return Err(StoreError::PathTooLong {
+                utf16_len: path_len,
+                max: MAX_PATH_UTF16,
+            });
         }
 
         // Limits. The reservation is taken under the same lock as the check,
@@ -237,7 +270,11 @@ impl Store {
         // together.
         {
             let mut in_flight = lock(&inner.in_flight);
-            let (flying_bytes, flying_files) = in_flight.per_device.get(&device.device_id).copied().unwrap_or((0, 0));
+            let (flying_bytes, flying_files) = in_flight
+                .per_device
+                .get(&device.device_id)
+                .copied()
+                .unwrap_or((0, 0));
             let quota = |kind, allowed, requested| StoreError::QuotaExceeded {
                 device: device.device_id.clone(),
                 kind,
@@ -250,13 +287,19 @@ impl Store {
                 }
             }
             if let Some(max) = device.limits.max_files {
-                let would_be = device.used_files.saturating_add(flying_files).saturating_add(1);
+                let would_be = device
+                    .used_files
+                    .saturating_add(flying_files)
+                    .saturating_add(1);
                 if would_be > max {
                     return Err(quota(QuotaKind::FileCount, max, would_be));
                 }
             }
             if let Some(max) = device.limits.max_total_bytes {
-                let would_be = device.used_bytes.saturating_add(flying_bytes).saturating_add(req.size);
+                let would_be = device
+                    .used_bytes
+                    .saturating_add(flying_bytes)
+                    .saturating_add(req.size);
                 if would_be > max {
                     return Err(quota(QuotaKind::TotalBytes, max, would_be));
                 }
@@ -264,15 +307,25 @@ impl Store {
 
             // Free space: this file, plus what the other live writers still
             // have to write, plus the margin, must fit.
-            let available = inner.fs.free_space(inner.root()).map_err(|e| StoreError::io("measure free space on", inner.root(), e))?;
+            let available = inner
+                .fs
+                .free_space(inner.root())
+                .map_err(|e| StoreError::io("measure free space on", inner.root(), e))?;
             let needed = req.size.saturating_add(in_flight.bytes_remaining);
             let margin = inner.cfg.safety_margin_bytes;
             if available < needed.saturating_add(margin) {
-                return Err(StoreError::InsufficientSpace { needed, margin, available });
+                return Err(StoreError::InsufficientSpace {
+                    needed,
+                    margin,
+                    available,
+                });
             }
 
             in_flight.bytes_remaining = in_flight.bytes_remaining.saturating_add(req.size);
-            let entry = in_flight.per_device.entry(device.device_id.clone()).or_insert((0, 0));
+            let entry = in_flight
+                .per_device
+                .entry(device.device_id.clone())
+                .or_insert((0, 0));
             entry.0 = entry.0.saturating_add(req.size);
             entry.1 += 1;
         }
@@ -297,7 +350,9 @@ impl Store {
             leak: false,
         };
 
-        let (dir_abs, dir_actual) = inner.walk_dirs(&dir_rel, true)?.expect("walk_dirs(create) returns a path or an error");
+        let (dir_abs, dir_actual) = inner
+            .walk_dirs(&dir_rel, true)?
+            .expect("walk_dirs(create) returns a path or an error");
         active.dir_abs = dir_abs;
         active.dir_rel = dir_actual;
 
@@ -324,7 +379,24 @@ impl Store {
                 }
             }
         }
-        Ok(IncomingFile { active: Some(active) })
+
+        // The directory was checked before the file was created. Check again
+        // through the file itself: it must be exactly where it was put. This
+        // closes the window in which a directory on the way could have been
+        // swapped for a link between the check and the create.
+        let resolved = inner
+            .fs
+            .resolve(&active.temp_path)
+            .map_err(|e| StoreError::io("resolve", &active.temp_path, e))?;
+        if resolved != active.temp_path {
+            return Err(StoreError::PathMismatch {
+                expected: active.temp_path.clone(),
+                resolved,
+            });
+        }
+        Ok(IncomingFile {
+            active: Some(active),
+        })
     }
 }
 
@@ -374,14 +446,20 @@ impl IncomingFile {
     /// write the ledger record after the rename. The file is then simply an
     /// unrecorded file; sending it again finds it and records it
     /// ([`CommitOutcome::AlreadyPresent`]) instead of storing a second copy.
-    pub fn finish(mut self, claimed_hash: Option<ContentHash>) -> Result<CommitReceipt, StoreError> {
+    pub fn finish(
+        mut self,
+        claimed_hash: Option<ContentHash>,
+    ) -> Result<CommitReceipt, StoreError> {
         // `active` cleans up after itself when dropped, which every early
         // return below relies on.
         let mut active = self.active.take().ok_or(StoreError::WriterClosed)?;
         let inner = Arc::clone(&active.inner);
 
         if active.written != active.declared {
-            return Err(StoreError::SizeMismatch { declared: active.declared, received: active.written });
+            return Err(StoreError::SizeMismatch {
+                declared: active.declared,
+                received: active.written,
+            });
         }
         let claimed = match (active.claimed, claimed_hash) {
             (Some(a), Some(b)) if a != b => return Err(StoreError::ConflictingSenderHashes),
@@ -391,18 +469,25 @@ impl IncomingFile {
         };
         let stream_hash = ContentHash::from(active.hasher.finalize());
         if stream_hash != claimed {
-            return Err(StoreError::SenderHashMismatch { claimed, received: stream_hash });
+            return Err(StoreError::SenderHashMismatch {
+                claimed,
+                received: stream_hash,
+            });
         }
 
         // The modification time is set through the write handle, before the
         // flush: it becomes durable together with the data, and nothing has
         // to touch the file again after it has been verified.
-        let mut temp = active.temp.take().expect("an open incoming file has its handle");
+        let mut temp = active
+            .temp
+            .take()
+            .expect("an open incoming file has its handle");
         let mtime_applied = match active.mtime_unix_ns.and_then(system_time_from_unix_ns) {
             Some(mtime) => temp.set_mtime(mtime).is_ok(),
             None => false,
         };
-        temp.sync().map_err(|e| StoreError::write("flush", &active.temp_path, e))?;
+        temp.sync()
+            .map_err(|e| StoreError::write("flush", &active.temp_path, e))?;
         drop(temp);
 
         // Read it back from the device, not from the cache.
@@ -415,7 +500,11 @@ impl IncomingFile {
             })
             .map_err(|e| StoreError::io("read back", &active.temp_path, e))?;
         let disk_hash = ContentHash::from(hasher.finalize());
-        if !read.completed || read.bytes != active.declared || disk_hash != stream_hash || disk_hash != claimed {
+        if !read.completed
+            || read.bytes != active.declared
+            || disk_hash != stream_hash
+            || disk_hash != claimed
+        {
             return Err(StoreError::DiskVerifyMismatch {
                 expected: stream_hash,
                 on_disk: disk_hash,
@@ -427,13 +516,20 @@ impl IncomingFile {
         let placed = inner.place(&mut active, &stream_hash)?;
         let (name, existing, dir_synced, verified_unbuffered, adopted) = match placed {
             Placed::Stored { name, dir_synced } => (name, None, dir_synced, read.unbuffered, false),
-            Placed::Adopted { name, record, unbuffered } => (name, record, false, unbuffered, true),
+            Placed::Adopted {
+                name,
+                record,
+                unbuffered,
+            } => (name, record, false, unbuffered, true),
         };
         let rel = active.dir_rel.join(name);
         let rel_path = rel.to_slash_string();
         let abs_path = rel.under(inner.root());
 
-        inner.fs.checkpoint(Checkpoint::BeforeLedgerRecord).map_err(|e| StoreError::io("record", &abs_path, e))?;
+        inner
+            .fs
+            .checkpoint(Checkpoint::BeforeLedgerRecord)
+            .map_err(|e| StoreError::io("record", &abs_path, e))?;
 
         let now = inner.now();
         let record = match existing {
@@ -441,9 +537,19 @@ impl IncomingFile {
                 // Already recorded with this content at this path, and just
                 // re-read from disk: refresh what the ledger believes.
                 if existing.state != FileState::Committed {
-                    inner.ledger.set_state(existing.id, FileState::Committed, "found intact while receiving the same content again", now)?;
+                    inner.ledger.set_state(
+                        existing.id,
+                        FileState::Committed,
+                        "found intact while receiving the same content again",
+                        now,
+                    )?;
                 }
-                inner.ledger.mark_verified(existing.id, "duplicate_received", Some(&active.device), now)?;
+                inner.ledger.mark_verified(
+                    existing.id,
+                    "duplicate_received",
+                    Some(&active.device),
+                    now,
+                )?;
                 existing
             }
             None => inner.ledger.record_commit(
@@ -466,7 +572,11 @@ impl IncomingFile {
         drop(active);
 
         Ok(CommitReceipt {
-            outcome: if adopted { CommitOutcome::AlreadyPresent } else { CommitOutcome::Stored },
+            outcome: if adopted {
+                CommitOutcome::AlreadyPresent
+            } else {
+                CommitOutcome::Stored
+            },
             file_id: record.id,
             rel_path,
             abs_path,
@@ -484,14 +594,23 @@ impl IncomingFile {
 fn write_all(active: &mut ActiveFile, data: &[u8]) -> Result<(), StoreError> {
     let received = active.written.saturating_add(data.len() as u64);
     if received > active.declared {
-        return Err(StoreError::SizeMismatch { declared: active.declared, received });
+        return Err(StoreError::SizeMismatch {
+            declared: active.declared,
+            received,
+        });
     }
-    let temp = active.temp.as_mut().expect("an open incoming file has its handle");
+    let temp = active
+        .temp
+        .as_mut()
+        .expect("an open incoming file has its handle");
     let mut offset = 0;
     while offset < data.len() {
         let n = match temp.write(&data[offset..]) {
             Ok(0) => {
-                let stuck = io::Error::new(io::ErrorKind::WriteZero, "the file system accepted no more bytes");
+                let stuck = io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the file system accepted no more bytes",
+                );
                 return Err(StoreError::write("write", &active.temp_path, stuck));
             }
             Ok(n) => n.min(data.len() - offset),
@@ -528,7 +647,11 @@ impl Inner {
 
             if let Some(existing) = self.cached_name(&dir_key, &key) {
                 let existing_path = active.dir_abs.join(&existing);
-                match self.fs.stat(&existing_path).map_err(|e| StoreError::io("examine", &existing_path, e))? {
+                match self
+                    .fs
+                    .stat(&existing_path)
+                    .map_err(|e| StoreError::io("examine", &existing_path, e))?
+                {
                     // The listing is stale: the name is free again.
                     None => self.forget_name(&dir_key, &key),
                     Some(stat) => {
@@ -557,7 +680,10 @@ impl Inner {
                     // directory does not fail the commit; the receipt and the
                     // ledger say whether it happened.
                     let dir_synced = self.fs.sync_dir(&active.dir_abs).is_ok();
-                    return Ok(Placed::Stored { name: candidate, dir_synced });
+                    return Ok(Placed::Stored {
+                        name: candidate,
+                        dir_synced,
+                    });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     // Someone created the name after the directory was listed.
@@ -569,7 +695,10 @@ impl Inner {
                 Err(e) => return Err(StoreError::write("rename into place", target, e)),
             }
         }
-        Err(StoreError::TooManyCollisions { dir: active.dir_rel.to_slash_string(), name: active.name.as_str().to_owned() })
+        Err(StoreError::TooManyCollisions {
+            dir: active.dir_rel.to_slash_string(),
+            name: active.name.as_str().to_owned(),
+        })
     }
 
     /// If the existing entry is a regular file with exactly the content being
@@ -582,11 +711,17 @@ impl Inner {
         stat: &FileStat,
         hash: &ContentHash,
     ) -> Result<Option<Placed>, StoreError> {
-        if stat.kind != EntryKind::File || stat.reparse || stat.offline || stat.size != active.declared {
+        if stat.kind != EntryKind::File
+            || stat.reparse
+            || stat.offline
+            || stat.size != active.declared
+        {
             return Ok(None);
         }
         // A name the sanitiser would not have produced is never recorded.
-        let Some(name) = SafeName::from_stored(existing) else { return Ok(None) };
+        let Some(name) = SafeName::from_stored(existing) else {
+            return Ok(None);
+        };
         let rel = active.dir_rel.join(name.clone());
         let record = self.ledger.file_by_path_key(&rel.collision_key())?;
         if let Some(r) = &record {
@@ -601,8 +736,16 @@ impl Inner {
             ControlFlow::Continue(())
         });
         match read {
-            Ok(r) if r.completed && r.bytes == active.declared && ContentHash::from(hasher.finalize()) == *hash => {
-                Ok(Some(Placed::Adopted { name, record, unbuffered: r.unbuffered }))
+            Ok(r)
+                if r.completed
+                    && r.bytes == active.declared
+                    && ContentHash::from(hasher.finalize()) == *hash =>
+            {
+                Ok(Some(Placed::Adopted {
+                    name,
+                    record,
+                    unbuffered: r.unbuffered,
+                }))
             }
             // Different content, or it cannot be read: not ours to adopt.
             _ => Ok(None),

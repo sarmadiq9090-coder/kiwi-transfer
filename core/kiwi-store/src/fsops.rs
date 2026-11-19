@@ -97,7 +97,11 @@ pub trait Fs: Send + Sync {
     /// Reads a whole file from the device, bypassing the cache where the
     /// platform allows, feeding it to `sink` until the end or until the sink
     /// breaks.
-    fn read_verify(&self, path: &Path, sink: &mut dyn FnMut(&[u8]) -> ControlFlow<()>) -> io::Result<VerifyRead>;
+    fn read_verify(
+        &self,
+        path: &Path,
+        sink: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> io::Result<VerifyRead>;
     /// Renames `from` to `to`, failing with `AlreadyExists` rather than
     /// replacing anything, and writes the rename through.
     fn rename_noreplace(&self, from: &Path, to: &Path) -> io::Result<()>;
@@ -158,7 +162,14 @@ impl Fs for RealFs {
     fn stat(&self, path: &Path) -> io::Result<Option<FileStat>> {
         match std::fs::symlink_metadata(path) {
             Ok(meta) => Ok(Some(stat_of(&meta))),
-            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Ok(None),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }
@@ -177,7 +188,11 @@ impl Fs for RealFs {
                 Ok(s) => (s, true),
                 Err(os) => (os.to_string_lossy().into_owned(), false),
             };
-            out.push(DirEntryInfo { name, exact, stat: stat_of(&meta) });
+            out.push(DirEntryInfo {
+                name,
+                exact,
+                stat: stat_of(&meta),
+            });
         }
         Ok(out)
     }
@@ -194,7 +209,11 @@ impl Fs for RealFs {
         Ok(Box::new(RealTemp(sys::create_temp(path)?)))
     }
 
-    fn read_verify(&self, path: &Path, sink: &mut dyn FnMut(&[u8]) -> ControlFlow<()>) -> io::Result<VerifyRead> {
+    fn read_verify(
+        &self,
+        path: &Path,
+        sink: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> io::Result<VerifyRead> {
         let (mut file, unbuffered) = sys::open_for_verify(path)?;
         let mut delivered = false;
         let first = sys::read_to_end_aligned(&mut file, &mut |chunk| {
@@ -202,14 +221,22 @@ impl Fs for RealFs {
             sink(chunk)
         });
         match first {
-            Ok((bytes, completed)) => Ok(VerifyRead { bytes, unbuffered, completed }),
+            Ok((bytes, completed)) => Ok(VerifyRead {
+                bytes,
+                unbuffered,
+                completed,
+            }),
             // The file system accepted the direct-I/O open but refuses the
             // read. Nothing has reached the sink yet, so start over cached.
             Err(e) if unbuffered && !delivered && sys::is_direct_io_unsupported(&e) => {
                 drop(file);
                 let mut file = sys::open_buffered(path)?;
                 let (bytes, completed) = sys::read_to_end_aligned(&mut file, sink)?;
-                Ok(VerifyRead { bytes, unbuffered: false, completed })
+                Ok(VerifyRead {
+                    bytes,
+                    unbuffered: false,
+                    completed,
+                })
             }
             Err(e) => Err(e),
         }
@@ -255,7 +282,10 @@ mod tests {
     use std::io::Write;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("unit-tmp").join(name);
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("unit-tmp")
+            .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -276,17 +306,26 @@ mod tests {
     fn verify_read_handles_every_tail_length() {
         let dir = scratch("verify-read");
         // Sizes around sector and buffer boundaries, including empty.
-        let sizes = [0usize, 1, 511, 512, 513, 4095, 4096, 4097, 65_536, 1_048_575, 1_048_576, 1_048_577, 2_500_000];
+        let sizes = [
+            0usize, 1, 511, 512, 513, 4095, 4096, 4097, 65_536, 1_048_575, 1_048_576, 1_048_577,
+            2_500_000,
+        ];
         for size in sizes {
             let data: Vec<u8> = (0..size).map(|i| (i * 31 % 251) as u8).collect();
             let path = dir.join(format!("f{size}.bin"));
-            std::fs::File::create(&path).unwrap().write_all(&data).unwrap();
+            std::fs::File::create(&path)
+                .unwrap()
+                .write_all(&data)
+                .unwrap();
             let (hash, read) = hash_file(&path);
             assert_eq!(read.bytes, size as u64, "size {size}");
             assert!(read.completed);
             assert_eq!(hash, blake3::hash(&data), "size {size}");
             if cfg!(windows) {
-                assert!(read.unbuffered, "NTFS must give an unbuffered read (size {size})");
+                assert!(
+                    read.unbuffered,
+                    "NTFS must give an unbuffered read (size {size})"
+                );
             }
         }
     }
@@ -311,8 +350,12 @@ mod tests {
     #[test]
     fn verify_read_refuses_directories_and_missing_files() {
         let dir = scratch("verify-refuse");
-        assert!(RealFs.read_verify(&dir, &mut |_| ControlFlow::Continue(())).is_err());
-        let missing = RealFs.read_verify(&dir.join("nope"), &mut |_| ControlFlow::Continue(())).unwrap_err();
+        assert!(RealFs
+            .read_verify(&dir, &mut |_| ControlFlow::Continue(()))
+            .is_err());
+        let missing = RealFs
+            .read_verify(&dir.join("nope"), &mut |_| ControlFlow::Continue(()))
+            .unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
     }
 
@@ -345,7 +388,9 @@ mod tests {
         let dir = scratch("rename-case");
         std::fs::write(dir.join("Photo.JPG"), b"old").unwrap();
         std::fs::write(dir.join("tmp"), b"new").unwrap();
-        let err = RealFs.rename_noreplace(&dir.join("tmp"), &dir.join("photo.jpg")).unwrap_err();
+        let err = RealFs
+            .rename_noreplace(&dir.join("tmp"), &dir.join("photo.jpg"))
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(dir.join("Photo.JPG")).unwrap(), b"old");
     }
@@ -355,7 +400,10 @@ mod tests {
         let dir = scratch("temp");
         let path = dir.join("t.part");
         let mut t = RealFs.create_temp(&path).unwrap();
-        assert_eq!(RealFs.create_temp(&path).err().unwrap().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            RealFs.create_temp(&path).err().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert_eq!(t.write(b"hello").unwrap(), 5);
         let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
         t.set_mtime(when).unwrap();
@@ -373,14 +421,28 @@ mod tests {
     fn stat_and_list_do_not_invent_entries() {
         let dir = scratch("stat");
         assert_eq!(RealFs.stat(&dir.join("missing")).unwrap(), None);
-        assert_eq!(RealFs.stat(&dir.join("missing").join("deeper")).unwrap(), None);
+        assert_eq!(
+            RealFs.stat(&dir.join("missing").join("deeper")).unwrap(),
+            None
+        );
         std::fs::write(dir.join("file"), b"x").unwrap();
         // A path "through" a file does not exist.
         assert_eq!(RealFs.stat(&dir.join("file").join("child")).unwrap(), None);
         std::fs::create_dir(dir.join("sub")).unwrap();
-        let mut names: Vec<_> = RealFs.list_dir(&dir).unwrap().into_iter().map(|e| (e.name, e.stat.kind)).collect();
+        let mut names: Vec<_> = RealFs
+            .list_dir(&dir)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.stat.kind))
+            .collect();
         names.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(names, vec![("file".to_owned(), EntryKind::File), ("sub".to_owned(), EntryKind::Dir)]);
+        assert_eq!(
+            names,
+            vec![
+                ("file".to_owned(), EntryKind::File),
+                ("sub".to_owned(), EntryKind::Dir)
+            ]
+        );
     }
 
     #[test]
@@ -396,7 +458,10 @@ mod tests {
         let dir = scratch("lock");
         let path = dir.join("lock");
         let first = sys::acquire_lock(&path).unwrap();
-        assert_eq!(sys::acquire_lock(&path).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            sys::acquire_lock(&path).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         drop(first);
         sys::acquire_lock(&path).unwrap();
     }

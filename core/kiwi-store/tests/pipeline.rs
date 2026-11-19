@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime};
 use common::*;
 use kiwi_store::template::CaptureTime;
 use kiwi_store::{
-    CommitOutcome, ContentHash, DeviceId, DeviceLimits, FileRequest, QuotaKind, SanitizeError, Store, StoreConfig,
-    StoreError, StoredStatus, Template,
+    CommitOutcome, ContentHash, DeviceId, DeviceLimits, FileRequest, QuotaKind, SanitizeError,
+    Store, StoreConfig, StoreError, StoredStatus, Template,
 };
 
 #[test]
@@ -32,7 +32,10 @@ fn stores_a_file_end_to_end() {
     // While the transfer runs there is exactly one temp file, next to the target.
     let temps = w.temp_files();
     assert_eq!(temps.len(), 1);
-    assert!(temps[0].starts_with("Pixel 8/DCIM/Camera/.kiwi-tmp-"), "{temps:?}");
+    assert!(
+        temps[0].starts_with("Pixel 8/DCIM/Camera/.kiwi-tmp-"),
+        "{temps:?}"
+    );
     assert!(temps[0].ends_with(".part"));
 
     incoming.write(&bytes[..40_000]).unwrap();
@@ -46,17 +49,29 @@ fn stores_a_file_end_to_end() {
     assert_eq!(receipt.hash, hash);
     assert_eq!(receipt.size, 100_000);
     assert_eq!(receipt.session, store.session());
-    assert!(receipt.dir_synced, "the directory flush works on the platforms we test on");
+    assert!(
+        receipt.dir_synced,
+        "the directory flush works on the platforms we test on"
+    );
     assert!(receipt.mtime_applied);
     if cfg!(windows) {
-        assert!(receipt.verified_unbuffered, "NTFS must give an unbuffered read-back");
+        assert!(
+            receipt.verified_unbuffered,
+            "NTFS must give an unbuffered read-back"
+        );
     }
 
     // On disk: exactly the file, with exactly the bytes, and the mtime asked for.
     assert_eq!(w.files(), vec!["Pixel 8/DCIM/Camera/IMG_0001.jpg"]);
     assert_eq!(std::fs::read(&receipt.abs_path).unwrap(), bytes);
-    let on_disk = std::fs::metadata(&receipt.abs_path).unwrap().modified().unwrap();
-    assert_eq!(on_disk, SystemTime::UNIX_EPOCH + Duration::from_nanos(mtime_ns as u64));
+    let on_disk = std::fs::metadata(&receipt.abs_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        on_disk,
+        SystemTime::UNIX_EPOCH + Duration::from_nanos(mtime_ns as u64)
+    );
 
     // In the ledger: one record, counted against the device, logged.
     let stats = store.stats().unwrap();
@@ -64,7 +79,10 @@ fn stores_a_file_end_to_end() {
     let device = store.device(&phone()).unwrap().unwrap();
     assert_eq!((device.used_files, device.used_bytes), (1, 100_000));
     let events = store.events_after(0, 1_000).unwrap();
-    let commit = events.iter().find(|e| e.kind == "commit").expect("a commit event");
+    let commit = events
+        .iter()
+        .find(|e| e.kind == "commit")
+        .expect("a commit event");
     assert_eq!(commit.seq, receipt.seq);
     assert_eq!(commit.file_id, Some(receipt.file_id));
     assert!(events.windows(2).all(|p| p[0].seq < p[1].seq));
@@ -85,7 +103,9 @@ fn large_file_in_awkward_chunks() {
     let store = w.open();
     // Not a multiple of the sector size, the chunk size, or the verify buffer.
     let bytes = data(2, 3 * 1024 * 1024 + 12_345);
-    let mut incoming = store.begin_file(request(&phone(), "video.mp4", &bytes)).unwrap();
+    let mut incoming = store
+        .begin_file(request(&phone(), "video.mp4", &bytes))
+        .unwrap();
     for chunk in bytes.chunks(70_001) {
         incoming.write(chunk).unwrap();
     }
@@ -102,7 +122,10 @@ fn empty_files_are_files_too() {
     let receipt = put(&store, "empty.txt", b"");
     assert_eq!(receipt.size, 0);
     assert_eq!(std::fs::metadata(&receipt.abs_path).unwrap().len(), 0);
-    assert!(store.is_safely_stored(&ContentHash::of_bytes(b"")).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&ContentHash::of_bytes(b""))
+        .unwrap()
+        .is_verified());
 }
 
 #[test]
@@ -110,21 +133,39 @@ fn never_overwrites_and_names_collisions_deterministically() {
     let w = World::new("collisions");
     let store = w.open();
     let contents: Vec<Vec<u8>> = (0..4).map(|i| data(10 + i, 5_000 + i as usize)).collect();
-    let names: Vec<String> = contents.iter().map(|c| put(&store, "DCIM/a.jpg", c).rel_path).collect();
+    let names: Vec<String> = contents
+        .iter()
+        .map(|c| put(&store, "DCIM/a.jpg", c).rel_path)
+        .collect();
     assert_eq!(
         names,
-        ["Pixel 8/DCIM/a.jpg", "Pixel 8/DCIM/a (2).jpg", "Pixel 8/DCIM/a (3).jpg", "Pixel 8/DCIM/a (4).jpg"]
+        [
+            "Pixel 8/DCIM/a.jpg",
+            "Pixel 8/DCIM/a (2).jpg",
+            "Pixel 8/DCIM/a (3).jpg",
+            "Pixel 8/DCIM/a (4).jpg"
+        ]
     );
     for (name, content) in names.iter().zip(&contents) {
-        assert_eq!(&std::fs::read(w.path(name)).unwrap(), content, "{name} must still hold its own bytes");
+        assert_eq!(
+            &std::fs::read(w.path(name)).unwrap(),
+            content,
+            "{name} must still hold its own bytes"
+        );
     }
     // Names without an extension, with two, and dot-files.
     assert_eq!(put(&store, "README", b"one").rel_path, "Pixel 8/README");
     assert_eq!(put(&store, "README", b"two").rel_path, "Pixel 8/README (2)");
     assert_eq!(put(&store, "x.tar.gz", b"one").rel_path, "Pixel 8/x.tar.gz");
-    assert_eq!(put(&store, "x.tar.gz", b"two").rel_path, "Pixel 8/x.tar (2).gz");
+    assert_eq!(
+        put(&store, "x.tar.gz", b"two").rel_path,
+        "Pixel 8/x.tar (2).gz"
+    );
     assert_eq!(put(&store, ".nomedia", b"one").rel_path, "Pixel 8/.nomedia");
-    assert_eq!(put(&store, ".nomedia", b"two").rel_path, "Pixel 8/.nomedia (2)");
+    assert_eq!(
+        put(&store, ".nomedia", b"two").rel_path,
+        "Pixel 8/.nomedia (2)"
+    );
     assert!(w.temp_files().is_empty());
 }
 
@@ -132,18 +173,48 @@ fn never_overwrites_and_names_collisions_deterministically() {
 fn collisions_ignore_case_and_unicode_normalisation() {
     let w = World::new("case-collisions");
     let store = w.open();
-    assert_eq!(put(&store, "Photo.JPG", b"first").rel_path, "Pixel 8/Photo.JPG");
-    assert_eq!(put(&store, "photo.jpg", b"second").rel_path, "Pixel 8/photo (2).jpg");
-    assert_eq!(put(&store, "PHOTO.jpg", b"third").rel_path, "Pixel 8/PHOTO (3).jpg");
+    assert_eq!(
+        put(&store, "Photo.JPG", b"first").rel_path,
+        "Pixel 8/Photo.JPG"
+    );
+    assert_eq!(
+        put(&store, "photo.jpg", b"second").rel_path,
+        "Pixel 8/photo (2).jpg"
+    );
+    assert_eq!(
+        put(&store, "PHOTO.jpg", b"third").rel_path,
+        "Pixel 8/PHOTO (3).jpg"
+    );
     // The same name spelled decomposed (as a Mac would) and precomposed.
-    assert_eq!(put(&store, "cafe\u{301}.txt", b"nfd").rel_path, "Pixel 8/caf\u{e9}.txt");
-    assert_eq!(put(&store, "caf\u{e9}.txt", b"nfc").rel_path, "Pixel 8/caf\u{e9} (2).txt");
-    assert_eq!(put(&store, "CAF\u{c9}.TXT", b"upper").rel_path, "Pixel 8/CAF\u{c9} (3).TXT");
+    assert_eq!(
+        put(&store, "cafe\u{301}.txt", b"nfd").rel_path,
+        "Pixel 8/caf\u{e9}.txt"
+    );
+    assert_eq!(
+        put(&store, "caf\u{e9}.txt", b"nfc").rel_path,
+        "Pixel 8/caf\u{e9} (2).txt"
+    );
+    assert_eq!(
+        put(&store, "CAF\u{c9}.TXT", b"upper").rel_path,
+        "Pixel 8/CAF\u{c9} (3).TXT"
+    );
     // A directory that differs only by case is the same directory.
-    assert_eq!(put(&store, "DCIM/one.jpg", b"1").rel_path, "Pixel 8/DCIM/one.jpg");
-    assert_eq!(put(&store, "dcim/two.jpg", b"2").rel_path, "Pixel 8/DCIM/two.jpg");
-    assert_eq!(put(&store, "Dcim/ONE.JPG", b"3").rel_path, "Pixel 8/DCIM/ONE (2).JPG");
-    assert_eq!(std::fs::read(w.path("Pixel 8/Photo.JPG")).unwrap(), b"first");
+    assert_eq!(
+        put(&store, "DCIM/one.jpg", b"1").rel_path,
+        "Pixel 8/DCIM/one.jpg"
+    );
+    assert_eq!(
+        put(&store, "dcim/two.jpg", b"2").rel_path,
+        "Pixel 8/DCIM/two.jpg"
+    );
+    assert_eq!(
+        put(&store, "Dcim/ONE.JPG", b"3").rel_path,
+        "Pixel 8/DCIM/ONE (2).JPG"
+    );
+    assert_eq!(
+        std::fs::read(w.path("Pixel 8/Photo.JPG")).unwrap(),
+        b"first"
+    );
     assert_eq!(std::fs::read(w.path("Pixel 8/DCIM/one.jpg")).unwrap(), b"1");
     assert_eq!(w.files().len(), 9);
 }
@@ -159,13 +230,19 @@ fn the_same_content_under_the_same_name_is_not_stored_twice() {
     assert_eq!(second.outcome, CommitOutcome::AlreadyPresent);
     assert_eq!(second.file_id, first.file_id);
     assert_eq!(second.rel_path, first.rel_path);
-    assert_eq!(second.seq, first.seq, "the original commit is what counts for the file's age");
+    assert_eq!(
+        second.seq, first.seq,
+        "the original commit is what counts for the file's age"
+    );
     assert_eq!(w.files(), vec!["Pixel 8/DCIM/a.jpg"]);
     assert_eq!(store.stats().unwrap().files_committed, 1);
     assert_eq!(store.device(&phone()).unwrap().unwrap().used_files, 1);
     // A case variant of the name finds the same file.
     let third = put(&store, "dcim/A.JPG", &bytes);
-    assert_eq!((third.outcome, third.file_id), (CommitOutcome::AlreadyPresent, first.file_id));
+    assert_eq!(
+        (third.outcome, third.file_id),
+        (CommitOutcome::AlreadyPresent, first.file_id)
+    );
     assert_eq!(w.files().len(), 1);
 }
 
@@ -176,17 +253,36 @@ fn an_identical_file_the_user_copied_by_hand_is_adopted() {
     let bytes = data(4, 20_000);
     std::fs::create_dir_all(w.path("Pixel 8/DCIM")).unwrap();
     std::fs::write(w.path("Pixel 8/DCIM/old.jpg"), &bytes).unwrap();
-    let before = std::fs::metadata(w.path("Pixel 8/DCIM/old.jpg")).unwrap().modified().unwrap();
-    assert!(!store.is_safely_stored(&ContentHash::of_bytes(&bytes)).unwrap().is_verified(), "unknown until received");
+    let before = std::fs::metadata(w.path("Pixel 8/DCIM/old.jpg"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(
+        !store
+            .is_safely_stored(&ContentHash::of_bytes(&bytes))
+            .unwrap()
+            .is_verified(),
+        "unknown until received"
+    );
 
     let receipt = try_put(&store, &phone(), "DCIM/old.jpg", &bytes).unwrap();
     assert_eq!(receipt.outcome, CommitOutcome::AlreadyPresent);
     assert!(!receipt.mtime_applied);
     assert_eq!(w.files(), vec!["Pixel 8/DCIM/old.jpg"]);
     // The user's file was read, not written.
-    assert_eq!(std::fs::metadata(w.path("Pixel 8/DCIM/old.jpg")).unwrap().modified().unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(w.path("Pixel 8/DCIM/old.jpg"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
     assert!(store.is_safely_stored(&receipt.hash).unwrap().is_verified());
-    assert!(store.events_after(0, 100).unwrap().iter().any(|e| e.kind == "adopt"));
+    assert!(store
+        .events_after(0, 100)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "adopt"));
 }
 
 #[test]
@@ -202,11 +298,17 @@ fn a_different_file_the_user_put_there_is_left_alone() {
     let receipt = put(&store, "DCIM/old.jpg", ours);
     assert_eq!(receipt.outcome, CommitOutcome::Stored);
     assert_eq!(receipt.rel_path, "Pixel 8/DCIM/old (2).jpg");
-    assert_eq!(std::fs::read(w.path("Pixel 8/DCIM/old.jpg")).unwrap(), theirs);
+    assert_eq!(
+        std::fs::read(w.path("Pixel 8/DCIM/old.jpg")).unwrap(),
+        theirs
+    );
     assert_eq!(std::fs::read(&receipt.abs_path).unwrap(), ours);
     // A directory in the way is not a file to adopt or replace either.
     std::fs::create_dir_all(w.path("Pixel 8/DCIM/thing.jpg")).unwrap();
-    assert_eq!(put(&store, "DCIM/thing.jpg", b"x").rel_path, "Pixel 8/DCIM/thing (2).jpg");
+    assert_eq!(
+        put(&store, "DCIM/thing.jpg", b"x").rel_path,
+        "Pixel 8/DCIM/thing (2).jpg"
+    );
     assert!(w.path("Pixel 8/DCIM/thing.jpg").is_dir());
 }
 
@@ -219,7 +321,10 @@ fn a_wrong_sender_hash_stores_nothing() {
 
     // Claimed up front.
     let mut incoming = store
-        .begin_file(FileRequest { claimed_hash: Some(wrong), ..request(&phone(), "a.jpg", &bytes) })
+        .begin_file(FileRequest {
+            claimed_hash: Some(wrong),
+            ..request(&phone(), "a.jpg", &bytes)
+        })
         .unwrap();
     incoming.write(&bytes).unwrap();
     match incoming.finish(None) {
@@ -230,19 +335,44 @@ fn a_wrong_sender_hash_stores_nothing() {
         other => panic!("expected SenderHashMismatch, got {other:?}"),
     }
     // Claimed at the end.
-    let mut incoming = store.begin_file(FileRequest { claimed_hash: None, ..request(&phone(), "a.jpg", &bytes) }).unwrap();
+    let mut incoming = store
+        .begin_file(FileRequest {
+            claimed_hash: None,
+            ..request(&phone(), "a.jpg", &bytes)
+        })
+        .unwrap();
     incoming.write(&bytes).unwrap();
-    assert!(matches!(incoming.finish(Some(wrong)), Err(StoreError::SenderHashMismatch { .. })));
+    assert!(matches!(
+        incoming.finish(Some(wrong)),
+        Err(StoreError::SenderHashMismatch { .. })
+    ));
     // Two claims that disagree, even if one is right.
-    let mut incoming = store.begin_file(request(&phone(), "a.jpg", &bytes)).unwrap();
+    let mut incoming = store
+        .begin_file(request(&phone(), "a.jpg", &bytes))
+        .unwrap();
     incoming.write(&bytes).unwrap();
-    assert!(matches!(incoming.finish(Some(wrong)), Err(StoreError::ConflictingSenderHashes)));
+    assert!(matches!(
+        incoming.finish(Some(wrong)),
+        Err(StoreError::ConflictingSenderHashes)
+    ));
     // No claim at all.
-    let mut incoming = store.begin_file(FileRequest { claimed_hash: None, ..request(&phone(), "a.jpg", &bytes) }).unwrap();
+    let mut incoming = store
+        .begin_file(FileRequest {
+            claimed_hash: None,
+            ..request(&phone(), "a.jpg", &bytes)
+        })
+        .unwrap();
     incoming.write(&bytes).unwrap();
-    assert!(matches!(incoming.finish(None), Err(StoreError::MissingSenderHash)));
+    assert!(matches!(
+        incoming.finish(None),
+        Err(StoreError::MissingSenderHash)
+    ));
 
-    assert!(w.files().is_empty(), "nothing may be left behind: {:?}", w.files());
+    assert!(
+        w.files().is_empty(),
+        "nothing may be left behind: {:?}",
+        w.files()
+    );
     assert_eq!(store.stats().unwrap().files_committed, 0);
     assert_eq!(store.device(&phone()).unwrap().unwrap().used_bytes, 0);
 }
@@ -254,17 +384,39 @@ fn size_must_match_the_declaration_exactly() {
     let bytes = data(6, 1_000);
 
     // Too few bytes.
-    let mut incoming = store.begin_file(request(&phone(), "a.bin", &bytes)).unwrap();
+    let mut incoming = store
+        .begin_file(request(&phone(), "a.bin", &bytes))
+        .unwrap();
     incoming.write(&bytes[..999]).unwrap();
-    assert!(matches!(incoming.finish(None), Err(StoreError::SizeMismatch { declared: 1_000, received: 999 })));
+    assert!(matches!(
+        incoming.finish(None),
+        Err(StoreError::SizeMismatch {
+            declared: 1_000,
+            received: 999
+        })
+    ));
 
     // Too many bytes: refused at the write that would exceed, and the file is dead.
-    let mut incoming = store.begin_file(request(&phone(), "a.bin", &bytes)).unwrap();
+    let mut incoming = store
+        .begin_file(request(&phone(), "a.bin", &bytes))
+        .unwrap();
     incoming.write(&bytes).unwrap();
-    assert!(matches!(incoming.write(b"!"), Err(StoreError::SizeMismatch { declared: 1_000, received: 1_001 })));
-    assert!(matches!(incoming.write(b"!"), Err(StoreError::WriterClosed)));
+    assert!(matches!(
+        incoming.write(b"!"),
+        Err(StoreError::SizeMismatch {
+            declared: 1_000,
+            received: 1_001
+        })
+    ));
+    assert!(matches!(
+        incoming.write(b"!"),
+        Err(StoreError::WriterClosed)
+    ));
     assert_eq!(incoming.bytes_written(), 0);
-    assert!(matches!(incoming.finish(None), Err(StoreError::WriterClosed)));
+    assert!(matches!(
+        incoming.finish(None),
+        Err(StoreError::WriterClosed)
+    ));
 
     assert!(w.files().is_empty(), "{:?}", w.files());
 }
@@ -275,19 +427,26 @@ fn abandoning_a_transfer_removes_what_was_received() {
     let store = w.open();
     let bytes = data(7, 200_000);
 
-    let mut incoming = store.begin_file(request(&phone(), "a/b/c.bin", &bytes)).unwrap();
+    let mut incoming = store
+        .begin_file(request(&phone(), "a/b/c.bin", &bytes))
+        .unwrap();
     incoming.write(&bytes[..100_000]).unwrap();
     assert_eq!(w.temp_files().len(), 1);
     incoming.abort();
     assert!(w.files().is_empty());
 
-    let mut incoming = store.begin_file(request(&phone(), "a/b/c.bin", &bytes)).unwrap();
+    let mut incoming = store
+        .begin_file(request(&phone(), "a/b/c.bin", &bytes))
+        .unwrap();
     incoming.write(&bytes[..100_000]).unwrap();
     drop(incoming);
     assert!(w.files().is_empty());
 
     // The reservation is gone too: the full file fits again under a tight quota.
-    let limits = DeviceLimits { max_total_bytes: Some(200_000), ..DeviceLimits::default() };
+    let limits = DeviceLimits {
+        max_total_bytes: Some(200_000),
+        ..DeviceLimits::default()
+    };
     store.register_device(&phone(), "Pixel 8", limits).unwrap();
     put(&store, "a/b/c.bin", &bytes);
 }
@@ -297,9 +456,22 @@ fn devices_must_be_registered_and_well_formed() {
     let w = World::new("devices");
     let store = w.open();
     let stranger = DeviceId::new("stranger").unwrap();
-    assert!(matches!(try_put(&store, &stranger, "a.jpg", b"x"), Err(StoreError::UnknownDevice(id)) if id == "stranger"));
-    for bad in ["", "has space", "slash/inside", "back\\slash", "colon:", "..\u{e9}", &"x".repeat(129)] {
-        assert!(matches!(DeviceId::new(bad), Err(StoreError::InvalidDeviceId(_))), "{bad:?}");
+    assert!(
+        matches!(try_put(&store, &stranger, "a.jpg", b"x"), Err(StoreError::UnknownDevice(id)) if id == "stranger")
+    );
+    for bad in [
+        "",
+        "has space",
+        "slash/inside",
+        "back\\slash",
+        "colon:",
+        "..\u{e9}",
+        &"x".repeat(129),
+    ] {
+        assert!(
+            matches!(DeviceId::new(bad), Err(StoreError::InvalidDeviceId(_))),
+            "{bad:?}"
+        );
     }
     for good in ["a", "3f9a6c0e5b7d4a12", "Pixel_8.pro-2", &"x".repeat(128)] {
         assert!(DeviceId::new(good).is_ok(), "{good:?}");
@@ -312,7 +484,12 @@ fn device_folder_names_are_sanitised_and_unique() {
     let w = World::new("device-folders");
     let store = w.try_open().unwrap();
     let limits = DeviceLimits::default();
-    let folder = |id: &str, name: &str| store.register_device(&DeviceId::new(id).unwrap(), name, limits).unwrap().folder_name;
+    let folder = |id: &str, name: &str| {
+        store
+            .register_device(&DeviceId::new(id).unwrap(), name, limits)
+            .unwrap()
+            .folder_name
+    };
     assert_eq!(folder("d1", "Pixel 8"), "Pixel 8");
     assert_eq!(folder("d2", "pixel 8"), "pixel 8 (2)");
     assert_eq!(folder("d3", "../../Windows"), ".._.._Windows");
@@ -356,7 +533,11 @@ fn hostile_names_never_leave_the_root() {
             other => panic!("{name:?} should be refused, got {other:?}"),
         }
     }
-    assert!(w.files().is_empty(), "a refused name must not even create directories: {:?}", w.files());
+    assert!(
+        w.files().is_empty(),
+        "a refused name must not even create directories: {:?}",
+        w.files()
+    );
 
     let neutralised = [
         ("NUL", "Pixel 8/_NUL"),
@@ -376,7 +557,10 @@ fn hostile_names_never_leave_the_root() {
         let receipt = put(&store, name, format!("content {i}").as_bytes());
         assert_eq!(&receipt.rel_path, expected, "{name:?}");
         assert!(receipt.abs_path.starts_with(&w.root));
-        assert_eq!(std::fs::read(&receipt.abs_path).unwrap(), format!("content {i}").as_bytes());
+        assert_eq!(
+            std::fs::read(&receipt.abs_path).unwrap(),
+            format!("content {i}").as_bytes()
+        );
     }
     // Everything that exists is exactly what was reported: no alternate data
     // stream on "photo.jpg", no device opened, nothing outside the root.
@@ -431,29 +615,52 @@ fn unicode_names_survive() {
 #[test]
 fn layouts_decide_the_folder() {
     let mut w = World::new("layouts");
-    w.configure = |cfg: &mut StoreConfig| cfg.layout = Template::parse("{year}/{month}/{device}").unwrap();
+    w.configure =
+        |cfg: &mut StoreConfig| cfg.layout = Template::parse("{year}/{month}/{device}").unwrap();
     let store = w.open();
     let put_with = |name: &str, capture: Option<CaptureTime>, mtime: Option<i64>, bytes: &[u8]| {
         let mut incoming = store
-            .begin_file(FileRequest { capture_time: capture, mtime_unix_ns: mtime, ..request(&phone(), name, bytes) })
+            .begin_file(FileRequest {
+                capture_time: capture,
+                mtime_unix_ns: mtime,
+                ..request(&phone(), name, bytes)
+            })
             .unwrap();
         incoming.write(bytes).unwrap();
         incoming.finish(None).unwrap().rel_path
     };
     // 2024-03-09T12:00:00Z
     let march = CaptureTime::utc(1_709_985_600);
-    assert_eq!(put_with("DCIM/a.jpg", Some(march), None, b"a"), "2024/03/Pixel 8/a.jpg");
+    assert_eq!(
+        put_with("DCIM/a.jpg", Some(march), None, b"a"),
+        "2024/03/Pixel 8/a.jpg"
+    );
     // The capture time wins over the modification time.
-    assert_eq!(put_with("b.jpg", Some(march), Some(1_500_000_000_000_000_000), b"b"), "2024/03/Pixel 8/b.jpg");
+    assert_eq!(
+        put_with("b.jpg", Some(march), Some(1_500_000_000_000_000_000), b"b"),
+        "2024/03/Pixel 8/b.jpg"
+    );
     // Without a capture time the modification time is used (2017-07-14).
-    assert_eq!(put_with("c.jpg", None, Some(1_500_000_000_000_000_000), b"c"), "2017/07/Pixel 8/c.jpg");
+    assert_eq!(
+        put_with("c.jpg", None, Some(1_500_000_000_000_000_000), b"c"),
+        "2017/07/Pixel 8/c.jpg"
+    );
     // Local time decides the month: 2024-12-31T22:30Z is January in UTC+3.
-    let new_year = CaptureTime { unix_seconds: 1_735_684_200, utc_offset_seconds: 3 * 3600 };
-    assert_eq!(put_with("d.jpg", Some(new_year), None, b"d"), "2025/01/Pixel 8/d.jpg");
+    let new_year = CaptureTime {
+        unix_seconds: 1_735_684_200,
+        utc_offset_seconds: 3 * 3600,
+    };
+    assert_eq!(
+        put_with("d.jpg", Some(new_year), None, b"d"),
+        "2025/01/Pixel 8/d.jpg"
+    );
     // No date at all.
     assert_eq!(put_with("e.jpg", None, None, b"e"), "undated/Pixel 8/e.jpg");
     // A nonsense timestamp is "no date", not a folder named after year 292277026596.
-    assert_eq!(put_with("f.jpg", Some(CaptureTime::utc(i64::MAX)), None, b"f"), "undated/Pixel 8/f.jpg");
+    assert_eq!(
+        put_with("f.jpg", Some(CaptureTime::utc(i64::MAX)), None, b"f"),
+        "undated/Pixel 8/f.jpg"
+    );
 }
 
 #[test]
@@ -461,15 +668,24 @@ fn keep_phone_structure_and_per_device_layouts() {
     let mut w = World::new("layout-presets");
     w.configure = |cfg: &mut StoreConfig| cfg.layout = Template::per_device();
     let store = w.open();
-    assert_eq!(put(&store, "DCIM/Camera/a.jpg", b"a").rel_path, "Pixel 8/a.jpg");
+    assert_eq!(
+        put(&store, "DCIM/Camera/a.jpg", b"a").rel_path,
+        "Pixel 8/a.jpg"
+    );
     drop(store);
     w.configure = |cfg: &mut StoreConfig| cfg.layout = Template::by_date();
     let store = w.open();
-    assert_eq!(put(&store, "DCIM/Camera/b.jpg", b"b").rel_path, "undated/b.jpg");
+    assert_eq!(
+        put(&store, "DCIM/Camera/b.jpg", b"b").rel_path,
+        "undated/b.jpg"
+    );
     drop(store);
     w.configure = |cfg: &mut StoreConfig| cfg.layout = Template::keep_phone_structure();
     let store = w.open();
-    assert_eq!(put(&store, "DCIM/Camera/c.jpg", b"c").rel_path, "Pixel 8/DCIM/Camera/c.jpg");
+    assert_eq!(
+        put(&store, "DCIM/Camera/c.jpg", b"c").rel_path,
+        "Pixel 8/DCIM/Camera/c.jpg"
+    );
 }
 
 #[test]
@@ -492,7 +708,12 @@ fn many_writers_at_once_never_clobber_each_other() {
     names.dedup();
     assert_eq!(names.len(), 12, "every writer must get its own name");
     for (receipt, bytes) in &results {
-        assert_eq!(&std::fs::read(&receipt.abs_path).unwrap(), bytes, "{}", receipt.rel_path);
+        assert_eq!(
+            &std::fs::read(&receipt.abs_path).unwrap(),
+            bytes,
+            "{}",
+            receipt.rel_path
+        );
     }
     assert_eq!(w.files().len(), 12);
     assert_eq!(store.stats().unwrap().files_committed, 12);
@@ -533,31 +754,54 @@ fn the_low_space_guard_uses_the_real_volume() {
         mtime_unix_ns: None,
     };
     match store.begin_file(request) {
-        Err(StoreError::InsufficientSpace { needed, margin, available }) => {
+        Err(StoreError::InsufficientSpace {
+            needed,
+            margin,
+            available,
+        }) => {
             assert_eq!(needed, size);
             assert_eq!(margin, 1024 * 1024);
             assert!(available < needed + margin);
         }
         other => panic!("expected InsufficientSpace, got {other:?}"),
     }
-    assert!(w.files().is_empty(), "the guard must act before anything is created");
+    assert!(
+        w.files().is_empty(),
+        "the guard must act before anything is created"
+    );
 }
 
 #[test]
 fn quota_kinds_are_reported() {
     let w = World::new("quota-kinds");
     let store = w.open();
-    let limits = DeviceLimits { max_total_bytes: Some(100), max_files: Some(2), max_file_bytes: Some(60) };
+    let limits = DeviceLimits {
+        max_total_bytes: Some(100),
+        max_files: Some(2),
+        max_file_bytes: Some(60),
+    };
     store.register_device(&phone(), "Pixel 8", limits).unwrap();
     let kind = |r: Result<_, StoreError>| match r {
         Err(StoreError::QuotaExceeded { kind, .. }) => kind,
-        other => panic!("expected QuotaExceeded, got {:?}", other.map(|_: kiwi_store::CommitReceipt| ())),
+        other => panic!(
+            "expected QuotaExceeded, got {:?}",
+            other.map(|_: kiwi_store::CommitReceipt| ())
+        ),
     };
-    assert_eq!(kind(try_put(&store, &phone(), "big", &[0; 61])), QuotaKind::FileBytes);
+    assert_eq!(
+        kind(try_put(&store, &phone(), "big", &[0; 61])),
+        QuotaKind::FileBytes
+    );
     put(&store, "a", &[1; 60]);
-    assert_eq!(kind(try_put(&store, &phone(), "b", &[2; 41])), QuotaKind::TotalBytes);
+    assert_eq!(
+        kind(try_put(&store, &phone(), "b", &[2; 41])),
+        QuotaKind::TotalBytes
+    );
     put(&store, "b", &[2; 40]);
-    assert_eq!(kind(try_put(&store, &phone(), "c", &[])), QuotaKind::FileCount);
+    assert_eq!(
+        kind(try_put(&store, &phone(), "c", &[])),
+        QuotaKind::FileCount
+    );
     assert_eq!(w.files().len(), 2);
 }
 
@@ -566,8 +810,15 @@ fn opening_needs_a_real_directory() {
     let w = World::new("bad-root");
     let file = w.base.join("a-file");
     std::fs::write(&file, b"x").unwrap();
-    for bad in [w.base.join("missing"), file, std::path::PathBuf::from("relative")] {
+    for bad in [
+        w.base.join("missing"),
+        file,
+        std::path::PathBuf::from("relative"),
+    ] {
         let cfg = StoreConfig::new(&bad, &w.ledger_dir);
-        assert!(matches!(Store::open(cfg), Err(StoreError::Destination(_))), "{bad:?}");
+        assert!(
+            matches!(Store::open(cfg), Err(StoreError::Destination(_))),
+            "{bad:?}"
+        );
     }
 }

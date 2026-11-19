@@ -192,7 +192,9 @@ impl Probe {
             Probe::Reparse(p) => NotVerifiedReason::ReparsePoint(p.clone()),
             Probe::NotLocal => NotVerifiedReason::NotLocal,
             Probe::InvalidRecord => NotVerifiedReason::InvalidRecord,
-            Probe::Interrupted => NotVerifiedReason::Unreadable("the read was interrupted".to_owned()),
+            Probe::Interrupted => {
+                NotVerifiedReason::Unreadable("the read was interrupted".to_owned())
+            }
         }
     }
 }
@@ -202,11 +204,19 @@ impl Inner {
     ///
     /// `on_chunk` is called with the size of each chunk read and may stop the
     /// read (rate limiting and cancellation live there).
-    pub(crate) fn probe(&self, rec: &FileRecord, on_chunk: &mut dyn FnMut(usize) -> ControlFlow<()>) -> Probe {
+    pub(crate) fn probe(
+        &self,
+        rec: &FileRecord,
+        on_chunk: &mut dyn FnMut(usize) -> ControlFlow<()>,
+    ) -> Probe {
         // The path comes from the ledger, which is not trusted: it must be
         // exactly what the sanitiser would produce, or it is not used at all.
-        let Some(rel) = SafeRelPath::from_stored(&rec.rel_path) else { return Probe::InvalidRecord };
-        let Some(file_name) = rel.file_name() else { return Probe::InvalidRecord };
+        let Some(rel) = SafeRelPath::from_stored(&rec.rel_path) else {
+            return Probe::InvalidRecord;
+        };
+        let Some(file_name) = rel.file_name() else {
+            return Probe::InvalidRecord;
+        };
 
         // Every directory on the way must be a real directory.
         let mut path = self.root().to_path_buf();
@@ -230,7 +240,10 @@ impl Inner {
             }
             Ok(Some(s)) if s.offline => return Probe::NotLocal,
             Ok(Some(s)) if s.size != rec.size => {
-                return Probe::Changed(format!("its size is {} bytes instead of {}", s.size, rec.size))
+                return Probe::Changed(format!(
+                    "its size is {} bytes instead of {}",
+                    s.size, rec.size
+                ))
             }
             Ok(Some(_)) => {}
         }
@@ -244,18 +257,47 @@ impl Inner {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Probe::Missing,
             Err(e) => Probe::Unreadable(e.to_string()),
             Ok(r) if !r.completed => Probe::Interrupted,
-            Ok(r) if r.bytes != rec.size => {
-                Probe::Changed(format!("its size is {} bytes instead of {}", r.bytes, rec.size))
-            }
+            Ok(r) if r.bytes != rec.size => Probe::Changed(format!(
+                "its size is {} bytes instead of {}",
+                r.bytes, rec.size
+            )),
             Ok(r) => {
                 let on_disk = ContentHash::from(hasher.finalize());
-                if on_disk == rec.hash {
-                    Probe::Match { unbuffered: r.unbuffered }
-                } else {
-                    Probe::Changed(format!("its content hashes to {on_disk} instead of {}", rec.hash))
+                if on_disk != rec.hash {
+                    return Probe::Changed(format!(
+                        "its content hashes to {on_disk} instead of {}",
+                        rec.hash
+                    ));
+                }
+                // The content is right. Make sure it was read from where the
+                // record says it is: ask the operating system where the path
+                // really leads. The per-directory check above cannot see a
+                // link that was swapped in a moment later, or a short (8.3)
+                // name standing in for another folder.
+                match self.fs.resolve(&path) {
+                    Ok(resolved) if self.is_where_expected(&resolved, &rel) => Probe::Match {
+                        unbuffered: r.unbuffered,
+                    },
+                    Ok(resolved) => Probe::Reparse(resolved),
+                    Err(e) => Probe::Unreadable(e.to_string()),
                 }
             }
         }
+    }
+
+    /// Whether a fully resolved path is the root plus exactly the components
+    /// of `rel`, compared the way the file system compares names.
+    fn is_where_expected(&self, resolved: &std::path::Path, rel: &SafeRelPath) -> bool {
+        let Ok(below) = resolved.strip_prefix(self.root()) else {
+            return false;
+        };
+        let actual: Vec<_> = below.components().collect();
+        actual.len() == rel.depth()
+            && actual.iter().zip(rel.components()).all(|(got, want)| {
+                got.as_os_str().to_str().is_some_and(|name| {
+                    crate::sanitize::collision_key(name) == want.collision_key()
+                })
+            })
     }
 
     /// Brings the ledger in line with what a probe found, and applies the
@@ -266,29 +308,51 @@ impl Inner {
         match probe {
             Probe::Match { .. } => {
                 if rec.state != FileState::Committed {
-                    self.ledger.set_state(rec.id, FileState::Committed, "found intact again", now)?;
+                    self.ledger.set_state(
+                        rec.id,
+                        FileState::Committed,
+                        "found intact again",
+                        now,
+                    )?;
                 }
             }
             Probe::Missing => {
-                let newly = self.ledger.set_state(rec.id, FileState::Missing, "the file is gone", now)?.is_some();
+                let newly = self
+                    .ledger
+                    .set_state(rec.id, FileState::Missing, "the file is gone", now)?
+                    .is_some();
                 if newly && self.cfg.scan_policy.block_on_missing {
                     let reason = format!("a stored file is missing: {}", rec.rel_path);
-                    self.ledger.block(BlockKind::IntegrityProblems, &reason, now)?;
+                    self.ledger
+                        .block(BlockKind::IntegrityProblems, &reason, now)?;
                 }
             }
             Probe::Changed(how) => {
-                if self.ledger.set_state(rec.id, FileState::Changed, how, now)?.is_some() {
+                if self
+                    .ledger
+                    .set_state(rec.id, FileState::Changed, how, now)?
+                    .is_some()
+                {
                     let reason = format!("a stored file was changed: {} ({how})", rec.rel_path);
-                    self.ledger.block(BlockKind::IntegrityProblems, &reason, now)?;
+                    self.ledger
+                        .block(BlockKind::IntegrityProblems, &reason, now)?;
                 }
             }
             Probe::Reparse(path) => {
-                let reason = format!("a link or junction was found inside the destination: {}", path.display());
-                self.ledger.block(BlockKind::IntegrityProblems, &reason, now)?;
+                let reason = format!(
+                    "a link or junction was found inside the destination: {}",
+                    path.display()
+                );
+                self.ledger
+                    .block(BlockKind::IntegrityProblems, &reason, now)?;
             }
             Probe::InvalidRecord => {
-                let reason = format!("the ledger holds an invalid path for file record {}", rec.id);
-                self.ledger.block(BlockKind::IntegrityProblems, &reason, now)?;
+                let reason = format!(
+                    "the ledger holds an invalid path for file record {}",
+                    rec.id
+                );
+                self.ledger
+                    .block(BlockKind::IntegrityProblems, &reason, now)?;
             }
             Probe::Unreadable(_) | Probe::NotLocal | Probe::Interrupted => {}
         }
@@ -315,12 +379,15 @@ impl Inner {
     }
 
     /// Looks for a recorded file with this hash that verifies from disk.
+    ///
+    /// A successful check writes nothing to the ledger (this is called once
+    /// per file of the phone's library at the start of every transfer; a
+    /// synchronous ledger write each time would cost more than the read).
+    /// Findings do: a file found missing, changed or restored is recorded.
     fn verify_by_hash(
         &self,
         hash: &ContentHash,
         device: Option<&str>,
-        event: &str,
-        event_device: Option<&str>,
     ) -> Result<StoredStatus, StoreError> {
         let mut candidates = self.ledger.files_by_hash(hash)?;
         if let Some(device) = device {
@@ -334,7 +401,6 @@ impl Inner {
             self.apply_probe(rec, &probe)?;
             match probe {
                 Probe::Match { unbuffered } => {
-                    self.ledger.mark_verified(rec.id, event, event_device, self.now())?;
                     return Ok(StoredStatus::Verified(self.stored_file(rec, unbuffered)));
                 }
                 other => reason = other.reason(),
@@ -352,12 +418,16 @@ impl Store {
     /// candidate that turns out to be missing or changed is marked as such
     /// (and blocks final move), and the answer is `None`: the caller should
     /// then transfer the file.
-    pub fn find_duplicate(&self, hash: &ContentHash, scope: DedupeScope<'_>) -> Result<Option<StoredFile>, StoreError> {
-        let (filter, who) = match scope {
-            DedupeScope::Device(id) => (Some(id.as_str()), Some(id.as_str())),
-            DedupeScope::AnyDevice => (None, None),
+    pub fn find_duplicate(
+        &self,
+        hash: &ContentHash,
+        scope: DedupeScope<'_>,
+    ) -> Result<Option<StoredFile>, StoreError> {
+        let filter = match scope {
+            DedupeScope::Device(id) => Some(id.as_str()),
+            DedupeScope::AnyDevice => None,
         };
-        match self.inner.verify_by_hash(hash, filter, "dedupe_hit", who)? {
+        match self.inner.verify_by_hash(hash, filter)? {
             StoredStatus::Verified(file) => Ok(Some(file)),
             StoredStatus::NotVerified(_) => Ok(None),
         }
@@ -375,7 +445,7 @@ impl Store {
     /// the kind of volume, at how long the file has been stored, or at the
     /// final-move block.
     pub fn is_safely_stored(&self, hash: &ContentHash) -> Result<StoredStatus, StoreError> {
-        self.inner.verify_by_hash(hash, None, "verified", None)
+        self.inner.verify_by_hash(hash, None)
     }
 
     /// The delayed second verification that gates deleting the phone's copy.
@@ -395,19 +465,28 @@ impl Store {
     /// 6. the ledger accepted the record of this verification.
     ///
     /// Any doubt is a denial. A denial never deletes or changes anything.
-    pub fn verify_for_deletion(&self, hash: &ContentHash, min_age_sessions: u32) -> Result<DeletionProof, DeletionDenied> {
+    pub fn verify_for_deletion(
+        &self,
+        hash: &ContentHash,
+        min_age_sessions: u32,
+    ) -> Result<DeletionProof, DeletionDenied> {
         let inner = &self.inner;
 
         // 1. The destination, as it is now.
         let current = if inner.volume_is_forced {
             inner.dest.clone()
         } else {
-            inner.dest.reprobe().map_err(|e| DeletionDenied::DestinationUnavailable(e.to_string()))?
+            inner
+                .dest
+                .reprobe()
+                .map_err(|e| DeletionDenied::DestinationUnavailable(e.to_string()))?
         };
         if let FinalMoveSupport::CopyOnly(reason) = current.final_move_support() {
             return Err(DeletionDenied::Unsupported(reason.clone()));
         }
-        if current.volume().serial != inner.dest.volume().serial || current.volume().serial.is_none() {
+        if current.volume().serial != inner.dest.volume().serial
+            || current.volume().serial.is_none()
+        {
             return Err(DeletionDenied::VolumeChanged);
         }
 
@@ -418,9 +497,15 @@ impl Store {
 
         // 3. The clock.
         let now = inner.now();
-        let last_seen = inner.ledger.max_seen_unix_ms().map_err(DeletionDenied::Ledger)?;
+        let last_seen = inner
+            .ledger
+            .max_seen_unix_ms()
+            .map_err(DeletionDenied::Ledger)?;
         if now < last_seen {
-            return Err(DeletionDenied::ClockWentBackwards { now_unix_ms: now, last_seen_unix_ms: last_seen });
+            return Err(DeletionDenied::ClockWentBackwards {
+                now_unix_ms: now,
+                last_seen_unix_ms: last_seen,
+            });
         }
 
         // 4. and 5. A candidate that is old enough and verifies from disk.
@@ -429,7 +514,10 @@ impl Store {
         let current_session = inner.ledger.session();
         let session_start_seq = inner.ledger.session_start_seq();
 
-        let candidates = inner.ledger.files_by_hash(hash).map_err(DeletionDenied::Ledger)?;
+        let candidates = inner
+            .ledger
+            .files_by_hash(hash)
+            .map_err(DeletionDenied::Ledger)?;
         let mut too_recent: Option<DeletionDenied> = None;
         let mut not_verified: Option<NotVerifiedReason> = None;
         for rec in &candidates {
@@ -453,11 +541,15 @@ impl Store {
             }
 
             let probe = inner.probe(rec, &mut |_| ControlFlow::Continue(()));
-            inner.apply_probe(rec, &probe).map_err(DeletionDenied::Ledger)?;
+            inner
+                .apply_probe(rec, &probe)
+                .map_err(DeletionDenied::Ledger)?;
             match probe {
                 Probe::Match { unbuffered: true } => {
                     // A problem found on another copy a moment ago blocks this one too.
-                    if let Some(block) = inner.ledger.block_info().map_err(DeletionDenied::Ledger)? {
+                    if let Some(block) =
+                        inner.ledger.block_info().map_err(DeletionDenied::Ledger)?
+                    {
                         return Err(DeletionDenied::Blocked(block));
                     }
                     // 6. No record of the verification, no proof.

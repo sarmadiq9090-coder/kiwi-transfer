@@ -39,8 +39,15 @@ impl AlignedBuf {
         assert!(align.is_power_of_two() && len % align == 0);
         let backing = vec![0u8; len + align];
         let offset = backing.as_ptr().align_offset(align);
-        assert!(offset < align, "allocator returned an address that cannot be aligned");
-        Self { backing, offset, len }
+        assert!(
+            offset < align,
+            "allocator returned an address that cannot be aligned"
+        );
+        Self {
+            backing,
+            offset,
+            len,
+        }
     }
 
     pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {

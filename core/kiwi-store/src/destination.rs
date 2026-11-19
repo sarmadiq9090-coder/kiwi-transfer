@@ -120,13 +120,23 @@ impl fmt::Display for CopyOnlyReason {
         match self {
             Self::Network => f.write_str("the destination is on a network volume"),
             Self::Removable => f.write_str("the destination is on a removable or external disk"),
-            Self::HotPluggable => f.write_str("the destination's disk is flagged hot-pluggable, like an external disk"),
-            Self::Filesystem(fs) => write!(f, "the destination's file system is {fs}, not NTFS or ReFS"),
+            Self::HotPluggable => f.write_str(
+                "the destination's disk is flagged hot-pluggable, like an external disk",
+            ),
+            Self::Filesystem(fs) => {
+                write!(f, "the destination's file system is {fs}, not NTFS or ReFS")
+            }
             Self::ReadOnly => f.write_str("the destination volume is read-only"),
             Self::VirtualDisk => f.write_str("the destination is on a virtual disk"),
-            Self::UnrecognisedDrive => f.write_str("the destination is not on a recognised fixed disk"),
-            Self::DeviceUnidentified => f.write_str("the destination's disk could not be identified"),
-            Self::PlatformUnsupported => f.write_str("volume classification is only implemented on Windows"),
+            Self::UnrecognisedDrive => {
+                f.write_str("the destination is not on a recognised fixed disk")
+            }
+            Self::DeviceUnidentified => {
+                f.write_str("the destination's disk could not be identified")
+            }
+            Self::PlatformUnsupported => {
+                f.write_str("volume classification is only implemented on Windows")
+            }
         }
     }
 }
@@ -163,9 +173,15 @@ pub fn classify(info: &VolumeInfo) -> (VolumeClass, FinalMoveSupport) {
     match info.drive {
         DriveKind::Remote => return copy_only(VolumeClass::Network, R::Network),
         DriveKind::Removable => return copy_only(VolumeClass::Removable, R::Removable),
-        DriveKind::CdRom | DriveKind::RamDisk => return copy_only(VolumeClass::Other, R::UnrecognisedDrive),
+        DriveKind::CdRom | DriveKind::RamDisk => {
+            return copy_only(VolumeClass::Other, R::UnrecognisedDrive)
+        }
         DriveKind::Unknown => {
-            let reason = if cfg!(windows) { R::UnrecognisedDrive } else { R::PlatformUnsupported };
+            let reason = if cfg!(windows) {
+                R::UnrecognisedDrive
+            } else {
+                R::PlatformUnsupported
+            };
             return copy_only(VolumeClass::Other, reason);
         }
         DriveKind::Fixed => {}
@@ -175,8 +191,12 @@ pub fn classify(info: &VolumeInfo) -> (VolumeClass, FinalMoveSupport) {
             return copy_only(VolumeClass::Removable, R::Removable)
         }
         Some(BusKind::IScsi) => return copy_only(VolumeClass::Network, R::Network),
-        Some(BusKind::Virtual | BusKind::FileBackedVirtual) => return copy_only(VolumeClass::Other, R::VirtualDisk),
-        Some(BusKind::Other(_)) | None => return copy_only(VolumeClass::Other, R::DeviceUnidentified),
+        Some(BusKind::Virtual | BusKind::FileBackedVirtual) => {
+            return copy_only(VolumeClass::Other, R::VirtualDisk)
+        }
+        Some(BusKind::Other(_)) | None => {
+            return copy_only(VolumeClass::Other, R::DeviceUnidentified)
+        }
         Some(
             BusKind::Sata
             | BusKind::Ata
@@ -258,17 +278,31 @@ impl Destination {
         if !root.is_absolute() {
             return Err(DestinationError::NotAbsolute(root.to_path_buf()));
         }
-        let resolved = std::fs::canonicalize(root)
-            .map_err(|source| DestinationError::Unavailable { path: root.to_path_buf(), source })?;
-        let meta = std::fs::symlink_metadata(&resolved)
-            .map_err(|source| DestinationError::Unavailable { path: root.to_path_buf(), source })?;
+        let resolved =
+            std::fs::canonicalize(root).map_err(|source| DestinationError::Unavailable {
+                path: root.to_path_buf(),
+                source,
+            })?;
+        let meta = std::fs::symlink_metadata(&resolved).map_err(|source| {
+            DestinationError::Unavailable {
+                path: root.to_path_buf(),
+                source,
+            }
+        })?;
         if !meta.is_dir() {
             return Err(DestinationError::NotADirectory(root.to_path_buf()));
         }
-        let volume =
-            sys::probe_volume(&resolved).map_err(|source| DestinationError::Probe { path: resolved.clone(), source })?;
+        let volume = sys::probe_volume(&resolved).map_err(|source| DestinationError::Probe {
+            path: resolved.clone(),
+            source,
+        })?;
         let (class, final_move) = classify(&volume);
-        Ok(Destination { root: resolved, volume, class, final_move })
+        Ok(Destination {
+            root: resolved,
+            volume,
+            class,
+            final_move,
+        })
     }
 
     /// Replaces what the platform said about the volume. Test builds only.
@@ -321,15 +355,26 @@ impl Destination {
     /// Examines the root again. Used before confirming a deletion: the disk
     /// behind a drive letter can change while the program is running.
     pub fn reprobe(&self) -> Result<Destination, DestinationError> {
-        let meta = std::fs::symlink_metadata(&self.root)
-            .map_err(|source| DestinationError::Unavailable { path: self.root.clone(), source })?;
+        let meta = std::fs::symlink_metadata(&self.root).map_err(|source| {
+            DestinationError::Unavailable {
+                path: self.root.clone(),
+                source,
+            }
+        })?;
         if !meta.is_dir() || sys::is_reparse(&meta) {
             return Err(DestinationError::NotADirectory(self.root.clone()));
         }
-        let volume = sys::probe_volume(&self.root)
-            .map_err(|source| DestinationError::Probe { path: self.root.clone(), source })?;
+        let volume = sys::probe_volume(&self.root).map_err(|source| DestinationError::Probe {
+            path: self.root.clone(),
+            source,
+        })?;
         let (class, final_move) = classify(&volume);
-        Ok(Destination { root: self.root.clone(), volume, class, final_move })
+        Ok(Destination {
+            root: self.root.clone(),
+            volume,
+            class,
+            final_move,
+        })
     }
 }
 
@@ -381,8 +426,16 @@ mod tests {
             BusKind::StorageSpaces,
         ] {
             for fs in ["NTFS", "ntfs", "ReFS", "REFS"] {
-                let info = VolumeInfo { bus: Some(bus), filesystem: fs.into(), ..fixed_ntfs() };
-                assert_eq!(classify(&info), (VolumeClass::FixedNtfsOrRefs, FinalMoveSupport::Supported), "{bus:?} {fs}");
+                let info = VolumeInfo {
+                    bus: Some(bus),
+                    filesystem: fs.into(),
+                    ..fixed_ntfs()
+                };
+                assert_eq!(
+                    classify(&info),
+                    (VolumeClass::FixedNtfsOrRefs, FinalMoveSupport::Supported),
+                    "{bus:?} {fs}"
+                );
             }
         }
     }
@@ -392,62 +445,231 @@ mod tests {
         use CopyOnlyReason as R;
         let v = fixed_ntfs;
         let cases: Vec<(VolumeInfo, VolumeClass, CopyOnlyReason)> = vec![
-            (VolumeInfo { drive: DriveKind::Remote, ..v() }, VolumeClass::Network, R::Network),
-            (VolumeInfo { drive: DriveKind::Removable, ..v() }, VolumeClass::Removable, R::Removable),
-            (VolumeInfo { drive: DriveKind::CdRom, ..v() }, VolumeClass::Other, R::UnrecognisedDrive),
-            (VolumeInfo { drive: DriveKind::RamDisk, ..v() }, VolumeClass::Other, R::UnrecognisedDrive),
+            (
+                VolumeInfo {
+                    drive: DriveKind::Remote,
+                    ..v()
+                },
+                VolumeClass::Network,
+                R::Network,
+            ),
+            (
+                VolumeInfo {
+                    drive: DriveKind::Removable,
+                    ..v()
+                },
+                VolumeClass::Removable,
+                R::Removable,
+            ),
+            (
+                VolumeInfo {
+                    drive: DriveKind::CdRom,
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::UnrecognisedDrive,
+            ),
+            (
+                VolumeInfo {
+                    drive: DriveKind::RamDisk,
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::UnrecognisedDrive,
+            ),
             // A USB hard disk reports DRIVE_FIXED; the bus gives it away.
-            (VolumeInfo { bus: Some(BusKind::Usb), ..v() }, VolumeClass::Removable, R::Removable),
-            (VolumeInfo { bus: Some(BusKind::Ieee1394), ..v() }, VolumeClass::Removable, R::Removable),
-            (VolumeInfo { bus: Some(BusKind::Sd), ..v() }, VolumeClass::Removable, R::Removable),
-            (VolumeInfo { bus: Some(BusKind::Mmc), ..v() }, VolumeClass::Removable, R::Removable),
-            (VolumeInfo { bus: Some(BusKind::IScsi), ..v() }, VolumeClass::Network, R::Network),
-            (VolumeInfo { bus: Some(BusKind::Virtual), ..v() }, VolumeClass::Other, R::VirtualDisk),
-            (VolumeInfo { bus: Some(BusKind::FileBackedVirtual), ..v() }, VolumeClass::Other, R::VirtualDisk),
-            (VolumeInfo { bus: Some(BusKind::Other(99)), ..v() }, VolumeClass::Other, R::DeviceUnidentified),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::Usb),
+                    ..v()
+                },
+                VolumeClass::Removable,
+                R::Removable,
+            ),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::Ieee1394),
+                    ..v()
+                },
+                VolumeClass::Removable,
+                R::Removable,
+            ),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::Sd),
+                    ..v()
+                },
+                VolumeClass::Removable,
+                R::Removable,
+            ),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::Mmc),
+                    ..v()
+                },
+                VolumeClass::Removable,
+                R::Removable,
+            ),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::IScsi),
+                    ..v()
+                },
+                VolumeClass::Network,
+                R::Network,
+            ),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::Virtual),
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::VirtualDisk,
+            ),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::FileBackedVirtual),
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::VirtualDisk,
+            ),
+            (
+                VolumeInfo {
+                    bus: Some(BusKind::Other(99)),
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::DeviceUnidentified,
+            ),
             // Unknown is never treated as fixed.
-            (VolumeInfo { bus: None, ..v() }, VolumeClass::Other, R::DeviceUnidentified),
-            (VolumeInfo { removable_media: None, ..v() }, VolumeClass::Other, R::DeviceUnidentified),
-            (VolumeInfo { removable_media: Some(true), ..v() }, VolumeClass::Removable, R::Removable),
+            (
+                VolumeInfo { bus: None, ..v() },
+                VolumeClass::Other,
+                R::DeviceUnidentified,
+            ),
+            (
+                VolumeInfo {
+                    removable_media: None,
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::DeviceUnidentified,
+            ),
+            (
+                VolumeInfo {
+                    removable_media: Some(true),
+                    ..v()
+                },
+                VolumeClass::Removable,
+                R::Removable,
+            ),
             // eSATA and hot-swap bays look like internal SATA except for this flag.
-            (VolumeInfo { hot_plug: Some(true), ..v() }, VolumeClass::Removable, R::HotPluggable),
-            (VolumeInfo { hot_plug: None, ..v() }, VolumeClass::Other, R::DeviceUnidentified),
-            (VolumeInfo { filesystem: "exFAT".into(), ..v() }, VolumeClass::Other, R::Filesystem("exFAT".into())),
-            (VolumeInfo { filesystem: "FAT32".into(), ..v() }, VolumeClass::Other, R::Filesystem("FAT32".into())),
-            (VolumeInfo { filesystem: String::new(), ..v() }, VolumeClass::Other, R::Filesystem(String::new())),
-            (VolumeInfo { read_only: true, ..v() }, VolumeClass::Other, R::ReadOnly),
+            (
+                VolumeInfo {
+                    hot_plug: Some(true),
+                    ..v()
+                },
+                VolumeClass::Removable,
+                R::HotPluggable,
+            ),
+            (
+                VolumeInfo {
+                    hot_plug: None,
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::DeviceUnidentified,
+            ),
+            (
+                VolumeInfo {
+                    filesystem: "exFAT".into(),
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::Filesystem("exFAT".into()),
+            ),
+            (
+                VolumeInfo {
+                    filesystem: "FAT32".into(),
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::Filesystem("FAT32".into()),
+            ),
+            (
+                VolumeInfo {
+                    filesystem: String::new(),
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::Filesystem(String::new()),
+            ),
+            (
+                VolumeInfo {
+                    read_only: true,
+                    ..v()
+                },
+                VolumeClass::Other,
+                R::ReadOnly,
+            ),
         ];
         for (info, class, why) in cases {
             assert_eq!(classify(&info).0, class, "{info:?}");
             assert_eq!(reason(&info), why, "{info:?}");
         }
         // Network wins over everything else that might look reassuring.
-        let info = VolumeInfo { drive: DriveKind::Remote, filesystem: "NTFS".into(), ..v() };
+        let info = VolumeInfo {
+            drive: DriveKind::Remote,
+            filesystem: "NTFS".into(),
+            ..v()
+        };
         assert_eq!(reason(&info), R::Network);
     }
 
     #[test]
     fn unknown_drive_kind_is_copy_only() {
-        let info = VolumeInfo { drive: DriveKind::Unknown, ..fixed_ntfs() };
-        let expected =
-            if cfg!(windows) { CopyOnlyReason::UnrecognisedDrive } else { CopyOnlyReason::PlatformUnsupported };
+        let info = VolumeInfo {
+            drive: DriveKind::Unknown,
+            ..fixed_ntfs()
+        };
+        let expected = if cfg!(windows) {
+            CopyOnlyReason::UnrecognisedDrive
+        } else {
+            CopyOnlyReason::PlatformUnsupported
+        };
         assert_eq!(reason(&info), expected);
     }
 
     #[test]
     fn display_strips_the_verbatim_prefix() {
-        assert_eq!(display_path(Path::new(r"\\?\E:\Photos\Kiwi")), r"E:\Photos\Kiwi");
-        assert_eq!(display_path(Path::new(r"\\?\UNC\nas\share\Photos")), r"\\nas\share\Photos");
+        assert_eq!(
+            display_path(Path::new(r"\\?\E:\Photos\Kiwi")),
+            r"E:\Photos\Kiwi"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\nas\share\Photos")),
+            r"\\nas\share\Photos"
+        );
         assert_eq!(display_path(Path::new("/srv/photos")), "/srv/photos");
     }
 
     #[test]
     fn open_rejects_bad_roots() {
-        assert!(matches!(Destination::open(Path::new("relative/dir")), Err(DestinationError::NotAbsolute(_))));
+        assert!(matches!(
+            Destination::open(Path::new("relative/dir")),
+            Err(DestinationError::NotAbsolute(_))
+        ));
         let missing = std::env::temp_dir().join("kiwi-store-definitely-missing-4c1f9a");
-        assert!(matches!(Destination::open(&missing), Err(DestinationError::Unavailable { .. })));
+        assert!(matches!(
+            Destination::open(&missing),
+            Err(DestinationError::Unavailable { .. })
+        ));
         let exe = std::env::current_exe().unwrap();
-        assert!(matches!(Destination::open(&exe), Err(DestinationError::NotADirectory(_))));
+        assert!(matches!(
+            Destination::open(&exe),
+            Err(DestinationError::NotADirectory(_))
+        ));
     }
 
     #[test]
@@ -456,7 +678,11 @@ mod tests {
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
         let dest = Destination::open(here).unwrap();
         println!("volume of {}: {:?}", dest.display_root(), dest.volume());
-        println!("class {:?}, final move {:?}", dest.class(), dest.final_move_support());
+        println!(
+            "class {:?}, final move {:?}",
+            dest.class(),
+            dest.final_move_support()
+        );
         assert!(dest.root().is_absolute());
         assert!(dest.free_space().unwrap() > 0);
         assert_eq!(dest.reprobe().unwrap().volume(), dest.volume());

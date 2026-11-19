@@ -8,8 +8,8 @@ use std::path::Path;
 
 use common::*;
 use kiwi_store::{
-    BlockKind, CancelToken, CommitOutcome, ContentHash, DedupeScope, DeletionDenied, NotVerifiedReason, StoreError,
-    StoredStatus,
+    BlockKind, CancelToken, CommitOutcome, ContentHash, DedupeScope, DeletionDenied,
+    NotVerifiedReason, StoreError, StoredStatus,
 };
 
 /// A path without the verbatim prefix, for handing to `cmd`.
@@ -25,7 +25,11 @@ fn link_dir(link: &Path, target: &Path) {
         .args(["/C", "mklink", "/J", &plain(link), &plain(target)])
         .output()
         .expect("cmd is available");
-    assert!(out.status.success(), "mklink /J failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(is_link(&std::fs::symlink_metadata(link).unwrap()));
 }
 
@@ -47,8 +51,10 @@ fn link_file(link: &Path, target: &Path) -> bool {
 }
 
 fn outside_listing(w: &World) -> Vec<String> {
-    let mut names: Vec<String> =
-        std::fs::read_dir(&w.outside).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let mut names: Vec<String> = std::fs::read_dir(&w.outside)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
     names.sort();
     names
 }
@@ -58,7 +64,10 @@ fn expect_reparse(result: Result<kiwi_store::CommitReceipt, StoreError>, ends_wi
         Err(StoreError::ReparsePoint { path }) => {
             // Compared without regard to case: the error names the path as it was asked for.
             let got = plain(&path).replace('\\', "/").to_lowercase();
-            assert!(got.ends_with(&ends_with.to_lowercase()), "{path:?} should end with {ends_with}");
+            assert!(
+                got.ends_with(&ends_with.to_lowercase()),
+                "{path:?} should end with {ends_with}"
+            );
         }
         other => panic!("expected ReparsePoint, got {:?}", other.map(|r| r.rel_path)),
     }
@@ -69,8 +78,14 @@ fn a_junction_in_place_of_the_device_folder_is_refused() {
     let w = World::new("device-folder");
     let store = w.open();
     link_dir(&w.path("Pixel 8"), &w.outside);
-    expect_reparse(try_put(&store, &phone(), "DCIM/a.jpg", b"photo"), "/root/Pixel 8");
-    expect_reparse(try_put(&store, &phone(), "a.jpg", b"photo"), "/root/Pixel 8");
+    expect_reparse(
+        try_put(&store, &phone(), "DCIM/a.jpg", b"photo"),
+        "/root/Pixel 8",
+    );
+    expect_reparse(
+        try_put(&store, &phone(), "a.jpg", b"photo"),
+        "/root/Pixel 8",
+    );
     // Nothing was written through the link: no directory, no temp file, no photo.
     assert!(outside_listing(&w).is_empty(), "{:?}", outside_listing(&w));
     assert_eq!(store.stats().unwrap().files_committed, 0);
@@ -82,14 +97,29 @@ fn a_junction_deeper_in_the_path_is_refused() {
     let store = w.open();
     std::fs::create_dir_all(w.path("Pixel 8/DCIM")).unwrap();
     link_dir(&w.path("Pixel 8/DCIM/Camera"), &w.outside);
-    expect_reparse(try_put(&store, &phone(), "DCIM/Camera/a.jpg", b"photo"), "/Pixel 8/DCIM/Camera");
-    expect_reparse(try_put(&store, &phone(), "DCIM/Camera/Sub/Dir/a.jpg", b"photo"), "/Pixel 8/DCIM/Camera");
+    expect_reparse(
+        try_put(&store, &phone(), "DCIM/Camera/a.jpg", b"photo"),
+        "/Pixel 8/DCIM/Camera",
+    );
+    expect_reparse(
+        try_put(&store, &phone(), "DCIM/Camera/Sub/Dir/a.jpg", b"photo"),
+        "/Pixel 8/DCIM/Camera",
+    );
     // The name differs in case only: still the junction.
-    expect_reparse(try_put(&store, &phone(), "dcim/CAMERA/a.jpg", b"photo"), "/Camera");
+    expect_reparse(
+        try_put(&store, &phone(), "dcim/CAMERA/a.jpg", b"photo"),
+        "/Camera",
+    );
     assert!(outside_listing(&w).is_empty());
     // Paths that do not go through it are unaffected.
-    assert_eq!(put(&store, "DCIM/Other/a.jpg", b"photo").rel_path, "Pixel 8/DCIM/Other/a.jpg");
-    assert_eq!(put(&store, "DCIM/b.jpg", b"photo2").rel_path, "Pixel 8/DCIM/b.jpg");
+    assert_eq!(
+        put(&store, "DCIM/Other/a.jpg", b"photo").rel_path,
+        "Pixel 8/DCIM/Other/a.jpg"
+    );
+    assert_eq!(
+        put(&store, "DCIM/b.jpg", b"photo2").rel_path,
+        "Pixel 8/DCIM/b.jpg"
+    );
 }
 
 #[test]
@@ -99,8 +129,14 @@ fn a_junction_that_stays_inside_the_root_is_refused_too() {
     let store = w.open();
     std::fs::create_dir_all(w.path("Pixel 8/Real")).unwrap();
     link_dir(&w.path("Pixel 8/Alias"), &w.path("Pixel 8/Real"));
-    expect_reparse(try_put(&store, &phone(), "Alias/a.jpg", b"photo"), "/Pixel 8/Alias");
-    assert!(std::fs::read_dir(w.path("Pixel 8/Real")).unwrap().next().is_none());
+    expect_reparse(
+        try_put(&store, &phone(), "Alias/a.jpg", b"photo"),
+        "/Pixel 8/Alias",
+    );
+    assert!(std::fs::read_dir(w.path("Pixel 8/Real"))
+        .unwrap()
+        .next()
+        .is_none());
 }
 
 #[test]
@@ -125,36 +161,97 @@ fn a_directory_swapped_for_a_junction_after_the_commit_fails_every_check() {
 
     match store.is_safely_stored(&hash).unwrap() {
         StoredStatus::NotVerified(NotVerifiedReason::ReparsePoint(at)) => {
-            assert!(plain(&at).replace('\\', "/").ends_with("/Pixel 8/DCIM"), "{at:?}");
+            assert!(
+                plain(&at).replace('\\', "/").ends_with("/Pixel 8/DCIM"),
+                "{at:?}"
+            );
         }
         other => panic!("unexpected: {other:?}"),
     }
-    assert!(store.find_duplicate(&hash, DedupeScope::AnyDevice).unwrap().is_none());
-    let block = store.final_move_block().unwrap().expect("a junction on the way to a stored file blocks final move");
+    assert!(store
+        .find_duplicate(&hash, DedupeScope::AnyDevice)
+        .unwrap()
+        .is_none());
+    let block = store
+        .final_move_block()
+        .unwrap()
+        .expect("a junction on the way to a stored file blocks final move");
     assert_eq!(block.kind, BlockKind::IntegrityProblems);
     assert!(block.reason.contains("junction"), "{}", block.reason);
-    assert!(matches!(store.verify_for_deletion(&hash, 1), Err(DeletionDenied::Blocked(_))));
+    assert!(matches!(
+        store.verify_for_deletion(&hash, 1),
+        Err(DeletionDenied::Blocked(_))
+    ));
     // Clearing the block does not make the junction acceptable; it blocks again.
     store.clear_final_move_block("test").unwrap();
     assert!(matches!(
         store.verify_for_deletion(&hash, 1),
-        Err(DeletionDenied::NotVerified(NotVerifiedReason::ReparsePoint(_)))
+        Err(DeletionDenied::NotVerified(
+            NotVerifiedReason::ReparsePoint(_)
+        ))
     ));
     assert!(store.final_move_block().unwrap().is_some());
     // New files cannot go through it either.
-    expect_reparse(try_put(&store, &phone(), "DCIM/b.jpg", b"x"), "/Pixel 8/DCIM");
+    expect_reparse(
+        try_put(&store, &phone(), "DCIM/b.jpg", b"x"),
+        "/Pixel 8/DCIM",
+    );
 
     // The scan reports it and does not follow it.
-    let scan = store.integrity_scan(&Default::default(), &CancelToken::new()).unwrap();
+    let scan = store
+        .integrity_scan(&Default::default(), &CancelToken::new())
+        .unwrap();
     assert_eq!(scan.suspicious, 1);
     assert_eq!(scan.reparse_points, 1);
-    assert_eq!(scan.unexpected, 0, "files behind the junction are not walked");
+    assert_eq!(
+        scan.unexpected, 0,
+        "files behind the junction are not walked"
+    );
 
     // Remove the junction and put the folder back: all is well again.
     remove_tree(&w.path("Pixel 8/DCIM"));
     std::fs::rename(w.outside.join("DCIM"), w.path("Pixel 8/DCIM")).unwrap();
-    store.clear_final_move_block("the junction was removed").unwrap();
+    store
+        .clear_final_move_block("the junction was removed")
+        .unwrap();
     assert!(store.verify_for_deletion(&hash, 1).is_ok());
+}
+
+#[test]
+fn a_directory_swapped_for_a_junction_between_the_check_and_the_create_is_caught() {
+    use kiwi_store::testing::{Action, Op, When};
+    let w = World::new("swap-race");
+    let store = w.open();
+    put(&store, "DCIM/first.jpg", b"first");
+    let dcim = w.path("Pixel 8/DCIM");
+    let moved = w.outside.join("DCIM");
+    // The directory has passed every check. In the instant before the temp
+    // file is created, it is moved away and a junction takes its place.
+    w.fs.reset_counters();
+    let (from, to) = (dcim.clone(), moved.clone());
+    w.fs.inject(
+        When::Nth(Op::CreateTemp, 0),
+        Action::before(move |_| {
+            std::fs::rename(&from, &to).unwrap();
+            link_dir(&from, &to);
+        }),
+    );
+    match try_put(&store, &phone(), "DCIM/second.jpg", b"second") {
+        Err(StoreError::PathMismatch { expected, resolved }) => {
+            assert!(expected.starts_with(&w.root), "{expected:?}");
+            assert!(resolved.starts_with(&w.outside), "{resolved:?}");
+        }
+        other => panic!("expected PathMismatch, got {:?}", other.map(|r| r.rel_path)),
+    }
+    // The temp file that was created through the junction is gone again, and
+    // nothing else was written there.
+    let behind: Vec<String> = std::fs::read_dir(&moved)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(behind, vec!["first.jpg"]);
+    assert_eq!(store.stats().unwrap().files_committed, 1);
+    remove_tree(&dcim);
 }
 
 #[test]
@@ -168,7 +265,11 @@ fn recovery_and_scan_never_enter_a_junction() {
     std::fs::create_dir_all(w.path("Pixel 8")).unwrap();
     link_dir(&w.path("Pixel 8/Linked Too"), &w.outside);
     // Real debris, inside the root.
-    std::fs::write(w.path("Pixel 8/.kiwi-tmp-1-2-0123456789abcdef.part"), b"ours").unwrap();
+    std::fs::write(
+        w.path("Pixel 8/.kiwi-tmp-1-2-0123456789abcdef.part"),
+        b"ours",
+    )
+    .unwrap();
 
     let store = w.open();
     let report = store.recovery_report().unwrap();
@@ -177,13 +278,25 @@ fn recovery_and_scan_never_enter_a_junction() {
     skipped.sort();
     assert_eq!(skipped, vec!["Linked", "Pixel 8/Linked Too"]);
     assert_eq!(std::fs::read(&bait).unwrap(), b"not ours to delete");
-    assert_eq!(outside_listing(&w), vec![".kiwi-tmp-1-1-0123456789abcdef.part", "precious.txt"]);
+    assert_eq!(
+        outside_listing(&w),
+        vec![".kiwi-tmp-1-1-0123456789abcdef.part", "precious.txt"]
+    );
 
     put(&store, "a.jpg", b"photo");
-    let scan = store.integrity_scan(&Default::default(), &CancelToken::new()).unwrap();
+    let scan = store
+        .integrity_scan(&Default::default(), &CancelToken::new())
+        .unwrap();
     assert_eq!(scan.reparse_points, 2);
-    assert_eq!(scan.unexpected, 0, "nothing behind a junction is listed: {:?}", scan.findings);
-    assert!(store.final_move_block().unwrap().is_none(), "a stray junction that no stored file depends on does not block");
+    assert_eq!(
+        scan.unexpected, 0,
+        "nothing behind a junction is listed: {:?}",
+        scan.findings
+    );
+    assert!(
+        store.final_move_block().unwrap().is_none(),
+        "a stray junction that no stored file depends on does not block"
+    );
     assert_eq!(std::fs::read(&bait).unwrap(), b"not ours to delete");
 }
 
@@ -197,7 +310,9 @@ fn the_root_itself_may_be_reached_through_a_junction() {
     cfg.root = via.clone();
     let store = kiwi_store::Store::open_with_seams(cfg, w.seams()).unwrap();
     assert_eq!(store.destination().root(), w.root.as_path());
-    store.register_device(&phone(), "Pixel 8", Default::default()).unwrap();
+    store
+        .register_device(&phone(), "Pixel 8", Default::default())
+        .unwrap();
     let receipt = put(&store, "a.jpg", b"photo");
     assert!(receipt.abs_path.starts_with(&w.root));
     assert_eq!(std::fs::read(w.path("Pixel 8/a.jpg")).unwrap(), b"photo");
@@ -220,7 +335,10 @@ fn file_links_are_never_read_adopted_or_deleted() {
     // A temp-named link to a file outside the root.
     let bait = w.outside.join("bait.bin");
     std::fs::write(&bait, b"bait").unwrap();
-    assert!(link_file(&w.path("Pixel 8/.kiwi-tmp-1-1-0123456789abcdef.part"), &bait));
+    assert!(link_file(
+        &w.path("Pixel 8/.kiwi-tmp-1-1-0123456789abcdef.part"),
+        &bait
+    ));
 
     let store = w.open();
     // Recovery does not delete through (or even delete) the link.
@@ -233,12 +351,19 @@ fn file_links_are_never_read_adopted_or_deleted() {
     let receipt = put(&store, "a.jpg", &bytes);
     assert_eq!(receipt.outcome, CommitOutcome::Stored);
     assert_eq!(receipt.rel_path, "Pixel 8/a (2).jpg");
-    assert!(is_link(&std::fs::symlink_metadata(w.path("Pixel 8/a.jpg")).unwrap()), "the link is untouched");
+    assert!(
+        is_link(&std::fs::symlink_metadata(w.path("Pixel 8/a.jpg")).unwrap()),
+        "the link is untouched"
+    );
 
     // A stored file replaced by a link to an identical copy does not verify.
     std::fs::remove_file(w.path("Pixel 8/a (2).jpg")).unwrap();
     assert!(link_file(&w.path("Pixel 8/a (2).jpg"), &elsewhere));
-    assert_eq!(std::fs::read(w.path("Pixel 8/a (2).jpg")).unwrap(), bytes, "through the link the content looks right");
+    assert_eq!(
+        std::fs::read(w.path("Pixel 8/a (2).jpg")).unwrap(),
+        bytes,
+        "through the link the content looks right"
+    );
     match store.is_safely_stored(&hash).unwrap() {
         StoredStatus::NotVerified(NotVerifiedReason::ReparsePoint(_)) => {}
         other => panic!("unexpected: {other:?}"),
@@ -275,7 +400,10 @@ fn a_short_name_alias_of_another_folder_is_refused() {
         }
         other => panic!("expected PathMismatch, got {:?}", other.map(|r| r.rel_path)),
     }
-    assert!(std::fs::read_dir(&long).unwrap().next().is_none(), "nothing was written through the alias");
+    assert!(
+        std::fs::read_dir(&long).unwrap().next().is_none(),
+        "nothing was written through the alias"
+    );
     // The real name works.
     assert_eq!(
         put(&store, "Long Folder Name For Alias/a.jpg", b"photo").rel_path,

@@ -79,6 +79,8 @@ pub enum Action {
     Before(Hook),
     /// For [`Op::ReadVerify`]: perform the read but report it as cached.
     ReportBuffered,
+    /// For [`Op::Resolve`]: claim the path resolves to this place instead.
+    ResolveTo(PathBuf),
 }
 
 impl Action {
@@ -118,7 +120,10 @@ impl FaultFs {
 
     /// Wraps another [`Fs`].
     pub fn wrap(inner: Arc<dyn Fs>) -> FaultFs {
-        FaultFs { inner, state: Arc::new(Mutex::new(State::default())) }
+        FaultFs {
+            inner,
+            state: Arc::new(Mutex::new(State::default())),
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -175,7 +180,9 @@ impl FaultFs {
     /// operation itself has to interpret.
     fn before(state: &Mutex<State>, op: Op, path: &Path) -> io::Result<Option<Action>> {
         match Self::intercept(state, op, path) {
-            Some(Action::Fail(kind)) => Err(io::Error::new(kind, format!("injected fault at {op:?}"))),
+            Some(Action::Fail(kind)) => {
+                Err(io::Error::new(kind, format!("injected fault at {op:?}")))
+            }
             Some(Action::Before(hook)) => {
                 hook(path);
                 Ok(None)
@@ -230,8 +237,10 @@ impl Fs for FaultFs {
     }
 
     fn resolve(&self, path: &Path) -> io::Result<PathBuf> {
-        Self::before(&self.state, Op::Resolve, path)?;
-        self.inner.resolve(path)
+        match Self::before(&self.state, Op::Resolve, path)? {
+            Some(Action::ResolveTo(elsewhere)) => Ok(elsewhere),
+            _ => self.inner.resolve(path),
+        }
     }
 
     fn create_dir(&self, path: &Path) -> io::Result<()> {
@@ -242,10 +251,18 @@ impl Fs for FaultFs {
     fn create_temp(&self, path: &Path) -> io::Result<Box<dyn TempFile>> {
         Self::before(&self.state, Op::CreateTemp, path)?;
         let inner = self.inner.create_temp(path)?;
-        Ok(Box::new(FaultTemp { inner, path: path.to_path_buf(), state: Arc::clone(&self.state) }))
+        Ok(Box::new(FaultTemp {
+            inner,
+            path: path.to_path_buf(),
+            state: Arc::clone(&self.state),
+        }))
     }
 
-    fn read_verify(&self, path: &Path, sink: &mut dyn FnMut(&[u8]) -> ControlFlow<()>) -> io::Result<VerifyRead> {
+    fn read_verify(
+        &self,
+        path: &Path,
+        sink: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> io::Result<VerifyRead> {
         let action = Self::before(&self.state, Op::ReadVerify, path)?;
         let mut read = self.inner.read_verify(path, sink)?;
         if matches!(action, Some(Action::ReportBuffered)) {

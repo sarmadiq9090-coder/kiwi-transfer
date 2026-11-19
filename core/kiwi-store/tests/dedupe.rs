@@ -7,7 +7,10 @@ use std::io::ErrorKind;
 
 use common::*;
 use kiwi_store::testing::{Action, Op, When};
-use kiwi_store::{BlockKind, CommitOutcome, ContentHash, DedupeScope, DeviceLimits, NotVerifiedReason, StoredStatus};
+use kiwi_store::{
+    BlockKind, CommitOutcome, ContentHash, DedupeScope, DeviceLimits, NotVerifiedReason,
+    StoredStatus,
+};
 
 const STORED: &str = "Pixel 8/DCIM/a.jpg";
 
@@ -26,8 +29,15 @@ fn a_hit_is_confirmed_by_reading_the_file() {
     let receipt = put(&store, "DCIM/a.jpg", &bytes());
 
     w.fs.reset_counters();
-    let found = store.find_duplicate(&hash(), DedupeScope::Device(&phone())).unwrap().expect("a duplicate");
-    assert_eq!(w.fs.count(Op::ReadVerify), 1, "the file itself must be read, not just the ledger");
+    let found = store
+        .find_duplicate(&hash(), DedupeScope::Device(&phone()))
+        .unwrap()
+        .expect("a duplicate");
+    assert_eq!(
+        w.fs.count(Op::ReadVerify),
+        1,
+        "the file itself must be read, not just the ledger"
+    );
     assert_eq!(found.file_id, receipt.file_id);
     assert_eq!(found.rel_path, STORED);
     assert_eq!(found.abs_path, receipt.abs_path);
@@ -37,9 +47,17 @@ fn a_hit_is_confirmed_by_reading_the_file() {
         assert!(found.read_unbuffered);
     }
     // Content the store has never seen.
-    assert!(store.find_duplicate(&ContentHash::of_bytes(b"new"), DedupeScope::AnyDevice).unwrap().is_none());
-    // The hit is on record.
-    assert!(store.events_after(0, 1_000).unwrap().iter().any(|e| e.kind == "dedupe_hit" && e.file_id == Some(receipt.file_id)));
+    assert!(store
+        .find_duplicate(&ContentHash::of_bytes(b"new"), DedupeScope::AnyDevice)
+        .unwrap()
+        .is_none());
+    // A hit changes nothing in the ledger: looking is not writing.
+    let events_before = store.stats().unwrap().events;
+    store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.stats().unwrap().events, events_before);
 }
 
 #[test]
@@ -50,9 +68,14 @@ fn a_silently_modified_file_is_not_a_duplicate() {
     // Same size, same modification time, one bit different.
     corrupt_silently(&w.path(STORED));
 
-    assert!(store.find_duplicate(&hash(), DedupeScope::Device(&phone())).unwrap().is_none());
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::Device(&phone()))
+        .unwrap()
+        .is_none());
     match store.is_safely_stored(&hash()).unwrap() {
-        StoredStatus::NotVerified(NotVerifiedReason::Changed(how)) => assert!(how.contains("hashes to"), "{how}"),
+        StoredStatus::NotVerified(NotVerifiedReason::Changed(how)) => {
+            assert!(how.contains("hashes to"), "{how}")
+        }
         other => panic!("unexpected: {other:?}"),
     }
     // The damage is recorded and final move is blocked.
@@ -71,7 +94,10 @@ fn a_silently_modified_file_is_not_a_duplicate() {
     assert_eq!(receipt.outcome, CommitOutcome::Stored);
     assert_eq!(receipt.rel_path, "Pixel 8/DCIM/a (2).jpg");
     assert_eq!(std::fs::read(w.path(STORED)).unwrap(), damaged);
-    let found = store.find_duplicate(&hash(), DedupeScope::Device(&phone())).unwrap().unwrap();
+    let found = store
+        .find_duplicate(&hash(), DedupeScope::Device(&phone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(found.rel_path, "Pixel 8/DCIM/a (2).jpg");
 }
 
@@ -82,25 +108,47 @@ fn a_deleted_or_truncated_file_is_not_a_duplicate() {
     put(&store, "DCIM/a.jpg", &bytes());
 
     std::fs::write(w.path(STORED), &bytes()[..119_999]).unwrap();
-    assert!(store.find_duplicate(&hash(), DedupeScope::AnyDevice).unwrap().is_none());
-    assert!(matches!(store.is_safely_stored(&hash()).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Changed(_))));
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        store.is_safely_stored(&hash()).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Changed(_))
+    ));
 
     std::fs::remove_file(w.path(STORED)).unwrap();
-    assert!(store.find_duplicate(&hash(), DedupeScope::AnyDevice).unwrap().is_none());
-    assert!(matches!(store.is_safely_stored(&hash()).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Missing)));
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        store.is_safely_stored(&hash()).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Missing)
+    ));
     assert_eq!(store.stats().unwrap().files_missing, 1);
 
     // The whole folder is gone.
     std::fs::remove_dir_all(w.path("Pixel 8")).unwrap();
-    assert!(matches!(store.is_safely_stored(&hash()).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Missing)));
+    assert!(matches!(
+        store.is_safely_stored(&hash()).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Missing)
+    ));
 
     // The user puts the file back: it is a duplicate again, and the ledger knows.
     std::fs::create_dir_all(w.path("Pixel 8/DCIM")).unwrap();
     std::fs::write(w.path(STORED), bytes()).unwrap();
-    assert!(store.find_duplicate(&hash(), DedupeScope::AnyDevice).unwrap().is_some());
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .is_some());
     let stats = store.stats().unwrap();
     assert_eq!((stats.files_committed, stats.files_missing), (1, 0));
-    assert!(store.events_after(0, 1_000).unwrap().iter().any(|e| e.kind == "file_restored"));
+    assert!(store
+        .events_after(0, 1_000)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == "file_restored"));
 }
 
 #[test]
@@ -108,14 +156,26 @@ fn an_unreadable_file_is_not_a_duplicate_but_is_not_condemned() {
     let w = World::new("unreadable");
     let store = w.open();
     put(&store, "DCIM/a.jpg", &bytes());
-    w.fs.inject(When::Every(Op::ReadVerify), Action::Fail(ErrorKind::PermissionDenied));
-    assert!(store.find_duplicate(&hash(), DedupeScope::AnyDevice).unwrap().is_none());
-    assert!(matches!(store.is_safely_stored(&hash()).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Unreadable(_))));
+    w.fs.inject(
+        When::Every(Op::ReadVerify),
+        Action::Fail(ErrorKind::PermissionDenied),
+    );
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        store.is_safely_stored(&hash()).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Unreadable(_))
+    ));
     w.fs.clear_rules();
     // "Could not read" is not "damaged".
     assert_eq!(store.stats().unwrap().files_committed, 1);
     assert!(store.final_move_block().unwrap().is_none());
-    assert!(store.find_duplicate(&hash(), DedupeScope::AnyDevice).unwrap().is_some());
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -126,8 +186,14 @@ fn a_file_held_open_for_writing_by_another_program_is_not_verified() {
     let w = World::new("in-use");
     let store = w.open();
     put(&store, "DCIM/a.jpg", &bytes());
-    let editor = std::fs::OpenOptions::new().write(true).open(w.path(STORED)).unwrap();
-    assert!(matches!(store.is_safely_stored(&hash()).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Unreadable(_))));
+    let editor = std::fs::OpenOptions::new()
+        .write(true)
+        .open(w.path(STORED))
+        .unwrap();
+    assert!(matches!(
+        store.is_safely_stored(&hash()).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Unreadable(_))
+    ));
     drop(editor);
     assert!(store.is_safely_stored(&hash()).unwrap().is_verified());
 }
@@ -136,18 +202,32 @@ fn a_file_held_open_for_writing_by_another_program_is_not_verified() {
 fn scope_limits_which_devices_files_count() {
     let w = World::new("scope");
     let store = w.open();
-    store.register_device(&tablet(), "Tab S9", DeviceLimits::default()).unwrap();
+    store
+        .register_device(&tablet(), "Tab S9", DeviceLimits::default())
+        .unwrap();
     put(&store, "DCIM/a.jpg", &bytes());
 
-    assert!(store.find_duplicate(&hash(), DedupeScope::Device(&phone())).unwrap().is_some());
-    assert!(store.find_duplicate(&hash(), DedupeScope::Device(&tablet())).unwrap().is_none());
-    let any = store.find_duplicate(&hash(), DedupeScope::AnyDevice).unwrap().unwrap();
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::Device(&phone()))
+        .unwrap()
+        .is_some());
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::Device(&tablet()))
+        .unwrap()
+        .is_none());
+    let any = store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .unwrap();
     assert_eq!(any.device, "phone-1");
 
     // The tablet stores its own copy in its own folder.
     let receipt = try_put(&store, &tablet(), "DCIM/a.jpg", &bytes()).unwrap();
     assert_eq!(receipt.rel_path, "Tab S9/DCIM/a.jpg");
-    let own = store.find_duplicate(&hash(), DedupeScope::Device(&tablet())).unwrap().unwrap();
+    let own = store
+        .find_duplicate(&hash(), DedupeScope::Device(&tablet()))
+        .unwrap()
+        .unwrap();
     assert_eq!(own.rel_path, "Tab S9/DCIM/a.jpg");
     // Per-device accounting.
     assert_eq!(store.device(&phone()).unwrap().unwrap().used_files, 1);
@@ -161,7 +241,10 @@ fn when_one_copy_is_damaged_another_intact_copy_is_found() {
     put(&store, "DCIM/a.jpg", &bytes());
     put(&store, "Backup/b.jpg", &bytes());
     corrupt_silently(&w.path(STORED));
-    let found = store.find_duplicate(&hash(), DedupeScope::AnyDevice).unwrap().unwrap();
+    let found = store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .unwrap()
+        .unwrap();
     assert_eq!(found.rel_path, "Pixel 8/Backup/b.jpg");
     // The damaged copy was still noticed.
     assert_eq!(store.stats().unwrap().files_changed, 1);
@@ -179,10 +262,13 @@ fn a_record_whose_path_is_not_clean_is_never_followed() {
     std::fs::write(w.outside.join("a.jpg"), bytes()).unwrap();
     {
         let conn = rusqlite::Connection::open(w.ledger_file()).unwrap();
-        conn.execute("UPDATE files SET rel_path = '../outside/a.jpg'", []).unwrap();
+        conn.execute("UPDATE files SET rel_path = '../outside/a.jpg'", [])
+            .unwrap();
     }
     assert!(store.is_safely_stored(&hash()).is_err());
-    assert!(store.find_duplicate(&hash(), DedupeScope::AnyDevice).is_err());
+    assert!(store
+        .find_duplicate(&hash(), DedupeScope::AnyDevice)
+        .is_err());
 }
 
 #[test]

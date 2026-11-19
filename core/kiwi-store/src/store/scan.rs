@@ -255,12 +255,16 @@ impl MissingIndex {
     /// an extension appended (`a.jpg` -> `a.jpg.locked`) and an extension
     /// replaced (`a.jpg` -> `a.locked`).
     pub(crate) fn is_rename_suspect(&self, dir_key: &str, name: &str) -> bool {
-        let Some(missing) = self.by_dir.get(dir_key) else { return false };
+        let Some(missing) = self.by_dir.get(dir_key) else {
+            return false;
+        };
         let name_key = collision_key(name);
         let stem = stem_of(&name_key);
         missing.iter().any(|(missing_name, missing_stem)| {
             name_key != *missing_name
-                && (name_key.strip_prefix(missing_name.as_str()).is_some_and(|rest| rest.starts_with('.'))
+                && (name_key
+                    .strip_prefix(missing_name.as_str())
+                    .is_some_and(|rest| rest.starts_with('.'))
                     || (stem == missing_stem && stem != name_key))
         })
     }
@@ -295,11 +299,16 @@ impl ChangeEvidence {
         }
         if policy.mass_change_min_files > 0
             && self.missing >= policy.mass_change_min_files
-            && self.missing.saturating_mul(100) >= u64::from(policy.mass_missing_min_percent).saturating_mul(self.checked)
+            && self.missing.saturating_mul(100)
+                >= u64::from(policy.mass_missing_min_percent).saturating_mul(self.checked)
         {
-            return Some(format!("{} of {} stored files disappeared in one check", self.missing, self.checked));
+            return Some(format!(
+                "{} of {} stored files disappeared in one check",
+                self.missing, self.checked
+            ));
         }
-        if policy.burst_min_files > 0 && self.changed_mtimes.len() as u64 >= policy.burst_min_files {
+        if policy.burst_min_files > 0 && self.changed_mtimes.len() as u64 >= policy.burst_min_files
+        {
             let mut times = self.changed_mtimes.clone();
             times.sort_unstable();
             let k = policy.burst_min_files as usize;
@@ -323,7 +332,12 @@ struct Findings {
 impl Findings {
     fn push(&mut self, kind: FindingKind, rel_path: &str, detail: impl Into<String>, new: bool) {
         if self.list.len() < MAX_LISTED_FINDINGS {
-            self.list.push(ScanFinding { kind, rel_path: rel_path.to_owned(), detail: detail.into(), new });
+            self.list.push(ScanFinding {
+                kind,
+                rel_path: rel_path.to_owned(),
+                detail: detail.into(),
+                new,
+            });
         } else {
             self.truncated = true;
         }
@@ -341,25 +355,46 @@ impl Store {
     /// Findings take effect immediately, not at the end: a changed or missing
     /// file is marked in the ledger and blocks final move as soon as it is
     /// seen.
-    pub fn integrity_scan(&self, opts: &ScanOptions, cancel: &CancelToken) -> Result<ScanReport, StoreError> {
+    pub fn integrity_scan(
+        &self,
+        opts: &ScanOptions,
+        cancel: &CancelToken,
+    ) -> Result<ScanReport, StoreError> {
         let inner = &self.inner;
         let ledger = &inner.ledger;
 
-        let saved = if opts.restart { None } else { ledger.scan_state()? };
+        let saved = if opts.restart {
+            None
+        } else {
+            ledger.scan_state()?
+        };
         let resumed = saved.is_some();
         let mut state = match saved {
             Some(s) => s,
             None => {
-                let started_seq = ledger.log_event("scan_started", None, None, None, inner.now())?;
-                let fresh = ScanState { started_seq, upper_id: ledger.max_file_id()?, ..ScanState::default() };
+                let started_seq =
+                    ledger.log_event("scan_started", None, None, None, inner.now())?;
+                let fresh = ScanState {
+                    started_seq,
+                    upper_id: ledger.max_file_id()?,
+                    ..ScanState::default()
+                };
                 ledger.save_scan_state(&fresh)?;
                 fresh
             }
         };
 
-        let mut findings = Findings { list: Vec::new(), truncated: false };
+        let mut findings = Findings {
+            list: Vec::new(),
+            truncated: false,
+        };
         let mut evidence = ChangeEvidence::default();
-        let mut throttle = Throttle { rate: opts.max_bytes_per_sec, started: Instant::now(), bytes: 0, cancel };
+        let mut throttle = Throttle {
+            rate: opts.max_bytes_per_sec,
+            started: Instant::now(),
+            bytes: 0,
+            cancel,
+        };
         let mut this_call = 0u64;
         let mut stopped = false;
 
@@ -421,7 +456,12 @@ impl Store {
                     }
                     Probe::Reparse(at) => {
                         state.suspicious += 1;
-                        findings.push(FindingKind::ReparsePoint, path, at.display().to_string(), true);
+                        findings.push(
+                            FindingKind::ReparsePoint,
+                            path,
+                            at.display().to_string(),
+                            true,
+                        );
                     }
                     Probe::NotLocal => {
                         state.suspicious += 1;
@@ -449,7 +489,11 @@ impl Store {
                     if is_temp_name(&entry.name) || ledger_error.is_some() {
                         return;
                     }
-                    let rel = if dir_rel.is_empty() { entry.name.clone() } else { format!("{}/{}", dir_rel.join("/"), entry.name) };
+                    let rel = if dir_rel.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{}/{}", dir_rel.join("/"), entry.name)
+                    };
                     match ledger.path_key_exists(&path_key(&rel)) {
                         Ok(true) => {}
                         Ok(false) => {
@@ -558,8 +602,20 @@ impl Inner {
 mod tests {
     use super::*;
 
-    fn evidence(checked: u64, missing: u64, changed: u64, suspects: u64, mtimes: &[i64]) -> ChangeEvidence {
-        ChangeEvidence { checked, missing, changed, rename_suspects: suspects, changed_mtimes: mtimes.to_vec() }
+    fn evidence(
+        checked: u64,
+        missing: u64,
+        changed: u64,
+        suspects: u64,
+        mtimes: &[i64],
+    ) -> ChangeEvidence {
+        ChangeEvidence {
+            checked,
+            missing,
+            changed,
+            rename_suspects: suspects,
+            changed_mtimes: mtimes.to_vec(),
+        }
     }
 
     #[test]
@@ -586,19 +642,39 @@ mod tests {
     fn bursts_of_changes_in_a_short_span() {
         let p = ScanPolicy::default();
         // Five files changed within ten minutes.
-        assert!(evidence(1_000, 0, 5, 0, &[1_000, 1_100, 1_200, 1_300, 1_600]).mass_change(&p).is_some());
+        assert!(
+            evidence(1_000, 0, 5, 0, &[1_000, 1_100, 1_200, 1_300, 1_600])
+                .mass_change(&p)
+                .is_some()
+        );
         // Five files changed over five days.
-        assert!(evidence(1_000, 0, 5, 0, &[0, 86_400, 172_800, 259_200, 345_600]).mass_change(&p).is_none());
+        assert!(
+            evidence(1_000, 0, 5, 0, &[0, 86_400, 172_800, 259_200, 345_600])
+                .mass_change(&p)
+                .is_none()
+        );
         // Four in a burst is below the threshold.
-        assert!(evidence(1_000, 0, 4, 0, &[1_000, 1_001, 1_002, 1_003]).mass_change(&p).is_none());
+        assert!(evidence(1_000, 0, 4, 0, &[1_000, 1_001, 1_002, 1_003])
+            .mass_change(&p)
+            .is_none());
         // Order does not matter, and a burst hidden among older changes is found.
-        assert!(evidence(1_000, 0, 7, 0, &[9_000_000, 50, 10, 40, 5_000_000, 20, 30]).mass_change(&p).is_some());
+        assert!(
+            evidence(1_000, 0, 7, 0, &[9_000_000, 50, 10, 40, 5_000_000, 20, 30])
+                .mass_change(&p)
+                .is_some()
+        );
     }
 
     #[test]
     fn policy_can_switch_heuristics_off() {
-        let p = ScanPolicy { mass_change_min_files: 0, burst_min_files: 0, ..ScanPolicy::default() };
-        assert!(evidence(10, 10, 10, 10, &[1, 2, 3, 4, 5, 6]).mass_change(&p).is_none());
+        let p = ScanPolicy {
+            mass_change_min_files: 0,
+            burst_min_files: 0,
+            ..ScanPolicy::default()
+        };
+        assert!(evidence(10, 10, 10, 10, &[1, 2, 3, 4, 5, 6])
+            .mass_change(&p)
+            .is_none());
     }
 
     #[test]
@@ -631,22 +707,41 @@ mod tests {
     #[test]
     fn throttle_limits_the_rate_and_obeys_cancel() {
         let cancel = CancelToken::new();
-        let mut t = Throttle { rate: Some(1_000_000), started: Instant::now(), bytes: 0, cancel: &cancel };
+        let mut t = Throttle {
+            rate: Some(1_000_000),
+            started: Instant::now(),
+            bytes: 0,
+            cancel: &cancel,
+        };
         let begin = Instant::now();
         for _ in 0..4 {
             assert!(t.tick(50_000).is_continue());
         }
         // 200 kB at 1 MB/s takes at least 0.2 s.
-        assert!(begin.elapsed() >= Duration::from_millis(190), "{:?}", begin.elapsed());
+        assert!(
+            begin.elapsed() >= Duration::from_millis(190),
+            "{:?}",
+            begin.elapsed()
+        );
 
         // Unlimited: no waiting.
-        let mut t = Throttle { rate: None, started: Instant::now(), bytes: 0, cancel: &cancel };
+        let mut t = Throttle {
+            rate: None,
+            started: Instant::now(),
+            bytes: 0,
+            cancel: &cancel,
+        };
         let begin = Instant::now();
         assert!(t.tick(usize::MAX / 2).is_continue());
         assert!(begin.elapsed() < Duration::from_millis(100));
 
         // A cancelled token stops a wait that would take an hour.
-        let mut t = Throttle { rate: Some(1), started: Instant::now(), bytes: 0, cancel: &cancel };
+        let mut t = Throttle {
+            rate: Some(1),
+            started: Instant::now(),
+            bytes: 0,
+            cancel: &cancel,
+        };
         let canceller = cancel.clone();
         let handle = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));

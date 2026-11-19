@@ -8,6 +8,10 @@
 //!   it; elsewhere the read is an ordinary cached read and is reported as such;
 //! * mount points below the root are not detected the way reparse points are.
 
+// The libc field types (`f_flag`, `f_type`, `f_bavail`, ...) differ between
+// Unix flavours; a cast that is needed on one is a no-op on another.
+#![allow(clippy::unnecessary_cast)]
+
 use std::ffi::CString;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io;
@@ -46,7 +50,9 @@ pub(crate) fn probe_volume(path: &Path) -> io::Result<VolumeInfo> {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn filesystem_name(path: &Path) -> String {
-    let Ok(c) = c_path(path) else { return "unknown".to_owned() };
+    let Ok(c) = c_path(path) else {
+        return "unknown".to_owned();
+    };
     // SAFETY: `c` is NUL-terminated and `st` is a valid out-pointer.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
@@ -100,7 +106,11 @@ pub(crate) fn is_offline(_meta: &Metadata) -> bool {
 
 /// Creates a new file for writing; fails if the name exists.
 pub(crate) fn create_temp(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(path)
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
 }
 
 /// Opens a file for a verification read. Returns the handle and whether the
@@ -110,14 +120,21 @@ pub(crate) fn open_for_verify(path: &Path) -> io::Result<(File, bool)> {
     let (file, unbuffered) = open_direct(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
     }
     Ok((file, unbuffered))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn open_direct(path: &Path) -> io::Result<(File, bool)> {
-    match OpenOptions::new().read(true).custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW).open(path) {
+    match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW)
+        .open(path)
+    {
         Ok(f) => Ok((f, true)),
         Err(e) if e.raw_os_error() == Some(libc::EINVAL) => open_buffered(path).map(|f| (f, false)),
         Err(e) => Err(e),
@@ -131,7 +148,10 @@ fn open_direct(path: &Path) -> io::Result<(File, bool)> {
 
 /// Opens a file for an ordinary (cached) verification read.
 pub(crate) fn open_buffered(path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         // SAFETY: the descriptor is open. The call is advisory; its result is irrelevant.
@@ -195,12 +215,20 @@ pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
 
 /// Takes the store's exclusive lock. `WouldBlock` means another instance holds it.
 pub(crate) fn acquire_lock(path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
     // SAFETY: the descriptor is open.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let err = io::Error::last_os_error();
         return Err(if err.kind() == io::ErrorKind::WouldBlock {
-            io::Error::new(io::ErrorKind::WouldBlock, "the lock is held by another instance")
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the lock is held by another instance",
+            )
         } else {
             err
         });

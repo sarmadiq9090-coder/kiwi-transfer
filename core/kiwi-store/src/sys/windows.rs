@@ -9,11 +9,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
-    MoveFileExW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE,
-    FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_NO_BUFFERING, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
+    GetVolumePathNameW, MoveFileExW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN,
+    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_NO_BUFFERING,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -79,7 +80,10 @@ struct StorageHotplugInfo {
 fn wide(path: &Path) -> io::Result<Vec<u16>> {
     let mut w: Vec<u16> = path.as_os_str().encode_wide().collect();
     if w.contains(&0) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL character"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains a NUL character",
+        ));
     }
     w.push(0);
     Ok(w)
@@ -106,7 +110,9 @@ pub(crate) fn probe_volume(path: &Path) -> io::Result<VolumeInfo> {
     let is_unc = {
         let upper = volume_root.to_ascii_uppercase();
         upper.starts_with(r"\\?\UNC\")
-            || (upper.starts_with(r"\\") && !upper.starts_with(r"\\?\") && !upper.starts_with(r"\\.\"))
+            || (upper.starts_with(r"\\")
+                && !upper.starts_with(r"\\?\")
+                && !upper.starts_with(r"\\.\"))
     };
     let drive = if is_unc {
         DriveKind::Remote
@@ -177,18 +183,32 @@ pub(crate) fn probe_volume(path: &Path) -> io::Result<VolumeInfo> {
 fn open_volume_device(volume_root: &[u16]) -> io::Result<File> {
     let mut guid = [0u16; 64];
     // SAFETY: `volume_root` is NUL-terminated and `guid` is writable for its length.
-    if unsafe { GetVolumeNameForVolumeMountPointW(volume_root.as_ptr(), guid.as_mut_ptr(), guid.len() as u32) } == 0 {
+    if unsafe {
+        GetVolumeNameForVolumeMountPointW(
+            volume_root.as_ptr(),
+            guid.as_mut_ptr(),
+            guid.len() as u32,
+        )
+    } == 0
+    {
         return Err(io::Error::last_os_error());
     }
     // `\\?\Volume{GUID}\` names the root directory; without the trailing
     // backslash it names the volume device.
     let name = from_wide(&guid);
     let device = name.trim_end_matches('\\');
-    OpenOptions::new().access_mode(0).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).open(device)
+    OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(device)
 }
 
 fn query_device_descriptor(device: &File) -> Option<StorageDeviceDescriptor> {
-    let query = StoragePropertyQuery { property_id: 0, query_type: 0, additional_parameters: [0; 4] };
+    let query = StoragePropertyQuery {
+        property_id: 0,
+        query_type: 0,
+        additional_parameters: [0; 4],
+    };
     // The descriptor is followed by variable-length strings; a larger buffer
     // lets drivers that insist on returning them succeed.
     #[repr(C, align(8))]
@@ -196,7 +216,10 @@ fn query_device_descriptor(device: &File) -> Option<StorageDeviceDescriptor> {
         head: StorageDeviceDescriptor,
         tail: [u8; 1024],
     }
-    let mut out = Out { head: StorageDeviceDescriptor::default(), tail: [0; 1024] };
+    let mut out = Out {
+        head: StorageDeviceDescriptor::default(),
+        tail: [0; 1024],
+    };
     let mut returned = 0u32;
     // SAFETY: the in/out buffers are valid for the stated sizes; the handle is open.
     let ok = unsafe {
@@ -265,7 +288,14 @@ pub(crate) fn free_space(dir: &Path) -> io::Result<u64> {
     let w = wide(dir)?;
     let mut available = 0u64;
     // SAFETY: `w` is NUL-terminated; the out-pointer is valid; the others may be null.
-    let ok = unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            w.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -282,7 +312,9 @@ pub(crate) fn is_reparse(meta: &Metadata) -> bool {
 /// silently fetch it from somewhere else, which proves nothing about the disk.
 pub(crate) fn is_offline(meta: &Metadata) -> bool {
     meta.file_attributes()
-        & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        & (FILE_ATTRIBUTE_OFFLINE
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
         != 0
 }
 
@@ -290,7 +322,11 @@ pub(crate) fn is_offline(meta: &Metadata) -> bool {
 pub(crate) fn create_temp(path: &Path) -> io::Result<File> {
     // Others may read (antivirus, indexer) but not write or delete while the
     // file is being received.
-    OpenOptions::new().write(true).create_new(true).share_mode(FILE_SHARE_READ).open(path)
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
 }
 
 /// Opens a file for a verification read that bypasses the operating system's
@@ -301,7 +337,9 @@ pub(crate) fn open_for_verify(path: &Path) -> io::Result<(File, bool)> {
         // A file system that does not implement unbuffered I/O. The read is
         // still performed, but it is reported as buffered, and nothing that
         // gates deletion accepts a buffered read.
-        Err(e) if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER) => open_buffered(path).map(|f| (f, false)),
+        Err(e) if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER) => {
+            open_buffered(path).map(|f| (f, false))
+        }
         Err(e) => Err(e),
     }
 }
@@ -322,10 +360,16 @@ fn open_checked(path: &Path, flags: u32) -> io::Result<File> {
         .open(path)?;
     let meta = file.metadata()?;
     if is_reparse(&meta) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the file is a reparse point"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the file is a reparse point",
+        ));
     }
     if !meta.is_file() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
     }
     Ok(file)
 }
@@ -350,7 +394,10 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         }
         let err = io::Error::last_os_error();
         // A scanner or indexer may briefly hold the freshly written file.
-        let transient = matches!(err.raw_os_error(), Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION));
+        let transient = matches!(
+            err.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+        );
         attempt += 1;
         if !transient || attempt >= 6 {
             return Err(err);
@@ -371,11 +418,19 @@ pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
 
 /// Takes the store's exclusive lock. `WouldBlock` means another instance holds it.
 pub(crate) fn acquire_lock(path: &Path) -> io::Result<File> {
-    match OpenOptions::new().read(true).write(true).create(true).truncate(false).share_mode(0).open(path) {
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(path)
+    {
         Ok(f) => Ok(f),
-        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
-            Err(io::Error::new(io::ErrorKind::WouldBlock, "the lock is held by another instance"))
-        }
+        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "the lock is held by another instance",
+        )),
         Err(e) => Err(e),
     }
 }

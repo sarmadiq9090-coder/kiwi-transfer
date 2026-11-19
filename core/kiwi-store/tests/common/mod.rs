@@ -11,8 +11,8 @@ use std::sync::Arc;
 use kiwi_store::destination::{BusKind, DriveKind};
 use kiwi_store::testing::{FaultFs, ManualClock};
 use kiwi_store::{
-    CommitReceipt, ContentHash, DeviceId, DeviceLimits, FileRequest, Seams, Store, StoreConfig, StoreError, VolumeInfo,
-    STORE_DIR, TEMP_PREFIX,
+    CommitReceipt, ContentHash, DeviceId, DeviceLimits, FileRequest, Seams, Store, StoreConfig,
+    StoreError, VolumeInfo, STORE_DIR, TEMP_PREFIX,
 };
 
 /// 2027-01-15T08:00:00Z, in milliseconds.
@@ -40,7 +40,9 @@ impl World {
         // KIWI_STORE_TEST_TMP moves the test worlds elsewhere (for example to
         // a volume with different properties); the default is Cargo's own
         // per-target temp directory.
-        let parent = std::env::var_os("KIWI_STORE_TEST_TMP").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
+        let parent = std::env::var_os("KIWI_STORE_TEST_TMP")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
         let base = parent.join(format!("{}-{name}", module_path!().replace("::", "-")));
         if base.exists() {
             remove_tree(&base);
@@ -71,7 +73,11 @@ impl World {
     }
 
     pub fn seams(&self) -> Seams {
-        Seams { fs: Some(Arc::new(self.fs.clone())), clock: Some(self.clock.clone()), volume: self.volume.clone() }
+        Seams {
+            fs: Some(Arc::new(self.fs.clone())),
+            clock: Some(self.clock.clone()),
+            volume: self.volume.clone(),
+        }
     }
 
     pub fn try_open(&self) -> Result<Store, StoreError> {
@@ -81,7 +87,9 @@ impl World {
     /// Opens the store (a new session) with the phone registered.
     pub fn open(&self) -> Store {
         let store = self.try_open().expect("the store should open");
-        store.register_device(&phone(), "Pixel 8", DeviceLimits::default()).unwrap();
+        store
+            .register_device(&phone(), "Pixel 8", DeviceLimits::default())
+            .unwrap();
         store
     }
 
@@ -105,7 +113,10 @@ impl World {
 
     /// Temp files anywhere under the root.
     pub fn temp_files(&self) -> Vec<String> {
-        self.files().into_iter().filter(|f| f.rsplit('/').next().unwrap().starts_with(TEMP_PREFIX)).collect()
+        self.files()
+            .into_iter()
+            .filter(|f| f.rsplit('/').next().unwrap().starts_with(TEMP_PREFIX))
+            .collect()
     }
 
     pub fn ledger_file(&self) -> PathBuf {
@@ -120,7 +131,11 @@ fn collect(dir: &Path, rel: String, out: &mut Vec<String>, top: bool) {
         if top && name == STORE_DIR {
             continue;
         }
-        let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+        let child = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
         let meta = std::fs::symlink_metadata(entry.path()).unwrap();
         if meta.is_dir() && !is_link(&meta) {
             collect(&entry.path(), child, out, false);
@@ -143,7 +158,9 @@ pub fn is_link(meta: &std::fs::Metadata) -> bool {
 
 /// Removes a test tree without following links out of it.
 pub fn remove_tree(path: &Path) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else { return };
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
     if is_link(&meta) {
         // Remove the link itself, never what it points to. A junction or
         // directory link goes with remove_dir, a file link with remove_file.
@@ -207,7 +224,12 @@ pub fn request<'a>(device: &'a DeviceId, name: &'a str, bytes: &[u8]) -> FileReq
 }
 
 /// Sends one whole file the way the transfer layer would.
-pub fn try_put(store: &Store, device: &DeviceId, name: &str, bytes: &[u8]) -> Result<CommitReceipt, StoreError> {
+pub fn try_put(
+    store: &Store,
+    device: &DeviceId,
+    name: &str,
+    bytes: &[u8],
+) -> Result<CommitReceipt, StoreError> {
     let mut incoming = store.begin_file(request(device, name, bytes))?;
     for chunk in bytes.chunks(64 * 1024) {
         incoming.write(chunk)?;

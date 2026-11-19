@@ -118,9 +118,17 @@ CREATE TABLE scan_state (
 );
 ";
 
-const EXPECTED_TABLES: &[&str] = &["meta", "sessions", "events", "devices", "files", "scan_state"];
+const EXPECTED_TABLES: &[&str] = &[
+    "meta",
+    "sessions",
+    "events",
+    "devices",
+    "files",
+    "scan_state",
+];
 
-const FILE_COLUMNS: &str = "id, device_id, rel_path, hash, size, mtime_unix_ns, source_name, state, \
+const FILE_COLUMNS: &str =
+    "id, device_id, rel_path, hash, size, mtime_unix_ns, source_name, state, \
      committed_seq, committed_session, committed_unix_ms, dir_synced, verified_unbuffered, \
      last_verified_seq, last_verified_session, row_check";
 
@@ -267,7 +275,10 @@ impl BlockKind {
     fn severity(self) -> u8 {
         match self {
             BlockKind::Manual => 1,
-            BlockKind::IntegrityProblems | BlockKind::LedgerReset | BlockKind::LedgerLost | BlockKind::MarkerMissing => 2,
+            BlockKind::IntegrityProblems
+            | BlockKind::LedgerReset
+            | BlockKind::LedgerLost
+            | BlockKind::MarkerMissing => 2,
             BlockKind::MassChange => 3,
         }
     }
@@ -397,23 +408,35 @@ impl Ledger {
 
         // The first statement that touches the file is where a file that is
         // not a database (garbled header) is reported.
-        let journal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).map_err(map)?;
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+            .map_err(map)?;
         if !journal.eq_ignore_ascii_case("wal") {
-            return Err(LedgerError::Database { message: format!("write-ahead logging is unavailable (journal mode {journal})") });
+            return Err(LedgerError::Database {
+                message: format!("write-ahead logging is unavailable (journal mode {journal})"),
+            });
         }
         conn.execute_batch(
             "PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA cell_size_check=ON;",
         )
         .map_err(map)?;
-        let synchronous: i64 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).map_err(map)?;
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .map_err(map)?;
         if synchronous != 2 {
-            return Err(LedgerError::Database { message: format!("synchronous=FULL was not applied (got {synchronous})") });
+            return Err(LedgerError::Database {
+                message: format!("synchronous=FULL was not applied (got {synchronous})"),
+            });
         }
 
         check_integrity(&conn, &path)?;
 
-        let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(map)?;
-        let application_id: i64 = conn.query_row("PRAGMA application_id", [], |r| r.get(0)).map_err(map)?;
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(map)?;
+        let application_id: i64 = conn
+            .query_row("PRAGMA application_id", [], |r| r.get(0))
+            .map_err(map)?;
         let tables: i64 = conn
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'", [], |r| {
                 r.get(0)
@@ -443,17 +466,26 @@ impl Ledger {
             }
             let tx = conn.transaction().map_err(map)?;
             tx.execute_batch(sql).map_err(map)?;
-            tx.execute_batch(&format!("PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {version};"))
-                .map_err(map)?;
+            tx.execute_batch(&format!(
+                "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {version};"
+            ))
+            .map_err(map)?;
             tx.commit().map_err(map)?;
         }
 
         for table in EXPECTED_TABLES {
             let present: i64 = conn
-                .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
                 .map_err(map)?;
             if present != 1 {
-                return Err(LedgerError::Corrupt { path, detail: format!("table {table} is missing") });
+                return Err(LedgerError::Corrupt {
+                    path,
+                    detail: format!("table {table} is missing"),
+                });
             }
         }
 
@@ -475,7 +507,10 @@ impl Ledger {
         debug_assert_eq!(self.session, 0, "a session is started once");
         let path = self.path.clone();
         let map = |e: rusqlite::Error| map_sqlite(&path, e);
-        let conn = self.conn.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tx = conn.transaction().map_err(map)?;
         let previous = match meta_get(&tx, "session_counter").map_err(map)? {
             None => 0,
@@ -486,7 +521,8 @@ impl Ledger {
         };
         let session = previous + 1;
         meta_set(&tx, "session_counter", &session.to_string()).map_err(map)?;
-        let seq = append_event(&tx, session, now_ms, "session_start", None, None, None).map_err(map)?;
+        let seq =
+            append_event(&tx, session, now_ms, "session_start", None, None, None).map_err(map)?;
         tx.execute(
             "INSERT INTO sessions(session, started_seq, started_unix_ms) VALUES (?1, ?2, ?3)",
             params![to_i64(session), to_i64(seq), now_ms],
@@ -526,7 +562,10 @@ impl Ledger {
                 continue;
             }
             let to = dir.join(format!("{LEDGER_FILE}{ext}{suffix}"));
-            std::fs::rename(&from, &to).map_err(|source| LedgerError::Io { path: from.clone(), source })?;
+            std::fs::rename(&from, &to).map_err(|source| LedgerError::Io {
+                path: from.clone(),
+                source,
+            })?;
             moved.push(to);
         }
         Ok(moved)
@@ -535,7 +574,9 @@ impl Ledger {
     fn lock(&self) -> MutexGuard<'_, Connection> {
         // A panic while holding the lock leaves the connection usable: every
         // change is inside a transaction that is rolled back on unwind.
-        self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn map(&self, e: rusqlite::Error) -> LedgerError {
@@ -543,7 +584,10 @@ impl Ledger {
     }
 
     fn corrupt(&self, detail: impl Into<String>) -> LedgerError {
-        LedgerError::Corrupt { path: self.path.clone(), detail: detail.into() }
+        LedgerError::Corrupt {
+            path: self.path.clone(),
+            detail: detail.into(),
+        }
     }
 
     /// The database file.
@@ -576,7 +620,16 @@ impl Ledger {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(|e| self.map(e))?;
         meta_set(&tx, "destination_id", id).map_err(|e| self.map(e))?;
-        append_event(&tx, self.session, now_ms, "destination_bound", None, None, Some(id)).map_err(|e| self.map(e))?;
+        append_event(
+            &tx,
+            self.session,
+            now_ms,
+            "destination_bound",
+            None,
+            None,
+            Some(id),
+        )
+        .map_err(|e| self.map(e))?;
         tx.commit().map_err(|e| self.map(e))
     }
 
@@ -591,7 +644,8 @@ impl Ledger {
     ) -> Result<u64> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(|e| self.map(e))?;
-        let seq = append_event(&tx, self.session, now_ms, kind, device, file_id, detail).map_err(|e| self.map(e))?;
+        let seq = append_event(&tx, self.session, now_ms, kind, device, file_id, detail)
+            .map_err(|e| self.map(e))?;
         tx.commit().map_err(|e| self.map(e))?;
         Ok(seq)
     }
@@ -601,8 +655,59 @@ impl Ledger {
         let conn = self.lock();
         match meta_get(&conn, "max_unix_ms").map_err(|e| self.map(e))? {
             None => Ok(i64::MIN),
-            Some(text) => text.parse::<i64>().map_err(|_| self.corrupt("the clock high-water mark is not a number")),
+            Some(text) => text
+                .parse::<i64>()
+                .map_err(|_| self.corrupt("the clock high-water mark is not a number")),
         }
+    }
+
+    /// Accepts the current clock reading as correct after the clock was found
+    /// to read earlier than times already in the ledger (it had been set to
+    /// the future at some point, and was corrected).
+    ///
+    /// The high-water mark is lowered to `now_ms`, and every file whose commit
+    /// time lies in the future is re-stamped as committed now, in this
+    /// session: its age starts over, which can only delay a confirmation,
+    /// never hasten one. Returns the number of files re-stamped.
+    pub(crate) fn acknowledge_clock(&self, note: &str, now_ms: i64) -> Result<u64> {
+        let mut conn = self.lock();
+        // Read the affected rows through the validating loader, so that a
+        // damaged row is reported rather than given a fresh checksum.
+        let sql =
+            format!("SELECT {FILE_COLUMNS} FROM files WHERE committed_unix_ms > ?1 ORDER BY id");
+        let future = self.query_files(&conn, &sql, &[&now_ms])?;
+
+        let tx = conn.transaction().map_err(|e| self.map(e))?;
+        meta_set(&tx, "max_unix_ms", &now_ms.to_string()).map_err(|e| self.map(e))?;
+        let detail = format!("{note} ({} files re-stamped)", future.len());
+        let seq = append_event(
+            &tx,
+            self.session,
+            now_ms,
+            "clock_acknowledged",
+            None,
+            None,
+            Some(&detail),
+        )
+        .map_err(|e| self.map(e))?;
+        for rec in &future {
+            let check = row_check(
+                &rec.device,
+                &rec.rel_path,
+                &rec.hash,
+                rec.size,
+                seq,
+                self.session,
+                now_ms,
+            );
+            tx.execute(
+                "UPDATE files SET committed_seq = ?2, committed_session = ?3, committed_unix_ms = ?4, row_check = ?5 WHERE id = ?1",
+                params![rec.id, to_i64(seq), to_i64(self.session), now_ms, check.as_slice()],
+            )
+            .map_err(|e| self.map(e))?;
+        }
+        tx.commit().map_err(|e| self.map(e))?;
+        Ok(future.len() as u64)
     }
 
     // ----- devices -------------------------------------------------------
@@ -621,26 +726,45 @@ impl Ledger {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(|e| self.map(e))?;
         let exists: bool = tx
-            .query_row("SELECT 1 FROM devices WHERE device_id = ?1", [device_id], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM devices WHERE device_id = ?1",
+                [device_id],
+                |_| Ok(()),
+            )
             .optional()
             .map_err(|e| self.map(e))?
             .is_some();
-        let (max_bytes, max_files, max_file_bytes) =
-            (limits.max_total_bytes.map(to_i64), limits.max_files.map(to_i64), limits.max_file_bytes.map(to_i64));
+        let (max_bytes, max_files, max_file_bytes) = (
+            limits.max_total_bytes.map(to_i64),
+            limits.max_files.map(to_i64),
+            limits.max_file_bytes.map(to_i64),
+        );
         if exists {
             tx.execute(
                 "UPDATE devices SET display_name = ?2, max_bytes = ?3, max_files = ?4, max_file_bytes = ?5 WHERE device_id = ?1",
                 params![device_id, display_name, max_bytes, max_files, max_file_bytes],
             )
             .map_err(|e| self.map(e))?;
-            append_event(&tx, self.session, now_ms, "device_updated", Some(device_id), None, None)
-                .map_err(|e| self.map(e))?;
+            append_event(
+                &tx,
+                self.session,
+                now_ms,
+                "device_updated",
+                Some(device_id),
+                None,
+                None,
+            )
+            .map_err(|e| self.map(e))?;
         } else {
             let mut n = 1u32;
             let folder = loop {
                 let candidate = folder_base.with_collision_suffix(n);
                 let taken: bool = tx
-                    .query_row("SELECT 1 FROM devices WHERE folder_key = ?1", [candidate.collision_key()], |_| Ok(()))
+                    .query_row(
+                        "SELECT 1 FROM devices WHERE folder_key = ?1",
+                        [candidate.collision_key()],
+                        |_| Ok(()),
+                    )
                     .optional()
                     .map_err(|e| self.map(e))?
                     .is_some();
@@ -649,8 +773,16 @@ impl Ledger {
                 }
                 n += 1;
             };
-            let seq = append_event(&tx, self.session, now_ms, "device_registered", Some(device_id), None, Some(folder.as_str()))
-                .map_err(|e| self.map(e))?;
+            let seq = append_event(
+                &tx,
+                self.session,
+                now_ms,
+                "device_registered",
+                Some(device_id),
+                None,
+                Some(folder.as_str()),
+            )
+            .map_err(|e| self.map(e))?;
             tx.execute(
                 "INSERT INTO devices(device_id, display_name, folder_name, folder_key, max_bytes, max_files, max_file_bytes, created_seq)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -685,8 +817,11 @@ impl Ledger {
                  FROM devices ORDER BY device_id",
             )
             .map_err(|e| self.map(e))?;
-        let rows = stmt.query_map([], device_from_row).map_err(|e| self.map(e))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| self.map(e))
+        let rows = stmt
+            .query_map([], device_from_row)
+            .map_err(|e| self.map(e))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| self.map(e))
     }
 
     // ----- files ---------------------------------------------------------
@@ -700,25 +835,52 @@ impl Ledger {
         let tx = conn.transaction().map_err(|e| self.map(e))?;
 
         let stale: Option<(i64, String, i64, i64, Vec<u8>)> = tx
-            .query_row("SELECT id, device_id, state, size, hash FROM files WHERE path_key = ?1", [new.path_key], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })
+            .query_row(
+                "SELECT id, device_id, state, size, hash FROM files WHERE path_key = ?1",
+                [new.path_key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
             .optional()
             .map_err(|e| self.map(e))?;
         if let Some((old_id, old_device, old_state, old_size, old_hash)) = stale {
             let detail = format!("replaced by a new commit; old hash {}", hex(&old_hash));
-            append_event(&tx, self.session, now_ms, "record_superseded", Some(&old_device), Some(old_id), Some(&detail))
-                .map_err(|e| self.map(e))?;
+            append_event(
+                &tx,
+                self.session,
+                now_ms,
+                "record_superseded",
+                Some(&old_device),
+                Some(old_id),
+                Some(&detail),
+            )
+            .map_err(|e| self.map(e))?;
             if FileState::from_code(old_state).is_some_and(FileState::occupies_space) {
                 adjust_usage(&tx, &old_device, -old_size, -1).map_err(|e| self.map(e))?;
             }
-            tx.execute("DELETE FROM files WHERE id = ?1", [old_id]).map_err(|e| self.map(e))?;
+            tx.execute("DELETE FROM files WHERE id = ?1", [old_id])
+                .map_err(|e| self.map(e))?;
         }
 
         let kind = if new.adopted { "adopt" } else { "commit" };
-        let seq = append_event(&tx, self.session, now_ms, kind, Some(new.device), None, Some(new.rel_path))
-            .map_err(|e| self.map(e))?;
-        let check = row_check(new.device, new.rel_path, &new.hash, new.size, seq, self.session, now_ms);
+        let seq = append_event(
+            &tx,
+            self.session,
+            now_ms,
+            kind,
+            Some(new.device),
+            None,
+            Some(new.rel_path),
+        )
+        .map_err(|e| self.map(e))?;
+        let check = row_check(
+            new.device,
+            new.rel_path,
+            &new.hash,
+            new.size,
+            seq,
+            self.session,
+            now_ms,
+        );
         tx.execute(
             "INSERT INTO files(device_id, rel_path, path_key, hash, size, mtime_unix_ns, source_name, state, state_seq,
                                committed_seq, committed_session, committed_unix_ms, dir_synced, verified_unbuffered, row_check)
@@ -741,7 +903,11 @@ impl Ledger {
         )
         .map_err(|e| self.map(e))?;
         let id = tx.last_insert_rowid();
-        tx.execute("UPDATE events SET file_id = ?1 WHERE seq = ?2", params![id, to_i64(seq)]).map_err(|e| self.map(e))?;
+        tx.execute(
+            "UPDATE events SET file_id = ?1 WHERE seq = ?2",
+            params![id, to_i64(seq)],
+        )
+        .map_err(|e| self.map(e))?;
         adjust_usage(&tx, new.device, to_i64(new.size), 1).map_err(|e| self.map(e))?;
         tx.commit().map_err(|e| self.map(e))?;
 
@@ -764,9 +930,16 @@ impl Ledger {
         })
     }
 
-    fn query_files(&self, conn: &Connection, sql: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<FileRecord>> {
+    fn query_files(
+        &self,
+        conn: &Connection,
+        sql: &str,
+        args: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<FileRecord>> {
         let mut stmt = conn.prepare(sql).map_err(|e| self.map(e))?;
-        let rows = stmt.query_map(args, raw_file_from_row).map_err(|e| self.map(e))?;
+        let rows = stmt
+            .query_map(args, raw_file_from_row)
+            .map_err(|e| self.map(e))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(self.validate(row.map_err(|e| self.map(e))?)?);
@@ -817,14 +990,18 @@ impl Ledger {
     /// All rows with this content hash, oldest commit first.
     pub(crate) fn files_by_hash(&self, hash: &ContentHash) -> Result<Vec<FileRecord>> {
         let conn = self.lock();
-        let sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE hash = ?1 ORDER BY committed_seq, id");
+        let sql =
+            format!("SELECT {FILE_COLUMNS} FROM files WHERE hash = ?1 ORDER BY committed_seq, id");
         self.query_files(&conn, &sql, &[&hash.as_bytes().as_slice()])
     }
 
     pub(crate) fn file_by_path_key(&self, path_key: &str) -> Result<Option<FileRecord>> {
         let conn = self.lock();
         let sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE path_key = ?1");
-        Ok(self.query_files(&conn, &sql, &[&path_key])?.into_iter().next())
+        Ok(self
+            .query_files(&conn, &sql, &[&path_key])?
+            .into_iter()
+            .next())
     }
 
     #[cfg(test)]
@@ -837,22 +1014,34 @@ impl Ledger {
     /// Whether any row (in any state) is recorded under this path key.
     pub(crate) fn path_key_exists(&self, path_key: &str) -> Result<bool> {
         let conn = self.lock();
-        conn.query_row("SELECT 1 FROM files WHERE path_key = ?1", [path_key], |_| Ok(()))
-            .optional()
-            .map(|r| r.is_some())
-            .map_err(|e| self.map(e))
+        conn.query_row(
+            "SELECT 1 FROM files WHERE path_key = ?1",
+            [path_key],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|r| r.is_some())
+        .map_err(|e| self.map(e))
     }
 
     /// Up to `limit` rows with `cursor < id <= upper`, in id order.
-    pub(crate) fn files_after(&self, cursor: i64, upper: i64, limit: u32) -> Result<Vec<FileRecord>> {
+    pub(crate) fn files_after(
+        &self,
+        cursor: i64,
+        upper: i64,
+        limit: u32,
+    ) -> Result<Vec<FileRecord>> {
         let conn = self.lock();
-        let sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE id > ?1 AND id <= ?2 ORDER BY id LIMIT ?3");
+        let sql = format!(
+            "SELECT {FILE_COLUMNS} FROM files WHERE id > ?1 AND id <= ?2 ORDER BY id LIMIT ?3"
+        );
         self.query_files(&conn, &sql, &[&cursor, &upper, &i64::from(limit)])
     }
 
     pub(crate) fn max_file_id(&self) -> Result<i64> {
         let conn = self.lock();
-        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM files", [], |r| r.get(0)).map_err(|e| self.map(e))
+        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM files", [], |r| r.get(0))
+            .map_err(|e| self.map(e))
     }
 
     /// Paths of rows that were marked missing at or after event `seq`.
@@ -861,23 +1050,37 @@ impl Ledger {
         let mut stmt = conn
             .prepare("SELECT rel_path FROM files WHERE state = 2 AND state_seq >= ?1 ORDER BY id")
             .map_err(|e| self.map(e))?;
-        let rows = stmt.query_map([to_i64(seq)], |r| r.get::<_, String>(0)).map_err(|e| self.map(e))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| self.map(e))
+        let rows = stmt
+            .query_map([to_i64(seq)], |r| r.get::<_, String>(0))
+            .map_err(|e| self.map(e))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| self.map(e))
     }
 
     /// Changes what the ledger believes about a file. Returns the event's
     /// sequence number, or `None` if the state was already `new_state`.
-    pub(crate) fn set_state(&self, file_id: i64, new_state: FileState, detail: &str, now_ms: i64) -> Result<Option<u64>> {
+    pub(crate) fn set_state(
+        &self,
+        file_id: i64,
+        new_state: FileState,
+        detail: &str,
+        now_ms: i64,
+    ) -> Result<Option<u64>> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(|e| self.map(e))?;
         let row: Option<(i64, i64, String)> = tx
-            .query_row("SELECT state, size, device_id FROM files WHERE id = ?1", [file_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
+            .query_row(
+                "SELECT state, size, device_id FROM files WHERE id = ?1",
+                [file_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .optional()
             .map_err(|e| self.map(e))?;
-        let Some((old_code, size, device)) = row else { return Ok(None) };
-        let old = FileState::from_code(old_code).ok_or_else(|| self.corrupt(format!("file row {file_id} has an unknown state")))?;
+        let Some((old_code, size, device)) = row else {
+            return Ok(None);
+        };
+        let old = FileState::from_code(old_code)
+            .ok_or_else(|| self.corrupt(format!("file row {file_id} has an unknown state")))?;
         if old == new_state {
             return Ok(None);
         }
@@ -886,10 +1089,21 @@ impl Ledger {
             FileState::Missing => "file_missing",
             FileState::Changed => "file_changed",
         };
-        let seq = append_event(&tx, self.session, now_ms, kind, Some(&device), Some(file_id), Some(detail))
-            .map_err(|e| self.map(e))?;
-        tx.execute("UPDATE files SET state = ?2, state_seq = ?3 WHERE id = ?1", params![file_id, new_state.code(), to_i64(seq)])
-            .map_err(|e| self.map(e))?;
+        let seq = append_event(
+            &tx,
+            self.session,
+            now_ms,
+            kind,
+            Some(&device),
+            Some(file_id),
+            Some(detail),
+        )
+        .map_err(|e| self.map(e))?;
+        tx.execute(
+            "UPDATE files SET state = ?2, state_seq = ?3 WHERE id = ?1",
+            params![file_id, new_state.code(), to_i64(seq)],
+        )
+        .map_err(|e| self.map(e))?;
         match (old.occupies_space(), new_state.occupies_space()) {
             (true, false) => adjust_usage(&tx, &device, -size, -1).map_err(|e| self.map(e))?,
             (false, true) => adjust_usage(&tx, &device, size, 1).map_err(|e| self.map(e))?,
@@ -901,10 +1115,17 @@ impl Ledger {
 
     /// Records that a file was re-read from disk and matched. Returns the
     /// event's sequence number.
-    pub(crate) fn mark_verified(&self, file_id: i64, kind: &str, device: Option<&str>, now_ms: i64) -> Result<u64> {
+    pub(crate) fn mark_verified(
+        &self,
+        file_id: i64,
+        kind: &str,
+        device: Option<&str>,
+        now_ms: i64,
+    ) -> Result<u64> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(|e| self.map(e))?;
-        let seq = append_event(&tx, self.session, now_ms, kind, device, Some(file_id), None).map_err(|e| self.map(e))?;
+        let seq = append_event(&tx, self.session, now_ms, kind, device, Some(file_id), None)
+            .map_err(|e| self.map(e))?;
         let updated = tx
             .execute(
                 "UPDATE files SET last_verified_seq = ?2, last_verified_session = ?3 WHERE id = ?1",
@@ -912,7 +1133,9 @@ impl Ledger {
             )
             .map_err(|e| self.map(e))?;
         if updated != 1 {
-            return Err(self.corrupt(format!("file row {file_id} vanished while it was being verified")));
+            return Err(self.corrupt(format!(
+                "file row {file_id} vanished while it was being verified"
+            )));
         }
         tx.commit().map_err(|e| self.map(e))?;
         Ok(seq)
@@ -928,18 +1151,42 @@ impl Ledger {
         let existing = read_block(&tx).map_err(|e| self.map(e))?;
         let info = match existing {
             Some(current) if current.kind.severity() >= kind.severity() => {
-                append_event(&tx, self.session, now_ms, "block_noted", None, None, Some(reason)).map_err(|e| self.map(e))?;
+                append_event(
+                    &tx,
+                    self.session,
+                    now_ms,
+                    "block_noted",
+                    None,
+                    None,
+                    Some(reason),
+                )
+                .map_err(|e| self.map(e))?;
                 current
             }
             _ => {
-                let seq = append_event(&tx, self.session, now_ms, "block_set", None, None, Some(reason))
-                    .map_err(|e| self.map(e))?;
+                let seq = append_event(
+                    &tx,
+                    self.session,
+                    now_ms,
+                    "block_set",
+                    None,
+                    None,
+                    Some(reason),
+                )
+                .map_err(|e| self.map(e))?;
                 meta_set(&tx, "block_kind", kind.code()).map_err(|e| self.map(e))?;
                 meta_set(&tx, "block_reason", reason).map_err(|e| self.map(e))?;
                 meta_set(&tx, "block_seq", &seq.to_string()).map_err(|e| self.map(e))?;
-                meta_set(&tx, "block_session", &self.session.to_string()).map_err(|e| self.map(e))?;
+                meta_set(&tx, "block_session", &self.session.to_string())
+                    .map_err(|e| self.map(e))?;
                 meta_set(&tx, "block_unix_ms", &now_ms.to_string()).map_err(|e| self.map(e))?;
-                BlockInfo { kind, reason: reason.to_owned(), set_seq: seq, set_session: self.session, set_unix_ms: now_ms }
+                BlockInfo {
+                    kind,
+                    reason: reason.to_owned(),
+                    set_seq: seq,
+                    set_session: self.session,
+                    set_unix_ms: now_ms,
+                }
             }
         };
         tx.commit().map_err(|e| self.map(e))?;
@@ -958,8 +1205,21 @@ impl Ledger {
         let existing = read_block(&tx).map_err(|e| self.map(e))?;
         if let Some(current) = &existing {
             let detail = format!("{note} (was: {})", current.reason);
-            append_event(&tx, self.session, now_ms, "block_cleared", None, None, Some(&detail)).map_err(|e| self.map(e))?;
-            tx.execute("DELETE FROM meta WHERE key LIKE 'block\\_%' ESCAPE '\\'", []).map_err(|e| self.map(e))?;
+            append_event(
+                &tx,
+                self.session,
+                now_ms,
+                "block_cleared",
+                None,
+                None,
+                Some(&detail),
+            )
+            .map_err(|e| self.map(e))?;
+            tx.execute(
+                "DELETE FROM meta WHERE key LIKE 'block\\_%' ESCAPE '\\'",
+                [],
+            )
+            .map_err(|e| self.map(e))?;
         }
         tx.commit().map_err(|e| self.map(e))?;
         Ok(existing)
@@ -1021,14 +1281,20 @@ impl Ledger {
 
     pub(crate) fn clear_scan_state(&self) -> Result<()> {
         let conn = self.lock();
-        conn.execute("DELETE FROM scan_state", []).map(|_| ()).map_err(|e| self.map(e))
+        conn.execute("DELETE FROM scan_state", [])
+            .map(|_| ())
+            .map_err(|e| self.map(e))
     }
 
     // ----- diagnostics ---------------------------------------------------
 
     pub(crate) fn stats(&self) -> Result<LedgerStats> {
         let conn = self.lock();
-        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).map(to_u64).map_err(|e| self.map(e));
+        let count = |sql: &str| {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0))
+                .map(to_u64)
+                .map_err(|e| self.map(e))
+        };
         Ok(LedgerStats {
             files_committed: count("SELECT COUNT(*) FROM files WHERE state = 1")?,
             files_missing: count("SELECT COUNT(*) FROM files WHERE state = 2")?,
@@ -1058,7 +1324,8 @@ impl Ledger {
                 })
             })
             .map_err(|e| self.map(e))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| self.map(e))
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| self.map(e))
     }
 }
 
@@ -1127,7 +1394,12 @@ fn read_device(conn: &Connection, device_id: &str) -> rusqlite::Result<Option<De
     .optional()
 }
 
-fn adjust_usage(tx: &Transaction<'_>, device: &str, bytes: i64, files: i64) -> rusqlite::Result<()> {
+fn adjust_usage(
+    tx: &Transaction<'_>,
+    device: &str,
+    bytes: i64,
+    files: i64,
+) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE devices SET used_bytes = MAX(0, used_bytes + ?2), used_files = MAX(0, used_files + ?3) WHERE device_id = ?1",
         params![device, bytes, files],
@@ -1136,7 +1408,8 @@ fn adjust_usage(tx: &Transaction<'_>, device: &str, bytes: i64, files: i64) -> r
 }
 
 fn meta_get(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .optional()
 }
 
 fn meta_set(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -1171,9 +1444,13 @@ fn append_event(
 }
 
 fn read_block(conn: &Connection) -> rusqlite::Result<Option<BlockInfo>> {
-    let Some(kind_code) = meta_get(conn, "block_kind")? else { return Ok(None) };
+    let Some(kind_code) = meta_get(conn, "block_kind")? else {
+        return Ok(None);
+    };
     let reason = meta_get(conn, "block_reason")?;
-    let number = |key: &str| -> rusqlite::Result<Option<i64>> { Ok(meta_get(conn, key)?.and_then(|v| v.parse().ok())) };
+    let number = |key: &str| -> rusqlite::Result<Option<i64>> {
+        Ok(meta_get(conn, key)?.and_then(|v| v.parse().ok()))
+    };
     // A block record that cannot be fully read is still a block.
     Ok(Some(BlockInfo {
         kind: BlockKind::from_code(&kind_code).unwrap_or(BlockKind::IntegrityProblems),
@@ -1195,12 +1472,18 @@ fn check_integrity(conn: &Connection, path: &Path) -> Result<()> {
         }
     }
     if findings.len() != 1 || findings[0] != "ok" {
-        return Err(LedgerError::Corrupt { path: path.to_path_buf(), detail: findings.join("; ") });
+        return Err(LedgerError::Corrupt {
+            path: path.to_path_buf(),
+            detail: findings.join("; "),
+        });
     }
     let mut stmt = conn.prepare("PRAGMA foreign_key_check").map_err(map)?;
     let mut rows = stmt.query([]).map_err(map)?;
     if rows.next().map_err(map)?.is_some() {
-        return Err(LedgerError::Corrupt { path: path.to_path_buf(), detail: "a file row refers to an unknown device".to_owned() });
+        return Err(LedgerError::Corrupt {
+            path: path.to_path_buf(),
+            detail: "a file row refers to an unknown device".to_owned(),
+        });
     }
     Ok(())
 }
@@ -1209,15 +1492,26 @@ fn map_sqlite(path: &Path, e: rusqlite::Error) -> LedgerError {
     use rusqlite::ErrorCode;
     match &e {
         rusqlite::Error::SqliteFailure(failure, _)
-            if matches!(failure.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase) =>
+            if matches!(
+                failure.code,
+                ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase
+            ) =>
         {
-            LedgerError::Corrupt { path: path.to_path_buf(), detail: e.to_string() }
+            LedgerError::Corrupt {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            }
         }
         // A column holding the wrong type is damage, not a programming error.
         rusqlite::Error::InvalidColumnType(..) | rusqlite::Error::FromSqlConversionFailure(..) => {
-            LedgerError::Corrupt { path: path.to_path_buf(), detail: e.to_string() }
+            LedgerError::Corrupt {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            }
         }
-        _ => LedgerError::Database { message: e.to_string() },
+        _ => LedgerError::Database {
+            message: e.to_string(),
+        },
     }
 }
 
@@ -1250,7 +1544,11 @@ fn hex(bytes: &[u8]) -> String {
 
 /// The collision key of a ledger path.
 pub(crate) fn path_key(rel_path: &str) -> String {
-    rel_path.split('/').map(collision_key).collect::<Vec<_>>().join("/")
+    rel_path
+        .split('/')
+        .map(collision_key)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
@@ -1259,7 +1557,11 @@ mod tests {
     use crate::sanitize::sanitize_component;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("unit-tmp").join("ledger").join(name);
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("unit-tmp")
+            .join("ledger")
+            .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1281,7 +1583,15 @@ mod tests {
     }
 
     fn device(ledger: &Ledger, id: &str, name: &str) -> DeviceRecord {
-        ledger.upsert_device(id, name, &sanitize_component(name).unwrap(), DeviceLimits::default(), 1_000).unwrap()
+        ledger
+            .upsert_device(
+                id,
+                name,
+                &sanitize_component(name).unwrap(),
+                DeviceLimits::default(),
+                1_000,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -1289,12 +1599,26 @@ mod tests {
         let dir = scratch("pragmas");
         let ledger = Ledger::open(&dir, 1_000).unwrap();
         let conn = ledger.lock();
-        let get = |p: &str| conn.query_row(&format!("PRAGMA {p}"), [], |r| r.get::<_, rusqlite::types::Value>(0)).unwrap();
-        assert_eq!(get("journal_mode"), rusqlite::types::Value::Text("wal".into()));
+        let get = |p: &str| {
+            conn.query_row(&format!("PRAGMA {p}"), [], |r| {
+                r.get::<_, rusqlite::types::Value>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            get("journal_mode"),
+            rusqlite::types::Value::Text("wal".into())
+        );
         assert_eq!(get("synchronous"), rusqlite::types::Value::Integer(2));
         assert_eq!(get("foreign_keys"), rusqlite::types::Value::Integer(1));
-        assert_eq!(get("user_version"), rusqlite::types::Value::Integer(i64::from(SCHEMA_VERSION)));
-        assert_eq!(get("application_id"), rusqlite::types::Value::Integer(APPLICATION_ID));
+        assert_eq!(
+            get("user_version"),
+            rusqlite::types::Value::Integer(i64::from(SCHEMA_VERSION))
+        );
+        assert_eq!(
+            get("application_id"),
+            rusqlite::types::Value::Integer(APPLICATION_ID)
+        );
     }
 
     #[test]
@@ -1327,7 +1651,10 @@ mod tests {
         let dir = scratch("autoincrement");
         let ledger = Ledger::open(&dir, 0).unwrap();
         let a = ledger.log_event("a", None, None, None, 0).unwrap();
-        ledger.lock().execute("DELETE FROM events WHERE seq = ?1", [to_i64(a)]).unwrap();
+        ledger
+            .lock()
+            .execute("DELETE FROM events WHERE seq = ?1", [to_i64(a)])
+            .unwrap();
         let b = ledger.log_event("b", None, None, None, 0).unwrap();
         assert!(b > a);
     }
@@ -1343,8 +1670,20 @@ mod tests {
         assert_eq!(b.folder_name, "Galaxy S23 (2)");
         assert_eq!(c.folder_name, "GALAXY s23 (3)");
         // Renaming the device or changing limits does not move its folder.
-        let limits = DeviceLimits { max_total_bytes: Some(10), max_files: Some(2), max_file_bytes: Some(5) };
-        let a2 = ledger.upsert_device("dev-a", "Renamed", &sanitize_component("Renamed").unwrap(), limits, 0).unwrap();
+        let limits = DeviceLimits {
+            max_total_bytes: Some(10),
+            max_files: Some(2),
+            max_file_bytes: Some(5),
+        };
+        let a2 = ledger
+            .upsert_device(
+                "dev-a",
+                "Renamed",
+                &sanitize_component("Renamed").unwrap(),
+                limits,
+                0,
+            )
+            .unwrap();
         assert_eq!(a2.folder_name, "Galaxy S23");
         assert_eq!(a2.display_name, "Renamed");
         assert_eq!(a2.limits, limits);
@@ -1358,36 +1697,64 @@ mod tests {
         let dir = scratch("commit");
         let ledger = Ledger::open(&dir, 0).unwrap();
         device(&ledger, "d", "D");
-        let rec = ledger.record_commit(&new_file("d", "D/a.jpg", "d/a.jpg", b"aaaa"), 50).unwrap();
+        let rec = ledger
+            .record_commit(&new_file("d", "D/a.jpg", "d/a.jpg", b"aaaa"), 50)
+            .unwrap();
         assert_eq!(rec.committed_session, 1);
         assert!(rec.committed_seq > ledger.session_start_seq());
-        assert_eq!(ledger.files_by_hash(&ContentHash::of_bytes(b"aaaa")).unwrap(), vec![rec.clone()]);
-        assert_eq!(ledger.file_by_path_key("d/a.jpg").unwrap(), Some(rec.clone()));
+        assert_eq!(
+            ledger
+                .files_by_hash(&ContentHash::of_bytes(b"aaaa"))
+                .unwrap(),
+            vec![rec.clone()]
+        );
+        assert_eq!(
+            ledger.file_by_path_key("d/a.jpg").unwrap(),
+            Some(rec.clone())
+        );
         assert_eq!(ledger.file_by_id(rec.id).unwrap(), Some(rec.clone()));
         assert!(ledger.path_key_exists("d/a.jpg").unwrap());
         assert!(!ledger.path_key_exists("d/b.jpg").unwrap());
-        assert!(ledger.files_by_hash(&ContentHash::of_bytes(b"other")).unwrap().is_empty());
+        assert!(ledger
+            .files_by_hash(&ContentHash::of_bytes(b"other"))
+            .unwrap()
+            .is_empty());
         let d = ledger.device("d").unwrap().unwrap();
         assert_eq!((d.used_bytes, d.used_files), (4, 1));
 
         // Missing files stop counting; restored ones count again.
-        assert!(ledger.set_state(rec.id, FileState::Missing, "gone", 60).unwrap().is_some());
-        assert!(ledger.set_state(rec.id, FileState::Missing, "gone", 60).unwrap().is_none());
+        assert!(ledger
+            .set_state(rec.id, FileState::Missing, "gone", 60)
+            .unwrap()
+            .is_some());
+        assert!(ledger
+            .set_state(rec.id, FileState::Missing, "gone", 60)
+            .unwrap()
+            .is_none());
         let d = ledger.device("d").unwrap().unwrap();
         assert_eq!((d.used_bytes, d.used_files), (0, 0));
         assert_eq!(ledger.missing_since(0).unwrap(), vec!["D/a.jpg".to_owned()]);
-        ledger.set_state(rec.id, FileState::Changed, "different", 61).unwrap();
-        ledger.set_state(rec.id, FileState::Committed, "back", 62).unwrap();
+        ledger
+            .set_state(rec.id, FileState::Changed, "different", 61)
+            .unwrap();
+        ledger
+            .set_state(rec.id, FileState::Committed, "back", 62)
+            .unwrap();
         let d = ledger.device("d").unwrap().unwrap();
         assert_eq!((d.used_bytes, d.used_files), (4, 1));
 
-        let seq = ledger.mark_verified(rec.id, "verified", Some("d"), 70).unwrap();
+        let seq = ledger
+            .mark_verified(rec.id, "verified", Some("d"), 70)
+            .unwrap();
         let again = ledger.file_by_id(rec.id).unwrap().unwrap();
         assert_eq!(again.last_verified_seq, Some(seq));
         assert_eq!(again.last_verified_session, Some(1));
 
         let stats = ledger.stats().unwrap();
-        assert_eq!((stats.files_committed, stats.bytes_committed, stats.devices), (1, 4, 1));
+        assert_eq!(
+            (stats.files_committed, stats.bytes_committed, stats.devices),
+            (1, 4, 1)
+        );
     }
 
     #[test]
@@ -1395,15 +1762,32 @@ mod tests {
         let dir = scratch("supersede");
         let ledger = Ledger::open(&dir, 0).unwrap();
         device(&ledger, "d", "D");
-        let old = ledger.record_commit(&new_file("d", "D/a.jpg", "d/a.jpg", b"old content"), 1).unwrap();
-        ledger.set_state(old.id, FileState::Missing, "gone", 2).unwrap();
-        let new = ledger.record_commit(&new_file("d", "D/A.JPG", "d/a.jpg", b"new"), 3).unwrap();
+        let old = ledger
+            .record_commit(&new_file("d", "D/a.jpg", "d/a.jpg", b"old content"), 1)
+            .unwrap();
+        ledger
+            .set_state(old.id, FileState::Missing, "gone", 2)
+            .unwrap();
+        let new = ledger
+            .record_commit(&new_file("d", "D/A.JPG", "d/a.jpg", b"new"), 3)
+            .unwrap();
         assert_ne!(new.id, old.id);
         assert_eq!(ledger.file_by_id(old.id).unwrap(), None);
-        assert_eq!(ledger.file_by_path_key("d/a.jpg").unwrap().unwrap().rel_path, "D/A.JPG");
+        assert_eq!(
+            ledger
+                .file_by_path_key("d/a.jpg")
+                .unwrap()
+                .unwrap()
+                .rel_path,
+            "D/A.JPG"
+        );
         let d = ledger.device("d").unwrap().unwrap();
         assert_eq!((d.used_bytes, d.used_files), (3, 1));
-        assert!(ledger.events_after(0, 100).unwrap().iter().any(|e| e.kind == "record_superseded"));
+        assert!(ledger
+            .events_after(0, 100)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "record_superseded"));
     }
 
     #[test]
@@ -1412,8 +1796,13 @@ mod tests {
         {
             let ledger = Ledger::open(&dir, 0).unwrap();
             device(&ledger, "d", "D");
-            ledger.record_commit(&new_file("d", "D/a", "d/a", b"12345"), 1).unwrap();
-            ledger.lock().execute("UPDATE devices SET used_bytes = 999, used_files = 42", []).unwrap();
+            ledger
+                .record_commit(&new_file("d", "D/a", "d/a", b"12345"), 1)
+                .unwrap();
+            ledger
+                .lock()
+                .execute("UPDATE devices SET used_bytes = 999, used_files = 42", [])
+                .unwrap();
         }
         let ledger = Ledger::open(&dir, 0).unwrap();
         let d = ledger.device("d").unwrap().unwrap();
@@ -1429,23 +1818,43 @@ mod tests {
             assert_eq!(ledger.clear_block("nothing to clear", 0).unwrap(), None);
             let b = ledger.block(BlockKind::Manual, "by hand", 10).unwrap();
             assert_eq!(b.kind, BlockKind::Manual);
-            let b = ledger.block(BlockKind::IntegrityProblems, "one file changed", 11).unwrap();
+            let b = ledger
+                .block(BlockKind::IntegrityProblems, "one file changed", 11)
+                .unwrap();
             assert_eq!(b.kind, BlockKind::IntegrityProblems);
-            let b = ledger.block(BlockKind::MassChange, "many files changed", 12).unwrap();
+            let b = ledger
+                .block(BlockKind::MassChange, "many files changed", 12)
+                .unwrap();
             assert_eq!(b.kind, BlockKind::MassChange);
             // A milder block does not replace a more severe one.
-            let b = ledger.block(BlockKind::IntegrityProblems, "another file", 13).unwrap();
-            assert_eq!((b.kind, b.reason.as_str()), (BlockKind::MassChange, "many files changed"));
+            let b = ledger
+                .block(BlockKind::IntegrityProblems, "another file", 13)
+                .unwrap();
+            assert_eq!(
+                (b.kind, b.reason.as_str()),
+                (BlockKind::MassChange, "many files changed")
+            );
         }
         let ledger = Ledger::open(&dir, 0).unwrap();
-        let b = ledger.block_info().unwrap().expect("the block must survive a restart");
+        let b = ledger
+            .block_info()
+            .unwrap()
+            .expect("the block must survive a restart");
         assert_eq!((b.kind, b.set_session), (BlockKind::MassChange, 1));
         let cleared = ledger.clear_block("user reviewed", 20).unwrap().unwrap();
         assert_eq!(cleared.kind, BlockKind::MassChange);
         assert_eq!(ledger.block_info().unwrap(), None);
-        let kinds: Vec<String> = ledger.events_after(0, 100).unwrap().into_iter().map(|e| e.kind).collect();
+        let kinds: Vec<String> = ledger
+            .events_after(0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
         for expected in ["block_set", "block_noted", "block_cleared"] {
-            assert!(kinds.iter().any(|k| k == expected), "missing event {expected}");
+            assert!(
+                kinds.iter().any(|k| k == expected),
+                "missing event {expected}"
+            );
         }
     }
 
@@ -1490,7 +1899,9 @@ mod tests {
         let dir = scratch("row-check");
         let ledger = Ledger::open(&dir, 0).unwrap();
         device(&ledger, "d", "D");
-        let rec = ledger.record_commit(&new_file("d", "D/a", "d/a", b"data"), 1).unwrap();
+        let rec = ledger
+            .record_commit(&new_file("d", "D/a", "d/a", b"data"), 1)
+            .unwrap();
         // Each of these would make an unsafe answer more likely if believed.
         for tamper in [
             "UPDATE files SET committed_session = 0",
@@ -1503,8 +1914,8 @@ mod tests {
             let before: Vec<rusqlite::types::Value> = {
                 let conn = ledger.lock();
                 let mut stmt = conn.prepare("SELECT committed_session, committed_seq, committed_unix_ms, size, rel_path, hash FROM files").unwrap();
-                let v = stmt.query_row([], |r| (0..6).map(|i| r.get(i)).collect()).unwrap();
-                v
+                stmt.query_row([], |r| (0..6).map(|i| r.get(i)).collect())
+                    .unwrap()
             };
             ledger.lock().execute(tamper, []).unwrap();
             let err = ledger.file_by_id(rec.id).unwrap_err();
@@ -1513,7 +1924,10 @@ mod tests {
                 "UPDATE files SET committed_session = ?1, committed_seq = ?2, committed_unix_ms = ?3, size = ?4, rel_path = ?5, hash = ?6",
                 rusqlite::params_from_iter(before),
             ).unwrap();
-            assert!(ledger.file_by_id(rec.id).is_ok(), "restoring after {tamper}");
+            assert!(
+                ledger.file_by_id(rec.id).is_ok(),
+                "restoring after {tamper}"
+            );
         }
     }
 
@@ -1523,16 +1937,30 @@ mod tests {
         {
             let conn = Connection::open(dir.join(LEDGER_FILE)).unwrap();
             conn.execute_batch(SCHEMA_V1).unwrap();
-            conn.execute_batch(&format!("PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = 1;")).unwrap();
-            conn.execute("INSERT INTO meta(key, value) VALUES ('session_counter', '41')", []).unwrap();
-            conn.execute("INSERT INTO meta(key, value) VALUES ('destination_id', 'abc')", []).unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = 1;"
+            ))
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('session_counter', '41')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('destination_id', 'abc')",
+                [],
+            )
+            .unwrap();
         }
         let ledger = Ledger::open(&dir, 0).unwrap();
         assert!(!ledger.is_fresh());
         assert_eq!(ledger.session(), 42);
         assert_eq!(ledger.destination_id().unwrap().as_deref(), Some("abc"));
         assert_eq!(ledger.scan_state().unwrap(), None);
-        let version: i64 = ledger.lock().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = ledger
+            .lock()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, i64::from(SCHEMA_VERSION));
     }
 
@@ -1542,7 +1970,8 @@ mod tests {
         drop(Ledger::open(&dir, 0).unwrap());
         {
             let conn = Connection::open(dir.join(LEDGER_FILE)).unwrap();
-            conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1)).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+                .unwrap();
         }
         match Ledger::open(&dir, 0) {
             Err(LedgerError::TooNew { found, supported }) => {
@@ -1552,7 +1981,13 @@ mod tests {
         }
         // The refused open must not have started a session.
         let conn = Connection::open(dir.join(LEDGER_FILE)).unwrap();
-        let counter: String = conn.query_row("SELECT value FROM meta WHERE key = 'session_counter'", [], |r| r.get(0)).unwrap();
+        let counter: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'session_counter'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(counter, "1");
     }
 
@@ -1561,12 +1996,20 @@ mod tests {
         let dir = scratch("foreign");
         {
             let conn = Connection::open(dir.join(LEDGER_FILE)).unwrap();
-            conn.execute_batch("CREATE TABLE notes(text TEXT); INSERT INTO notes VALUES ('hello');").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE notes(text TEXT); INSERT INTO notes VALUES ('hello');",
+            )
+            .unwrap();
         }
-        assert!(matches!(Ledger::open(&dir, 0), Err(LedgerError::NotALedger { .. })));
+        assert!(matches!(
+            Ledger::open(&dir, 0),
+            Err(LedgerError::NotALedger { .. })
+        ));
         // ... and leaves it alone.
         let conn = Connection::open(dir.join(LEDGER_FILE)).unwrap();
-        let n: i64 = conn.query_row("SELECT count(*) FROM notes", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
     }
 
@@ -1583,7 +2026,10 @@ mod tests {
         std::fs::write(dir.join(LEDGER_FILE), b"junk again").unwrap();
         Ledger::quarantine(&dir).unwrap();
         assert!(dir.join("ledger.db.corrupt-2").exists());
-        assert_eq!(std::fs::read(dir.join("ledger.db.corrupt-1")).unwrap(), b"junk");
+        assert_eq!(
+            std::fs::read(dir.join("ledger.db.corrupt-1")).unwrap(),
+            b"junk"
+        );
     }
 
     #[test]

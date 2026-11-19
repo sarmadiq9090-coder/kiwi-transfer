@@ -241,15 +241,33 @@ pub enum StoreError {
 
 impl StoreError {
     pub(crate) fn io(op: &'static str, path: impl Into<PathBuf>, source: io::Error) -> StoreError {
-        StoreError::Io { op, path: path.into(), source }
+        StoreError::Io {
+            op,
+            path: path.into(),
+            source,
+        }
     }
 
     /// Like [`StoreError::io`], but recognises "no space left".
-    pub(crate) fn write(op: &'static str, path: impl Into<PathBuf>, source: io::Error) -> StoreError {
-        if matches!(source.kind(), io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded) {
-            StoreError::DiskFull { path: path.into(), source }
+    pub(crate) fn write(
+        op: &'static str,
+        path: impl Into<PathBuf>,
+        source: io::Error,
+    ) -> StoreError {
+        if matches!(
+            source.kind(),
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+        ) {
+            StoreError::DiskFull {
+                path: path.into(),
+                source,
+            }
         } else {
-            StoreError::Io { op, path: path.into(), source }
+            StoreError::Io {
+                op,
+                path: path.into(),
+                source,
+            }
         }
     }
 }

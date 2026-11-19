@@ -7,8 +7,13 @@ mod verify;
 
 pub use incoming::{CommitOutcome, CommitReceipt, FileRequest, IncomingFile};
 pub use recovery::RecoveryReport;
-pub use scan::{CancelToken, FindingKind, ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict, MAX_LISTED_FINDINGS};
-pub use verify::{DedupeScope, DeletionDenied, DeletionProof, NotVerifiedReason, StoredFile, StoredStatus};
+pub use scan::{
+    CancelToken, FindingKind, ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict,
+    MAX_LISTED_FINDINGS,
+};
+pub use verify::{
+    DedupeScope, DeletionDenied, DeletionProof, NotVerifiedReason, StoredFile, StoredStatus,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -20,7 +25,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::destination::{Destination, DriveKind};
 use crate::error::{LedgerError, StoreError};
 use crate::fsops::{Clock, EntryKind, Fs, RealFs, SystemClock};
-use crate::ledger::{BlockInfo, BlockKind, DeviceLimits, DeviceRecord, EventRecord, Ledger, LedgerStats};
+use crate::ledger::{
+    BlockInfo, BlockKind, DeviceLimits, DeviceRecord, EventRecord, Ledger, LedgerStats,
+};
 use crate::sanitize::{collision_key, sanitize_component, SafeName, SafeRelPath};
 use crate::sys;
 use crate::template::Template;
@@ -62,7 +69,9 @@ impl DeviceId {
     pub fn new(id: &str) -> Result<DeviceId, StoreError> {
         let ok = !id.is_empty()
             && id.len() <= 128
-            && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
         if ok {
             Ok(DeviceId(id.to_owned()))
         } else {
@@ -243,15 +252,19 @@ impl Store {
 
     /// Like [`Store::reset_corrupt_ledger`], with seams. Test builds only.
     #[cfg(any(test, feature = "test-util"))]
-    pub fn reset_corrupt_ledger_with_seams(cfg: StoreConfig, seams: impl Fn() -> Seams) -> Result<Store, StoreError> {
+    pub fn reset_corrupt_ledger_with_seams(
+        cfg: StoreConfig,
+        seams: impl Fn() -> Seams,
+    ) -> Result<Store, StoreError> {
         Self::reset_impl(cfg, seams)
     }
 
     fn reset_impl(cfg: StoreConfig, seams: impl Fn() -> Seams) -> Result<Store, StoreError> {
         match Self::open_impl(cfg.clone(), seams(), None) {
             Err(StoreError::Ledger(LedgerError::Corrupt { detail, .. })) => {
-                let ledger_dir = std::fs::canonicalize(&cfg.ledger_dir)
-                    .map_err(|e| StoreError::io("resolve the ledger directory", &cfg.ledger_dir, e))?;
+                let ledger_dir = std::fs::canonicalize(&cfg.ledger_dir).map_err(|e| {
+                    StoreError::io("resolve the ledger directory", &cfg.ledger_dir, e)
+                })?;
                 // Hold the ledger lock while moving files, so two instances cannot both reset.
                 let quarantined = {
                     let lock_path = ledger_dir.join(LEDGER_LOCK_FILE);
@@ -264,7 +277,11 @@ impl Store {
         }
     }
 
-    fn open_impl(cfg: StoreConfig, seams: Seams, after_reset: Option<(String, Vec<PathBuf>)>) -> Result<Store, StoreError> {
+    fn open_impl(
+        cfg: StoreConfig,
+        seams: Seams,
+        after_reset: Option<(String, Vec<PathBuf>)>,
+    ) -> Result<Store, StoreError> {
         let mut dest = Destination::open(&cfg.root)?;
         let volume_is_forced = seams.volume.is_some();
         if let Some(volume) = seams.volume {
@@ -278,9 +295,16 @@ impl Store {
         match std::fs::create_dir(&store_dir) {
             Ok(()) => sys::hide(&store_dir),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(StoreError::write("create the bookkeeping directory", &store_dir, e)),
+            Err(e) => {
+                return Err(StoreError::write(
+                    "create the bookkeeping directory",
+                    &store_dir,
+                    e,
+                ))
+            }
         }
-        let meta = std::fs::symlink_metadata(&store_dir).map_err(|e| StoreError::io("examine", &store_dir, e))?;
+        let meta = std::fs::symlink_metadata(&store_dir)
+            .map_err(|e| StoreError::io("examine", &store_dir, e))?;
         if sys::is_reparse(&meta) {
             return Err(StoreError::ReparsePoint { path: store_dir });
         }
@@ -294,8 +318,11 @@ impl Store {
             .map_err(|e| StoreError::write("create the ledger directory", &cfg.ledger_dir, e))?;
         let ledger_dir = std::fs::canonicalize(&cfg.ledger_dir)
             .map_err(|e| StoreError::io("resolve the ledger directory", &cfg.ledger_dir, e))?;
-        let ledger_volume = sys::probe_volume(&ledger_dir).map_err(|e| StoreError::io("examine the volume of", &ledger_dir, e))?;
-        if ledger_volume.drive == DriveKind::Remote || matches!(ledger_volume.filesystem.as_str(), "nfs" | "smb") {
+        let ledger_volume = sys::probe_volume(&ledger_dir)
+            .map_err(|e| StoreError::io("examine the volume of", &ledger_dir, e))?;
+        if ledger_volume.drive == DriveKind::Remote
+            || matches!(ledger_volume.filesystem.as_str(), "nfs" | "smb")
+        {
             return Err(LedgerError::OnNetworkVolume { path: ledger_dir }.into());
         }
         let ledger_lock = acquire(&ledger_dir.join(LEDGER_LOCK_FILE))?;
@@ -310,7 +337,11 @@ impl Store {
         let ledger_id = ledger.destination_id()?;
         if let (Some(marker), Some(ledger_id)) = (&marker, &ledger_id) {
             if marker != ledger_id {
-                return Err(LedgerError::DestinationMismatch { ledger_id: ledger_id.clone(), marker_id: marker.clone() }.into());
+                return Err(LedgerError::DestinationMismatch {
+                    ledger_id: ledger_id.clone(),
+                    marker_id: marker.clone(),
+                }
+                .into());
             }
         }
         ledger.start_session(now)?;
@@ -335,7 +366,9 @@ impl Store {
                             "the ledger was damaged ({detail}) and has been reset; files stored before the reset are no longer known"
                         );
                         ledger.block(BlockKind::LedgerReset, &reason, now)?;
-                        notes.push(OpenNote::LedgerReset { quarantined: quarantined.clone() });
+                        notes.push(OpenNote::LedgerReset {
+                            quarantined: quarantined.clone(),
+                        });
                     }
                     None => {
                         ledger.block(
@@ -359,11 +392,16 @@ impl Store {
                 }
             }
         }
-        if let (Some((detail, quarantined)), true) = (&after_reset, notes.is_empty() || notes == [OpenNote::NewDestination]) {
+        if let (Some((detail, quarantined)), true) = (
+            &after_reset,
+            notes.is_empty() || notes == [OpenNote::NewDestination],
+        ) {
             // Reset of a ledger for a folder that had no marker either.
             let reason = format!("the ledger was damaged ({detail}) and has been reset");
             ledger.block(BlockKind::LedgerReset, &reason, now)?;
-            notes.push(OpenNote::LedgerReset { quarantined: quarantined.clone() });
+            notes.push(OpenNote::LedgerReset {
+                quarantined: quarantined.clone(),
+            });
         }
 
         let defer_recovery = cfg.defer_recovery;
@@ -419,14 +457,32 @@ impl Store {
     /// The device's folder name is derived from `display_name` (which is
     /// peer-supplied and is sanitised like any other name) the first time and
     /// never changes afterwards.
-    pub fn register_device(&self, id: &DeviceId, display_name: &str, limits: DeviceLimits) -> Result<DeviceRecord, StoreError> {
-        let shown: String = display_name.chars().filter(|c| !c.is_control()).take(200).collect();
+    pub fn register_device(
+        &self,
+        id: &DeviceId,
+        display_name: &str,
+        limits: DeviceLimits,
+    ) -> Result<DeviceRecord, StoreError> {
+        let shown: String = display_name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(200)
+            .collect();
         let folder = sanitize_component(display_name).or_else(|_| {
             let short: String = id.as_str().chars().take(12).collect();
             sanitize_component(&format!("Device {short}"))
         });
-        let folder = folder.map_err(|source| StoreError::UnsafeName { name: shown.clone(), source })?;
-        Ok(self.inner.ledger.upsert_device(id.as_str(), &shown, &folder, limits, self.inner.now())?)
+        let folder = folder.map_err(|source| StoreError::UnsafeName {
+            name: shown.clone(),
+            source,
+        })?;
+        Ok(self.inner.ledger.upsert_device(
+            id.as_str(),
+            &shown,
+            &folder,
+            limits,
+            self.inner.now(),
+        )?)
     }
 
     /// A registered device, with its limits and current usage.
@@ -446,7 +502,10 @@ impl Store {
 
     /// Blocks final move by hand (for example from a "pause deletions" switch).
     pub fn block_final_move(&self, reason: &str) -> Result<BlockInfo, StoreError> {
-        Ok(self.inner.ledger.block(BlockKind::Manual, reason, self.inner.now())?)
+        Ok(self
+            .inner
+            .ledger
+            .block(BlockKind::Manual, reason, self.inner.now())?)
     }
 
     /// Clears the final-move block. This is the only way it is ever cleared.
@@ -456,6 +515,24 @@ impl Store {
     /// Returns the block that was cleared, if one was set.
     pub fn clear_final_move_block(&self, note: &str) -> Result<Option<BlockInfo>, StoreError> {
         Ok(self.inner.ledger.clear_block(note, self.inner.now())?)
+    }
+
+    /// Tells the engine that the clock is right *now*, after it was wrong.
+    ///
+    /// If the PC's clock was ever ahead (a dead battery, a mistyped year) and
+    /// files were stored during that time, the corrected clock reads earlier
+    /// than times already in the ledger, and [`Store::verify_for_deletion`]
+    /// answers [`DeletionDenied::ClockWentBackwards`] until real time catches
+    /// up, which may be years. This call is the way out, and like clearing
+    /// the block it must be a person's decision: it accepts the present
+    /// reading as the truth. Files whose recorded commit time lies in the
+    /// future are treated as committed now, in this session, so they have to
+    /// age again before they can be confirmed. Returns how many were affected.
+    pub fn acknowledge_clock_change(&self, note: &str) -> Result<u64, StoreError> {
+        Ok(self
+            .inner
+            .ledger
+            .acknowledge_clock(note, self.inner.now())?)
     }
 
     /// Row counts of the ledger, for diagnostics.
@@ -487,7 +564,12 @@ impl Inner {
     pub(crate) fn temp_name(&self) -> String {
         let n = self.temp_counter.fetch_add(1, Ordering::Relaxed);
         let mix = random_u64() ^ self.temp_salt.rotate_left((n % 61) as u32);
-        format!("{TEMP_PREFIX}{:x}-{:x}-{:016x}{TEMP_SUFFIX}", self.ledger.session(), n, mix)
+        format!(
+            "{TEMP_PREFIX}{:x}-{:x}-{:016x}{TEMP_SUFFIX}",
+            self.ledger.session(),
+            n,
+            mix
+        )
     }
 
     /// Walks from the root down `dir`, refusing reparse points and anything
@@ -497,12 +579,19 @@ impl Inner {
     /// Returns the absolute path and the directory's path as it is actually
     /// spelled on disk, or `None` if a component is missing and `create` is
     /// false.
-    pub(crate) fn walk_dirs(&self, dir: &SafeRelPath, create: bool) -> Result<Option<(PathBuf, SafeRelPath)>, StoreError> {
+    pub(crate) fn walk_dirs(
+        &self,
+        dir: &SafeRelPath,
+        create: bool,
+    ) -> Result<Option<(PathBuf, SafeRelPath)>, StoreError> {
         let mut path = self.root().to_path_buf();
         for part in dir.components() {
             let parent = path.clone();
             path.push(part.as_str());
-            let mut stat = self.fs.stat(&path).map_err(|e| StoreError::io("examine", &path, e))?;
+            let mut stat = self
+                .fs
+                .stat(&path)
+                .map_err(|e| StoreError::io("examine", &path, e))?;
             if stat.is_none() {
                 if !create {
                     return Ok(None);
@@ -526,14 +615,20 @@ impl Inner {
                         Err(e) => return Err(StoreError::write("create the directory", &path, e)),
                     },
                 }
-                stat = self.fs.stat(&path).map_err(|e| StoreError::io("examine", &path, e))?;
+                stat = self
+                    .fs
+                    .stat(&path)
+                    .map_err(|e| StoreError::io("examine", &path, e))?;
             }
             match stat {
                 Some(s) if s.reparse => return Err(StoreError::ReparsePoint { path }),
                 Some(s) if s.kind == EntryKind::Dir => {}
                 Some(_) => return Err(StoreError::NotADirectory { path }),
                 None => {
-                    let gone = io::Error::new(io::ErrorKind::NotFound, "the directory vanished while it was being created");
+                    let gone = io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "the directory vanished while it was being created",
+                    );
                     return Err(StoreError::io("examine", &path, gone));
                 }
             }
@@ -542,8 +637,14 @@ impl Inner {
         // Ask the operating system where we really are. This catches what the
         // per-component check cannot: 8.3 short names that alias another
         // directory, and anything that redirected the path after the check.
-        let resolved = self.fs.resolve(&path).map_err(|e| StoreError::io("resolve", &path, e))?;
-        let mismatch = || StoreError::PathMismatch { expected: path.clone(), resolved: resolved.clone() };
+        let resolved = self
+            .fs
+            .resolve(&path)
+            .map_err(|e| StoreError::io("resolve", &path, e))?;
+        let mismatch = || StoreError::PathMismatch {
+            expected: path.clone(),
+            resolved: resolved.clone(),
+        };
         let below = resolved.strip_prefix(self.root()).map_err(|_| mismatch())?;
         let mut actual = Vec::with_capacity(dir.depth());
         for component in below.components() {
@@ -551,7 +652,10 @@ impl Inner {
             actual.push(SafeName::from_stored(name).ok_or_else(mismatch)?);
         }
         let same = actual.len() == dir.depth()
-            && actual.iter().zip(dir.components()).all(|(a, want)| a.collision_key() == want.collision_key());
+            && actual
+                .iter()
+                .zip(dir.components())
+                .all(|(a, want)| a.collision_key() == want.collision_key());
         if !same {
             return Err(mismatch());
         }
@@ -560,21 +664,33 @@ impl Inner {
     }
 
     /// Loads (or reloads) the names in a directory into the cache.
-    pub(crate) fn load_dir_names(&self, dir_key: &str, dir_abs: &Path, reload: bool) -> Result<(), StoreError> {
+    pub(crate) fn load_dir_names(
+        &self,
+        dir_key: &str,
+        dir_abs: &Path,
+        reload: bool,
+    ) -> Result<(), StoreError> {
         if !reload && lock(&self.dir_names).contains_key(dir_key) {
             return Ok(());
         }
-        let listing = self.fs.list_dir(dir_abs).map_err(|e| StoreError::io("list", dir_abs, e))?;
+        let listing = self
+            .fs
+            .list_dir(dir_abs)
+            .map_err(|e| StoreError::io("list", dir_abs, e))?;
         let mut names = HashMap::with_capacity(listing.len());
         for entry in listing {
-            names.entry(collision_key(&entry.name)).or_insert(entry.name);
+            names
+                .entry(collision_key(&entry.name))
+                .or_insert(entry.name);
         }
         lock(&self.dir_names).insert(dir_key.to_owned(), names);
         Ok(())
     }
 
     pub(crate) fn cached_name(&self, dir_key: &str, name_key: &str) -> Option<String> {
-        lock(&self.dir_names).get(dir_key).and_then(|names| names.get(name_key).cloned())
+        lock(&self.dir_names)
+            .get(dir_key)
+            .and_then(|names| names.get(name_key).cloned())
     }
 
     pub(crate) fn remember_name(&self, dir_key: &str, name_key: String, actual: &str) {
@@ -599,7 +715,9 @@ impl Inner {
 fn acquire(lock_path: &Path) -> Result<File, StoreError> {
     match sys::acquire_lock(lock_path) {
         Ok(f) => Ok(f),
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(StoreError::AlreadyOpen { lock: lock_path.to_path_buf() }),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(StoreError::AlreadyOpen {
+            lock: lock_path.to_path_buf(),
+        }),
         Err(e) => Err(StoreError::io("lock", lock_path, e)),
     }
 }

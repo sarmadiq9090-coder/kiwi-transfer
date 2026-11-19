@@ -62,7 +62,11 @@ pub struct RecoveryReport {
 /// One thing met while walking the destination.
 pub(crate) enum Visit<'a> {
     /// A regular file.
-    File { dir_rel: &'a [String], dir_abs: &'a Path, entry: &'a DirEntryInfo },
+    File {
+        dir_rel: &'a [String],
+        dir_abs: &'a Path,
+        entry: &'a DirEntryInfo,
+    },
     /// A reparse point (file or directory). It is reported, never entered.
     Reparse { rel: String },
     /// A directory that could not be listed, or is nested absurdly deep.
@@ -91,7 +95,10 @@ impl Inner {
             let entries = match self.fs.list_dir(&dir_abs) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    visit(Visit::Unreadable { rel: dir_rel.join("/"), error: e.to_string() });
+                    visit(Visit::Unreadable {
+                        rel: dir_rel.join("/"),
+                        error: e.to_string(),
+                    });
                     continue;
                 }
             };
@@ -100,21 +107,30 @@ impl Inner {
                     continue;
                 }
                 if entry.stat.reparse {
-                    visit(Visit::Reparse { rel: join_rel(&dir_rel, &entry.name) });
+                    visit(Visit::Reparse {
+                        rel: join_rel(&dir_rel, &entry.name),
+                    });
                     continue;
                 }
                 match entry.stat.kind {
                     EntryKind::Dir => {
                         if dir_rel.len() >= MAX_DEPTH + 8 {
                             let rel = join_rel(&dir_rel, &entry.name);
-                            visit(Visit::Unreadable { rel, error: "nested too deeply; not entered".to_owned() });
+                            visit(Visit::Unreadable {
+                                rel,
+                                error: "nested too deeply; not entered".to_owned(),
+                            });
                             continue;
                         }
                         let mut child_rel = dir_rel.clone();
                         child_rel.push(entry.name.clone());
                         stack.push((dir_abs.join(&entry.name), child_rel));
                     }
-                    EntryKind::File => visit(Visit::File { dir_rel: &dir_rel, dir_abs: &dir_abs, entry }),
+                    EntryKind::File => visit(Visit::File {
+                        dir_rel: &dir_rel,
+                        dir_abs: &dir_abs,
+                        entry,
+                    }),
                     EntryKind::Other => {}
                 }
             }
@@ -168,7 +184,10 @@ impl Store {
                     }
                     Ok(Some(s)) if s.size != rec.size => {
                         evidence.note_changed_mtime(s.mtime);
-                        Probe::Changed(format!("its size is {} bytes instead of {}", s.size, rec.size))
+                        Probe::Changed(format!(
+                            "its size is {} bytes instead of {}",
+                            s.size, rec.size
+                        ))
                     }
                     Ok(Some(_)) => continue,
                 };
@@ -186,7 +205,11 @@ impl Store {
         let mut ledger_error = None;
         let walked = cancelled
             || inner.walk(cancel, &mut |visit| match visit {
-                Visit::File { dir_rel, dir_abs, entry } => {
+                Visit::File {
+                    dir_rel,
+                    dir_abs,
+                    entry,
+                } => {
                     if is_temp_name(&entry.name) {
                         if !entry.exact {
                             return;
@@ -204,14 +227,17 @@ impl Store {
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                             Err(_) => {
                                 if report.orphan_temps_left.len() < MAX_LISTED {
-                                    report.orphan_temps_left.push(join_rel(dir_rel, &entry.name));
+                                    report
+                                        .orphan_temps_left
+                                        .push(join_rel(dir_rel, &entry.name));
                                 }
                             }
                         }
                     } else if !missing.is_empty() && ledger_error.is_none() {
                         let dir_key = path_key(&dir_rel.join("/"));
                         if missing.is_rename_suspect(&dir_key, &entry.name) {
-                            match ledger.path_key_exists(&path_key(&join_rel(dir_rel, &entry.name))) {
+                            match ledger.path_key_exists(&path_key(&join_rel(dir_rel, &entry.name)))
+                            {
                                 Ok(true) => {}
                                 Ok(false) => report.rename_suspects += 1,
                                 Err(e) => ledger_error = Some(e),

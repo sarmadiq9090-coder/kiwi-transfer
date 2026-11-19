@@ -127,8 +127,11 @@ impl SafeName {
         }
         let suffix = format!(" ({n})");
         let (stem, ext) = split_extension(&self.0);
-        let (stem, ext) =
-            if utf16_len(ext) + utf16_len(&suffix) < MAX_COMPONENT_UTF16 { (stem, ext) } else { (self.0.as_str(), "") };
+        let (stem, ext) = if utf16_len(ext) + utf16_len(&suffix) < MAX_COMPONENT_UTF16 {
+            (stem, ext)
+        } else {
+            (self.0.as_str(), "")
+        };
         let budget = MAX_COMPONENT_UTF16 - utf16_len(ext) - utf16_len(&suffix);
         let kept = take_utf16(stem, budget);
         SafeName(format!("{kept}{suffix}{ext}"))
@@ -372,7 +375,8 @@ fn is_noncharacter(c: char) -> bool {
 /// True if Win32 normalisation could turn the component into `.`/`..`/nothing,
 /// or if it carries no visible content at all.
 fn is_blank_component(raw: &str) -> bool {
-    raw.chars().all(|c| c == '.' || c.is_whitespace() || c.is_control() || is_invisible_format(c))
+    raw.chars()
+        .all(|c| c == '.' || c.is_whitespace() || c.is_control() || is_invisible_format(c))
 }
 
 fn clean_component(raw: &str) -> Result<SafeName, SanitizeError> {
@@ -384,12 +388,23 @@ fn clean_component(raw: &str) -> Result<SafeName, SanitizeError> {
         // reaches this function from `sanitize_rel_path`; as a single name it
         // is refused as well.
         let dots = raw.chars().filter(|c| *c == '.').count();
-        return Err(if dots >= 2 { SanitizeError::ParentTraversal } else { SanitizeError::BlankComponent });
+        return Err(if dots >= 2 {
+            SanitizeError::ParentTraversal
+        } else {
+            SanitizeError::BlankComponent
+        });
     }
 
-    let mapped: String = raw.nfc().map(|c| if is_neutralised(c) { '_' } else { c }).collect();
+    let mapped: String = raw
+        .nfc()
+        .map(|c| if is_neutralised(c) { '_' } else { c })
+        .collect();
     let trimmed = mapped.trim_end_matches(['.', ' ']);
-    let mut name = if trimmed.is_empty() { "_".to_owned() } else { trimmed.to_owned() };
+    let mut name = if trimmed.is_empty() {
+        "_".to_owned()
+    } else {
+        trimmed.to_owned()
+    };
 
     // Prefixing can lengthen the name and shortening can expose a reserved
     // name, so repeat until neither applies. Two rounds always suffice; the
@@ -424,7 +439,10 @@ fn is_reserved_device_name(name: &str) -> bool {
             let rest = chars.next();
             (prefix == "COM" || prefix == "LPT")
                 && rest.is_none()
-                && matches!(digit, Some('0'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}'))
+                && matches!(
+                    digit,
+                    Some('0'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}')
+                )
         }
     }
 }
@@ -447,11 +465,25 @@ fn shorten(name: &str, max_utf16: usize) -> String {
         return name.to_owned();
     }
     let (stem, ext) = split_extension(name);
-    let (stem, ext) = if utf16_len(ext) <= MAX_KEPT_EXTENSION_UTF16 { (stem, ext) } else { (name, "") };
+    let (stem, ext) = if utf16_len(ext) <= MAX_KEPT_EXTENSION_UTF16 {
+        (stem, ext)
+    } else {
+        (name, "")
+    };
     let kept = take_utf16(stem, max_utf16 - utf16_len(ext));
     let kept = kept.trim_end_matches(['.', ' ']);
-    let mut out = if kept.is_empty() { "_".to_owned() } else { kept.to_owned() };
+    let mut out = if kept.is_empty() {
+        "_".to_owned()
+    } else {
+        kept.to_owned()
+    };
     out.push_str(ext);
+    // Cutting can remove the only visible character of a name that began
+    // with, say, a no-break space followed by hundreds of blanks. What is left
+    // would be a blank name, which this module itself refuses.
+    if is_blank_component(&out) {
+        out = "_".to_owned();
+    }
     out
 }
 
@@ -479,7 +511,11 @@ pub(crate) fn utf16_len(s: &str) -> usize {
 /// as many names as equal as NTFS does; erring that way only ever produces an
 /// extra ` (2)` suffix, never an overwrite.
 pub fn collision_key(name: &str) -> String {
-    name.nfc().flat_map(char::to_uppercase).flat_map(char::to_lowercase).nfc().collect()
+    name.nfc()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .nfc()
+        .collect()
 }
 
 #[cfg(test)]
@@ -487,7 +523,9 @@ mod tests {
     use super::*;
 
     fn ok(input: &str) -> String {
-        sanitize_rel_path(input).unwrap_or_else(|e| panic!("{input:?} was rejected: {e}")).to_slash_string()
+        sanitize_rel_path(input)
+            .unwrap_or_else(|e| panic!("{input:?} was rejected: {e}"))
+            .to_slash_string()
     }
 
     fn err(input: &str) -> SanitizeError {
@@ -553,7 +591,10 @@ mod tests {
             ("\\\\?\\C:\\x", UncOrDevicePath),
             ("\\\\.\\PhysicalDrive0", UncOrDevicePath),
             ("\\\\?\\UNC\\server\\share\\x", UncOrDevicePath),
-            ("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\x", UncOrDevicePath),
+            (
+                "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\x",
+                UncOrDevicePath,
+            ),
             ("//./pipe/x", UncOrDevicePath),
             // traversal
             ("..", ParentTraversal),
@@ -595,7 +636,9 @@ mod tests {
         let deep = vec!["d"; MAX_DEPTH].join("/");
         assert_eq!(sanitize_rel_path(&deep).unwrap().depth(), MAX_DEPTH);
         let too_deep = vec!["d"; MAX_DEPTH + 1].join("/");
-        assert!(matches!(err(&too_deep), SanitizeError::TooDeep { depth } if depth == MAX_DEPTH + 1));
+        assert!(
+            matches!(err(&too_deep), SanitizeError::TooDeep { depth } if depth == MAX_DEPTH + 1)
+        );
     }
 
     #[test]
@@ -632,7 +675,10 @@ mod tests {
             ("photo.jpg::$DATA", "photo.jpg__$DATA"),
             ("dir:stream/file", "dir_stream/file"),
             ("dir/:", "dir/_"),
-            ("Screenshot 2024-01-01 12:30:00.png", "Screenshot 2024-01-01 12_30_00.png"),
+            (
+                "Screenshot 2024-01-01 12:30:00.png",
+                "Screenshot 2024-01-01 12_30_00.png",
+            ),
             // a drive-like component that is not at the start is just a name
             ("dir/C:/x", "dir/C_/x"),
             (" C:/x", " C_/x"),
@@ -700,22 +746,80 @@ mod tests {
     #[test]
     fn reserved_device_names_are_neutralised() {
         let reserved = [
-            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$", "COM0", "COM1", "COM2", "COM3", "COM4",
-            "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
-            "LPT8", "LPT9", "COM\u{B9}", "COM\u{B2}", "COM\u{B3}", "LPT\u{B9}", "LPT\u{B2}", "LPT\u{B3}",
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            "CONIN$",
+            "CONOUT$",
+            "CLOCK$",
+            "COM0",
+            "COM1",
+            "COM2",
+            "COM3",
+            "COM4",
+            "COM5",
+            "COM6",
+            "COM7",
+            "COM8",
+            "COM9",
+            "LPT0",
+            "LPT1",
+            "LPT2",
+            "LPT3",
+            "LPT4",
+            "LPT5",
+            "LPT6",
+            "LPT7",
+            "LPT8",
+            "LPT9",
+            "COM\u{B9}",
+            "COM\u{B2}",
+            "COM\u{B3}",
+            "LPT\u{B9}",
+            "LPT\u{B2}",
+            "LPT\u{B3}",
         ];
         for name in reserved {
             assert_eq!(ok(name), format!("_{name}"), "bare {name}");
             let lower = name.to_lowercase();
             assert_eq!(ok(&lower), format!("_{lower}"), "lower-case {name}");
-            assert_eq!(ok(&format!("{name}.txt")), format!("_{name}.txt"), "{name} with extension");
-            assert_eq!(ok(&format!("{name}.tar.gz")), format!("_{name}.tar.gz"), "{name} with two extensions");
-            assert_eq!(ok(&format!("{name} .txt")), format!("_{name} .txt"), "{name} with space before extension");
-            assert_eq!(ok(&format!("dir/{name}/file")), format!("dir/_{name}/file"), "{name} as a directory");
+            assert_eq!(
+                ok(&format!("{name}.txt")),
+                format!("_{name}.txt"),
+                "{name} with extension"
+            );
+            assert_eq!(
+                ok(&format!("{name}.tar.gz")),
+                format!("_{name}.tar.gz"),
+                "{name} with two extensions"
+            );
+            assert_eq!(
+                ok(&format!("{name} .txt")),
+                format!("_{name} .txt"),
+                "{name} with space before extension"
+            );
+            assert_eq!(
+                ok(&format!("dir/{name}/file")),
+                format!("dir/_{name}/file"),
+                "{name} as a directory"
+            );
             // Trailing dots, spaces and stream syntax must not hide the name.
-            assert_eq!(ok(&format!("{name}.")), format!("_{name}"), "{name} with trailing dot");
-            assert_eq!(ok(&format!("{name} ")), format!("_{name}"), "{name} with trailing space");
-            assert_eq!(ok(&format!("{name}. . ")), format!("_{name}"), "{name} with trailing dots and spaces");
+            assert_eq!(
+                ok(&format!("{name}.")),
+                format!("_{name}"),
+                "{name} with trailing dot"
+            );
+            assert_eq!(
+                ok(&format!("{name} ")),
+                format!("_{name}"),
+                "{name} with trailing space"
+            );
+            assert_eq!(
+                ok(&format!("{name}. . ")),
+                format!("_{name}"),
+                "{name} with trailing dots and spaces"
+            );
         }
         let mixed = [
             ("CoN", "_CoN"),
@@ -735,8 +839,28 @@ mod tests {
     #[test]
     fn names_that_only_resemble_reserved_ones_pass() {
         for name in [
-            "CONSOLE", "CON1", "COM", "COM10", "COM1A", "LPT", "LPT10", "NULL", "AUXILIARY", "PRNT", "_CON", "CON_",
-            "xCON", " CON", "CONIN", "CONOUT", "CLOCK", "my.CON", "a.NUL.txt", "COM\u{2074}", "icon", "nul-file",
+            "CONSOLE",
+            "CON1",
+            "COM",
+            "COM10",
+            "COM1A",
+            "LPT",
+            "LPT10",
+            "NULL",
+            "AUXILIARY",
+            "PRNT",
+            "_CON",
+            "CON_",
+            "xCON",
+            " CON",
+            "CONIN",
+            "CONOUT",
+            "CLOCK",
+            "my.CON",
+            "a.NUL.txt",
+            "COM\u{2074}",
+            "icon",
+            "nul-file",
         ] {
             assert_eq!(ok(name), name, "{name:?} should pass unchanged");
         }
@@ -801,7 +925,12 @@ mod tests {
         for (a, b) in same {
             assert_eq!(collision_key(a), collision_key(b), "{a:?} vs {b:?}");
         }
-        let different = [("a", "b"), ("img (2).jpg", "img.jpg"), ("résumé", "resume"), ("صورة", "صوره")];
+        let different = [
+            ("a", "b"),
+            ("img (2).jpg", "img.jpg"),
+            ("résumé", "resume"),
+            ("صورة", "صوره"),
+        ];
         for (a, b) in different {
             assert_ne!(collision_key(a), collision_key(b), "{a:?} vs {b:?}");
         }
@@ -844,6 +973,17 @@ mod tests {
         let out = ok(&hidden);
         assert_eq!(out, "_COM1");
 
+        // Shortening must not leave a blank name behind (found by the property
+        // tests: a no-break space, a long run of spaces, then the only letter).
+        let blank = format!("\u{a0}{}a", " ".repeat(MAX_COMPONENT_UTF16));
+        let out = ok(&blank);
+        assert_eq!(out, "_");
+        assert_eq!(ok(&out), out);
+        let blank_stem = format!("\u{3000}{}a.jpg", " ".repeat(MAX_COMPONENT_UTF16));
+        let out = ok(&blank_stem);
+        assert_eq!(out, "\u{3000}.jpg");
+        assert_eq!(ok(&out), out);
+
         // Exactly at the limit: untouched.
         let exact = "d".repeat(MAX_COMPONENT_UTF16);
         assert_eq!(ok(&exact), exact);
@@ -882,7 +1022,11 @@ mod tests {
             ("NUL", "_NUL"),
         ];
         for (input, expected) in cases {
-            assert_eq!(sanitize_component(input).unwrap().as_str(), expected, "input {input:?}");
+            assert_eq!(
+                sanitize_component(input).unwrap().as_str(),
+                expected,
+                "input {input:?}"
+            );
         }
         for input in ["", ".", "..", "...", " ", ". .", "a\0b"] {
             assert!(sanitize_component(input).is_err(), "input {input:?}");
@@ -891,7 +1035,13 @@ mod tests {
 
     #[test]
     fn collision_suffixes() {
-        let n = |s: &str, k: u32| sanitize_component(s).unwrap().with_collision_suffix(k).as_str().to_owned();
+        let n = |s: &str, k: u32| {
+            sanitize_component(s)
+                .unwrap()
+                .with_collision_suffix(k)
+                .as_str()
+                .to_owned()
+        };
         assert_eq!(n("photo.jpg", 1), "photo.jpg");
         assert_eq!(n("photo.jpg", 2), "photo (2).jpg");
         assert_eq!(n("photo.jpg", 137), "photo (137).jpg");
@@ -905,14 +1055,20 @@ mod tests {
         assert_eq!(renamed.utf16_len(), MAX_COMPONENT_UTF16);
         assert!(renamed.as_str().ends_with(" (4294967295).jpg"));
         // ... also when the name has no extension, or an absurd one.
-        let bare = sanitize_component(&"b".repeat(400)).unwrap().with_collision_suffix(7);
+        let bare = sanitize_component(&"b".repeat(400))
+            .unwrap()
+            .with_collision_suffix(7);
         assert_eq!(bare.utf16_len(), MAX_COMPONENT_UTF16);
         assert!(bare.as_str().ends_with(" (7)"));
-        let odd = sanitize_component(&format!("x.{}", "e".repeat(238))).unwrap().with_collision_suffix(7);
+        let odd = sanitize_component(&format!("x.{}", "e".repeat(238)))
+            .unwrap()
+            .with_collision_suffix(7);
         assert_eq!(odd.utf16_len(), MAX_COMPONENT_UTF16);
         assert!(odd.as_str().ends_with(" (7)"));
         // ... and never splits a character while doing so.
-        let emoji = sanitize_component(&format!("{}.png", "😀".repeat(118))).unwrap().with_collision_suffix(2);
+        let emoji = sanitize_component(&format!("{}.png", "😀".repeat(118)))
+            .unwrap()
+            .with_collision_suffix(2);
         assert!(emoji.utf16_len() <= MAX_COMPONENT_UTF16);
         assert!(emoji.as_str().ends_with(" (2).png"));
         // A suffixed name is itself a clean name (it must survive the ledger round trip).
@@ -926,8 +1082,24 @@ mod tests {
     #[test]
     fn stored_paths_are_revalidated() {
         assert!(SafeRelPath::from_stored("a/b/c.jpg").is_some());
-        for bad in ["", "/a", "a//b", "a/../b", "a\\b", "a/b/", "C:/x", "a/CON", "a/b.", "a/b ", "./a", "cafe\u{301}"] {
-            assert!(SafeRelPath::from_stored(bad).is_none(), "{bad:?} must not be accepted from the ledger");
+        for bad in [
+            "",
+            "/a",
+            "a//b",
+            "a/../b",
+            "a\\b",
+            "a/b/",
+            "C:/x",
+            "a/CON",
+            "a/b.",
+            "a/b ",
+            "./a",
+            "cafe\u{301}",
+        ] {
+            assert!(
+                SafeRelPath::from_stored(bad).is_none(),
+                "{bad:?} must not be accepted from the ledger"
+            );
         }
         assert!(SafeName::from_stored("ok.txt").is_some());
         for bad in ["", "a/b", "NUL", "x.", ".kiwi-tmp-1.part"] {
@@ -946,7 +1118,12 @@ mod tests {
         assert_eq!(SafeRelPath::empty().utf16_len(), 0);
         let joined = p.parent().join(sanitize_component("d.png").unwrap());
         assert_eq!(joined.to_slash_string(), "a/b/d.png");
-        assert_eq!(p.parent().join_path(&sanitize_rel_path("x/y").unwrap()).to_slash_string(), "a/b/x/y");
+        assert_eq!(
+            p.parent()
+                .join_path(&sanitize_rel_path("x/y").unwrap())
+                .to_slash_string(),
+            "a/b/x/y"
+        );
         let root = Path::new("root");
         let abs = p.under(root);
         assert!(abs.starts_with(root));

@@ -62,17 +62,22 @@ pub mod template;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
 
-pub use destination::{CopyOnlyReason, Destination, DestinationError, FinalMoveSupport, VolumeClass, VolumeInfo};
+pub use destination::{
+    CopyOnlyReason, Destination, DestinationError, FinalMoveSupport, VolumeClass, VolumeInfo,
+};
 pub use error::{LedgerError, QuotaKind, StoreError};
 pub use hash::ContentHash;
-pub use ledger::{BlockInfo, BlockKind, DeviceLimits, DeviceRecord, EventRecord, FileState, LedgerStats};
+pub use ledger::{
+    BlockInfo, BlockKind, DeviceLimits, DeviceRecord, EventRecord, FileState, LedgerStats,
+};
 pub use sanitize::{sanitize_component, sanitize_rel_path, SafeName, SafeRelPath, SanitizeError};
 #[cfg(any(test, feature = "test-util"))]
 pub use store::Seams;
 pub use store::{
-    CancelToken, CommitOutcome, CommitReceipt, DedupeScope, DeletionDenied, DeletionProof, DeviceId, FileRequest,
-    FindingKind, IncomingFile, NotVerifiedReason, OpenNote, RecoveryReport, ScanFinding, ScanOptions, ScanPolicy,
-    ScanReport, ScanVerdict, Store, StoreConfig, StoredFile, StoredStatus, DEFAULT_SAFETY_MARGIN_BYTES,
-    MAX_LISTED_FINDINGS, MAX_PATH_UTF16, MIN_WALL_AGE_SECS, STORE_DIR, TEMP_PREFIX, TEMP_SUFFIX,
+    CancelToken, CommitOutcome, CommitReceipt, DedupeScope, DeletionDenied, DeletionProof,
+    DeviceId, FileRequest, FindingKind, IncomingFile, NotVerifiedReason, OpenNote, RecoveryReport,
+    ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict, Store, StoreConfig, StoredFile,
+    StoredStatus, DEFAULT_SAFETY_MARGIN_BYTES, MAX_LISTED_FINDINGS, MAX_PATH_UTF16,
+    MIN_WALL_AGE_SECS, STORE_DIR, TEMP_PREFIX, TEMP_SUFFIX,
 };
 pub use template::{CaptureTime, CivilDate, Template, TemplateError};

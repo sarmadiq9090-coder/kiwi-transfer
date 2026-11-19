@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use kiwi_store::{
-    BlockKind, CancelToken, ContentHash, DeletionDenied, LedgerError, NotVerifiedReason, OpenNote, ScanPolicy,
-    StoreConfig, StoreError, StoredStatus, STORE_DIR,
+    BlockKind, CancelToken, ContentHash, DeletionDenied, LedgerError, NotVerifiedReason, OpenNote,
+    ScanPolicy, StoreConfig, StoreError, StoredStatus, STORE_DIR,
 };
 
 #[test]
@@ -41,18 +41,35 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     }
     // A directory with a temp-file name is not a file to delete.
     std::fs::create_dir_all(w.path("Pixel 8/.kiwi-tmp-5-5-dddddddddddddddd.part/inside")).unwrap();
-    std::fs::write(w.path("Pixel 8/.kiwi-tmp-5-5-dddddddddddddddd.part/inside/file.txt"), b"x").unwrap();
+    std::fs::write(
+        w.path("Pixel 8/.kiwi-tmp-5-5-dddddddddddddddd.part/inside/file.txt"),
+        b"x",
+    )
+    .unwrap();
     // Nothing inside the bookkeeping directory is ever swept.
-    let inside_store_dir = w.root.join(STORE_DIR).join(".kiwi-tmp-0-0-eeeeeeeeeeeeeeee.part");
+    let inside_store_dir = w
+        .root
+        .join(STORE_DIR)
+        .join(".kiwi-tmp-0-0-eeeeeeeeeeeeeeee.part");
     std::fs::write(&inside_store_dir, b"x").unwrap();
 
     let store = w.open();
     let report = store.recovery_report().unwrap();
     assert!(report.completed);
     assert_eq!(report.orphan_temps_removed, 5);
-    assert_eq!(report.orphan_temp_bytes, 1_000 + 2_000 + 3_000 + 4_000 + 5_000);
+    assert_eq!(
+        report.orphan_temp_bytes,
+        1_000 + 2_000 + 3_000 + 4_000 + 5_000
+    );
     assert!(report.orphan_temps_left.is_empty());
-    assert_eq!((report.records_checked, report.newly_missing, report.newly_changed), (1, 0, 0));
+    assert_eq!(
+        (
+            report.records_checked,
+            report.newly_missing,
+            report.newly_changed
+        ),
+        (1, 0, 0)
+    );
 
     let mut expected: Vec<String> = bystanders.iter().map(|s| s.to_string()).collect();
     expected.push("Pixel 8/DCIM/Camera/keep.jpg".to_owned());
@@ -61,7 +78,12 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     assert_eq!(w.files(), expected);
     assert!(inside_store_dir.exists());
     assert!(store.final_move_block().unwrap().is_none());
-    let events: Vec<String> = store.events_after(0, 1_000).unwrap().into_iter().map(|e| e.kind).collect();
+    let events: Vec<String> = store
+        .events_after(0, 1_000)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
     assert!(events.contains(&"recovery_finished".to_owned()));
 }
 
@@ -70,7 +92,9 @@ fn records_of_vanished_files_are_marked_and_block_final_move() {
     let w = World::new("vanished");
     let hashes: Vec<ContentHash> = {
         let store = w.open();
-        (0..4).map(|i| put(&store, &format!("DCIM/{i}.jpg"), &data(i, 10_000)).hash).collect()
+        (0..4)
+            .map(|i| put(&store, &format!("DCIM/{i}.jpg"), &data(i, 10_000)).hash)
+            .collect()
     };
     std::fs::remove_file(w.path("Pixel 8/DCIM/1.jpg")).unwrap();
     // Another one grew: obviously not the file that was stored.
@@ -84,40 +108,92 @@ fn records_of_vanished_files_are_marked_and_block_final_move() {
     w.clock.advance_hours(30);
     let store = w.open();
     let report = store.recovery_report().unwrap();
-    assert_eq!((report.records_checked, report.newly_missing, report.newly_changed), (4, 1, 2));
-    assert!(!report.mass_change, "three files are a problem, not a mass change");
+    assert_eq!(
+        (
+            report.records_checked,
+            report.newly_missing,
+            report.newly_changed
+        ),
+        (4, 1, 2)
+    );
+    assert!(
+        !report.mass_change,
+        "three files are a problem, not a mass change"
+    );
     let stats = store.stats().unwrap();
-    assert_eq!((stats.files_committed, stats.files_missing, stats.files_changed), (1, 1, 2));
+    assert_eq!(
+        (
+            stats.files_committed,
+            stats.files_missing,
+            stats.files_changed
+        ),
+        (1, 1, 2)
+    );
 
     let block = store.final_move_block().unwrap().expect("blocked");
     assert_eq!(block.kind, BlockKind::IntegrityProblems);
     // Even the intact file cannot be confirmed for deletion while blocked.
-    assert!(matches!(store.verify_for_deletion(&hashes[0], 1), Err(DeletionDenied::Blocked(_))));
+    assert!(matches!(
+        store.verify_for_deletion(&hashes[0], 1),
+        Err(DeletionDenied::Blocked(_))
+    ));
     assert!(store.is_safely_stored(&hashes[0]).unwrap().is_verified());
-    assert!(matches!(store.is_safely_stored(&hashes[1]).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Missing)));
-    assert!(matches!(store.is_safely_stored(&hashes[2]).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Changed(_))));
-    assert!(matches!(store.is_safely_stored(&hashes[3]).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::Changed(_))));
+    assert!(matches!(
+        store.is_safely_stored(&hashes[1]).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Missing)
+    ));
+    assert!(matches!(
+        store.is_safely_stored(&hashes[2]).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Changed(_))
+    ));
+    assert!(matches!(
+        store.is_safely_stored(&hashes[3]).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::Changed(_))
+    ));
     drop(store);
 
     // The next start does not report the same findings again.
     let store = w.open();
     let report = store.recovery_report().unwrap();
-    assert_eq!((report.records_checked, report.newly_missing, report.newly_changed), (1, 0, 0));
-    assert!(store.final_move_block().unwrap().is_some(), "the block stays until it is cleared");
-    store.clear_final_move_block("the user deleted these on purpose").unwrap();
+    assert_eq!(
+        (
+            report.records_checked,
+            report.newly_missing,
+            report.newly_changed
+        ),
+        (1, 0, 0)
+    );
+    assert!(
+        store.final_move_block().unwrap().is_some(),
+        "the block stays until it is cleared"
+    );
+    store
+        .clear_final_move_block("the user deleted these on purpose")
+        .unwrap();
     assert!(store.verify_for_deletion(&hashes[0], 1).is_ok());
     drop(store);
     let store = w.open();
-    assert!(store.final_move_block().unwrap().is_none(), "known problems do not block again");
+    assert!(
+        store.final_move_block().unwrap().is_none(),
+        "known problems do not block again"
+    );
 }
 
 #[test]
 fn deletions_need_not_block_if_the_policy_says_so() {
     let mut w = World::new("policy");
-    w.configure = |cfg: &mut StoreConfig| cfg.scan_policy = ScanPolicy { block_on_missing: false, ..ScanPolicy::default() };
+    w.configure = |cfg: &mut StoreConfig| {
+        cfg.scan_policy = ScanPolicy {
+            block_on_missing: false,
+            ..ScanPolicy::default()
+        }
+    };
     let (gone, changed) = {
         let store = w.open();
-        (put(&store, "gone.jpg", &data(1, 5_000)).hash, put(&store, "changed.jpg", &data(2, 5_000)).hash)
+        (
+            put(&store, "gone.jpg", &data(1, 5_000)).hash,
+            put(&store, "changed.jpg", &data(2, 5_000)).hash,
+        )
     };
     std::fs::remove_file(w.path("Pixel 8/gone.jpg")).unwrap();
     let store = w.open();
@@ -127,7 +203,10 @@ fn deletions_need_not_block_if_the_policy_says_so() {
     // Changed content blocks regardless of that switch.
     corrupt_silently(&w.path("Pixel 8/changed.jpg"));
     assert!(!store.is_safely_stored(&changed).unwrap().is_verified());
-    assert_eq!(store.final_move_block().unwrap().unwrap().kind, BlockKind::IntegrityProblems);
+    assert_eq!(
+        store.final_move_block().unwrap().unwrap().kind,
+        BlockKind::IntegrityProblems
+    );
 }
 
 #[test]
@@ -154,8 +233,12 @@ fn files_renamed_and_rewritten_look_like_ransomware() {
     let mut w = World::new("ransom");
     // Raise the "share of the library missing" threshold so that the
     // deletions alone would not trip it: the renames are what must be caught.
-    w.configure =
-        |cfg: &mut StoreConfig| cfg.scan_policy = ScanPolicy { mass_missing_min_percent: 50, ..ScanPolicy::default() };
+    w.configure = |cfg: &mut StoreConfig| {
+        cfg.scan_policy = ScanPolicy {
+            mass_missing_min_percent: 50,
+            ..ScanPolicy::default()
+        }
+    };
     {
         let store = w.open();
         for i in 0..30 {
@@ -174,9 +257,15 @@ fn files_renamed_and_rewritten_look_like_ransomware() {
     assert_eq!(report.newly_missing, 10);
     assert_eq!(report.rename_suspects, 10);
     assert!(report.mass_change);
-    assert_eq!(store.final_move_block().unwrap().unwrap().kind, BlockKind::MassChange);
+    assert_eq!(
+        store.final_move_block().unwrap().unwrap().kind,
+        BlockKind::MassChange
+    );
     // The renamed files are evidence; they are not touched.
-    assert_eq!(std::fs::read(w.path("Pixel 8/DCIM/000.jpg.locked")).unwrap(), b"ENCRYPTED");
+    assert_eq!(
+        std::fs::read(w.path("Pixel 8/DCIM/000.jpg.locked")).unwrap(),
+        b"ENCRYPTED"
+    );
 }
 
 #[test]
@@ -186,10 +275,16 @@ fn a_recovery_pass_leaves_running_transfers_alone() {
     let store = w.open();
     assert!(store.recovery_report().is_none(), "recovery was deferred");
     std::fs::create_dir_all(w.path("Pixel 8")).unwrap();
-    std::fs::write(w.path("Pixel 8/.kiwi-tmp-0-0-0000000000000000.part"), b"orphan").unwrap();
+    std::fs::write(
+        w.path("Pixel 8/.kiwi-tmp-0-0-0000000000000000.part"),
+        b"orphan",
+    )
+    .unwrap();
 
     let bytes = data(1, 50_000);
-    let mut incoming = store.begin_file(request(&phone(), "live.jpg", &bytes)).unwrap();
+    let mut incoming = store
+        .begin_file(request(&phone(), "live.jpg", &bytes))
+        .unwrap();
     incoming.write(&bytes[..20_000]).unwrap();
     assert_eq!(w.temp_files().len(), 2);
 
@@ -210,7 +305,11 @@ fn a_cancelled_recovery_says_it_did_not_finish() {
     w.configure = |cfg: &mut StoreConfig| cfg.defer_recovery = true;
     let store = w.open();
     put(&store, "a.jpg", b"x");
-    std::fs::write(w.path("Pixel 8/.kiwi-tmp-0-0-0000000000000000.part"), b"orphan").unwrap();
+    std::fs::write(
+        w.path("Pixel 8/.kiwi-tmp-0-0-0000000000000000.part"),
+        b"orphan",
+    )
+    .unwrap();
     let cancel = CancelToken::new();
     cancel.cancel();
     let report = store.run_recovery(&cancel).unwrap();
@@ -227,7 +326,10 @@ fn sessions_count_every_open() {
     for expected in 1..=5 {
         let store = w.open();
         assert_eq!(store.session(), expected);
-        assert_eq!(store.open_notes().contains(&OpenNote::NewDestination), expected == 1);
+        assert_eq!(
+            store.open_notes().contains(&OpenNote::NewDestination),
+            expected == 1
+        );
     }
 }
 
@@ -246,8 +348,14 @@ fn a_ledger_that_lost_its_records_is_noticed() {
     assert_eq!(store.open_notes(), [OpenNote::LedgerLost]);
     let block = store.final_move_block().unwrap().expect("blocked");
     assert_eq!(block.kind, BlockKind::LedgerLost);
-    assert!(matches!(store.verify_for_deletion(&hash, 1), Err(DeletionDenied::Blocked(_))));
-    assert!(matches!(store.is_safely_stored(&hash).unwrap(), StoredStatus::NotVerified(NotVerifiedReason::NoRecord)));
+    assert!(matches!(
+        store.verify_for_deletion(&hash, 1),
+        Err(DeletionDenied::Blocked(_))
+    ));
+    assert!(matches!(
+        store.is_safely_stored(&hash).unwrap(),
+        StoredStatus::NotVerified(NotVerifiedReason::NoRecord)
+    ));
     // The file itself is untouched and is recognised when it is sent again.
     assert_eq!(w.files(), vec!["Pixel 8/a.jpg"]);
     let receipt = put(&store, "a.jpg", &data(1, 3_000));
@@ -257,7 +365,10 @@ fn a_ledger_that_lost_its_records_is_noticed() {
     // Later opens are ordinary; the block stays until cleared.
     let store = w.open();
     assert!(store.open_notes().is_empty());
-    assert_eq!(store.final_move_block().unwrap().unwrap().kind, BlockKind::LedgerLost);
+    assert_eq!(
+        store.final_move_block().unwrap().unwrap().kind,
+        BlockKind::LedgerLost
+    );
 }
 
 #[test]
@@ -275,9 +386,21 @@ fn a_folder_that_lost_its_marker_is_noticed() {
     assert!(store.open_notes().contains(&OpenNote::MarkerRecreated));
     let block = store.final_move_block().unwrap().expect("blocked");
     // The missing file is found by the same open; either reason is a block.
-    assert!(matches!(block.kind, BlockKind::MarkerMissing | BlockKind::IntegrityProblems), "{block:?}");
-    assert!(matches!(store.verify_for_deletion(&hash, 1), Err(DeletionDenied::Blocked(_))));
-    assert!(store.events_after(0, 1_000).unwrap().iter().any(|e| e.detail.as_deref().is_some_and(|d| d.contains("identity marker"))));
+    assert!(
+        matches!(
+            block.kind,
+            BlockKind::MarkerMissing | BlockKind::IntegrityProblems
+        ),
+        "{block:?}"
+    );
+    assert!(matches!(
+        store.verify_for_deletion(&hash, 1),
+        Err(DeletionDenied::Blocked(_))
+    ));
+    assert!(store.events_after(0, 1_000).unwrap().iter().any(|e| e
+        .detail
+        .as_deref()
+        .is_some_and(|d| d.contains("identity marker"))));
 }
 
 #[test]
@@ -301,7 +424,10 @@ fn a_ledger_cannot_be_used_with_another_folder() {
     let mut cfg = b.config();
     cfg.ledger_dir = a.ledger_dir.clone();
     match kiwi_store::Store::open_with_seams(cfg, b.seams()) {
-        Err(StoreError::Ledger(LedgerError::DestinationMismatch { ledger_id, marker_id })) => {
+        Err(StoreError::Ledger(LedgerError::DestinationMismatch {
+            ledger_id,
+            marker_id,
+        })) => {
             assert_ne!(ledger_id, marker_id);
             assert_eq!(ledger_id.len(), 32);
         }
@@ -325,6 +451,8 @@ fn the_ledger_may_live_inside_the_bookkeeping_directory() {
     assert_eq!(w.files(), vec!["Pixel 8/a.jpg"]);
     assert!(store.ledger_path().starts_with(w.root.join(STORE_DIR)));
     // The scan does not mistake the engine's own files for unexpected ones.
-    let report = store.integrity_scan(&Default::default(), &CancelToken::new()).unwrap();
+    let report = store
+        .integrity_scan(&Default::default(), &CancelToken::new())
+        .unwrap();
     assert_eq!(report.unexpected, 0);
 }
