@@ -1555,27 +1555,36 @@ sender                                               receiver
   |<---------------------------------- XFER_END_ACK --|
 ```
 
-The same flow is used in both directions and for every purpose. Only the purpose, the destination and the
-consent rule differ (9.1).
+The same flow is used in both directions, for every purpose and for every item kind (9.6). Only the
+purpose, the destination and the consent rule differ (9.1). **Copying is immediate for everything the user
+selected for backup**: no rule of final move (keep-on-phone period, delays, weekly check) delays a copy.
 
 ### 6.2 Items and metadata
 
+**Version.** A source file has a new **version** when its size, its modification time or its content hash
+differs from the values the sender recorded. Nothing else makes a new version. In particular the MediaStore
+`GENERATION_MODIFIED` value does not: it increases on any metadata update (trashing, a favourite flag, a
+media rescan). A changed generation is only a **trigger**: the phone drops its cached hash and hashes the
+file again; the item is a new version only if that hash, the size or the modification time differ (KT-10).
+
 **Item key.** `key` identifies one version of one source file for this link. The sender MUST use the same
-key for the same version in every session (resume depends on it) and MUST use a different key when the
-size, the modification time or the MediaStore generation of the source changes. RECOMMENDED construction:
-the first 16 bytes of `KDF("kiwi/1 item key", canonical local identity)` where the identity is, on Android,
-`volume || media_id || size || mtime || generation`. The receiver treats it as opaque.
+key for the same version in every session (resume depends on it) and MUST use a different key for a
+different version. RECOMMENDED construction: the first 16 bytes of
+`KDF("kiwi/1 item key", volume || media_id || u64be(version_no))`, where `version_no` is a counter in the
+phone ledger that is increased each time a new version of that file is found. The receiver treats the key
+as opaque.
 
 **Metadata carried** (all inside `Item`):
 
 | Metadata | Field | What the receiver does with it |
 |---|---|---|
-| File name | `name` | Sanitised (6.8), then used as the stored name. |
+| File name | `name`, `orig_name` | `name` is sanitised (6.8), then used as the stored name. Both are kept in the ledger. |
 | Folder / album | `path`, `media.bucket` | Sanitised components; used only if the receiver's folder layout uses them. |
+| Kind | `kind` | Decides the sub-folder inside the phone's namespace and the restore behaviour (9.6). Never decides how a file is opened. |
 | Size | `size` | Checked against the bytes received; quota. |
-| Modification time | `mtime` | Stored in the ledger; set as the file's last-write time before the final flush (PC), best effort on the phone. |
-| MediaStore identity | `media.volume`, `media.media_id`, `media.generation` | Stored in the ledger only. Lets the phone match the item later and lets a restore recreate albums. Never used as a path. |
-| Capture time | `media.date_taken` | Ledger; may drive a year/month folder layout. |
+| Modification time | `mtime` | Stored in the ledger; set as the file's last-write time before the final flush (PC), best effort on the phone. Out of range (5.7): not applied. |
+| MediaStore identity | `media.volume`, `media.media_id`, `media.generation` | Stored in the ledger only. Lets the phone match the item later and lets a restore recreate albums. Never used as a path, never compared for a decision. |
+| Capture time, date added | `media.date_taken`, `media.date_added` | Ledger; capture time may drive a year/month folder layout. The keep-on-phone period (8.12) is computed by the phone, not from these copies. |
 | MIME type | `mime` | Hint for display only. The receiver never chooses how to open a file from it. |
 
 **Content is opaque: EXIF and every other byte are untouched.** Neither side parses, edits, re-encodes,
@@ -1598,26 +1607,36 @@ The receiver answers each item with one action:
 | Action | Meaning | Rules |
 |---|---|---|
 | `send` | Send the content. | May grant a resume point (6.7). |
-| `have` | The receiver already holds this content for this link. | Only if `hash` was offered, and the receiver has a ledger record **of this link** with the same `hash` and `size`, and the file is present now at the recorded path with the recorded size and modification time (a metadata check, no read). The receipt has `verify_level = 0`. |
-| `need_hash` | A duplicate is likely. | Only if no `hash` was offered and the ledger of this link has a record of the same `size`. The sender hashes the file and offers it again, with `hash`, in a later `OFFER`. |
-| `declined` | Not accepted. | With a code: `E_QUOTA`, `E_NO_SPACE`, `E_NAME`, `E_DECLINED`, `E_NOT_PERMITTED`, `E_LIMIT`. |
+| `have` | The receiver already holds this content for this link. | Only if `hash` was offered, and the receiver has a ledger record **of this link** with the same `hash` and `size`, and the file is present now at the recorded path, inside this link's namespace, with the recorded size and modification time (a metadata check, no read). The receipt has `verify_level = 0`. |
+| `need_hash` | A duplicate is likely. | Only if no `hash` was offered and the ledger **of this link** has a record of the same `size`. The sender hashes the file and offers it again, with `hash`, in a later `OFFER`. |
+| `declined` | Not accepted. | With a code: `E_QUOTA`, `E_NO_SPACE`, `E_NAME`, `E_DECLINED`, `E_NOT_PERMITTED`, `E_LIMIT`, `E_UNSUPPORTED`. |
 
 Rules:
 
-1. **Deduplication is by content hash and is scoped to one link** (one phone's folder on one PC). The PC
-   never satisfies one phone's item with another phone's file (decision D10).
-2. A sender MAY cache hashes in its own ledger, keyed by the full version identity (volume, id, size, mtime,
-   generation). A cached hash MUST be dropped when any of these changes. If an item was offered with `hash`
+1. **Deduplication is by content hash and is scoped to one link** (decision D10). Every answer to an offer
+   is computed from that link's records only. The PC MUST NOT answer `have` or `need_hash`, grant a resume
+   point, or behave in any other observable way differently because **another** phone has stored the same
+   content: one phone must not be able to find out what another phone holds.
+2. **One record, one file, one namespace.** Every ledger record names exactly one file, and that file lies
+   inside the namespace of the record's link. Two records never name the same path. The PC MUST NOT create
+   a hard link between files of two namespaces (an in-place change through one name would change the other
+   phone's file). So that each phone's proof is over a file recorded for that phone (8.5), `kiwi/1` stores
+   every phone's copy as its own file; saving disk space between phones (for example by block cloning on
+   ReFS, which keeps files independent) is left to a later minor version and would change no message.
+3. A sender MAY cache hashes in its own ledger, keyed by the version (6.2). A cached hash MUST be dropped
+   when the size, the modification time or the generation changes. If an item was offered with `hash`
    and the streamed content hashes differently, the receiver treats it as `E_CHANGED`.
-3. **The ledger is never trusted for deletion.** A `have` answer, or any receipt below level 2, only saves
+4. **The ledger is never trusted for deletion.** A `have` answer, or any receipt below level 2, only saves
    a re-send. It never makes an item eligible for final move. To upgrade, the PC re-reads the stored file
    from disk as in section 7, step 6; if the hash matches it sends `ITEM_RESULT` with a receipt of the level
    that section 7 allows for that volume (new `commit_seq`, current `session_seq`); if it does not match,
    that is an integrity alert (8.9) and the next offer of the item is answered `send`.
-4. A level-2 receipt is only ever issued in the session in which the PC has just read those bytes back
+5. A level-2 receipt is only ever issued in the session in which the PC has just read those bytes back
    from the disk, unbuffered.
-5. Consent: the PC accepts purposes 1, 2 and 5 from a `CONFIRMED` paired phone without a prompt. The phone
-   shows an accept dialog for purpose 2 (9.1); purposes 3 and 4 were requested by the phone's own user.
+6. Consent: the PC accepts purposes 1 and 5, and purpose 2 from the phone, from any paired phone without a
+   prompt, also while the link is `REQUIRED` (3.5). The phone shows an accept dialog for purpose 2 unless
+   its user chose "always accept from this PC" (9.1); purposes 3 and 4 were requested by the phone's own
+   user. Purposes 2 (from the PC), 3 and 4 need a `CONFIRMED` link.
 
 ### 6.4 Data stream format
 
@@ -1632,6 +1651,7 @@ end     = u32be(0)
 
 - `CHUNK` = 4 194 304 bytes (4 MiB), fixed in `kiwi/1`. Chunk `i` covers file bytes
   `[i * CHUNK, min((i + 1) * CHUNK, size))`. Records are in order, starting at chunk `offset / CHUNK`.
+  With `MAX_FILE_SIZE` = 2^42 a file has at most 2^20 chunks, so no product in this section can overflow.
 - **Hashes.** `chunk_hash[i] = BLAKE3(chunk i)`. `file_hash = BLAKE3(whole file)`. Both are plain BLAKE3
   hashes; the per-chunk hashes are independent and are not nodes of the file hash's internal tree
   (verified streaming in the Bao style is deferred, decision D8).
@@ -1647,15 +1667,26 @@ end     = u32be(0)
    bytes in memory, to three consumers: the stream, the chunk hasher and the file hasher.
    **The sender hashes exactly the bytes it streams.** It MUST NOT hash from a second read, a cached copy or
    a different file handle.
-3. With a granted `resume_offset = R > 0`: the same single pass first reads `[0, R)`, feeding the file
-   hasher and computing those chunk hashes, and checks them against `prefix_hash` (6.7). If the check
-   fails, the sender starts a new pass from byte 0 with `offset = 0`.
+3. With a granted `resume_offset = R > 0`: the sender first checks that `R <= size` and that `R` is a
+   multiple of `CHUNK`; otherwise it ignores the grant and sends from byte 0. The same single pass then
+   reads `[0, R)`, feeding the file hasher and computing those chunk hashes, and checks them against
+   `prefix_hash` (6.7). If the check fails, the sender starts a new pass from byte 0 with `offset = 0`.
 4. After the last byte, and before sending the trailer, the sender re-checks the source: bytes read ==
    recorded `size`; the open handle's current size and modification time, and a fresh MediaStore query
    (`size`, `mtime`, `generation`, not pending, not trashed), all equal the values of rule 1. Any difference
-   sets `changed = true`.
+   sets `changed = true`. (Inside one read pass a changed generation is treated as a change: the cost is one
+   re-send. Between sessions it is only a trigger, 6.2.)
 5. The trailer carries the `file_hash` of that pass. The sender stores `(key, file_hash)` in its ledger
    when the receipt arrives, not before.
+6. **Receipts are validated (KT-28).** A receipt, in `OFFER_REPLY` (`have`) or in `ITEM_RESULT`, is stored
+   only if all of these hold: it names an item this side offered in this session (`xfer_id` and `key`), or,
+   for an upgrade with `xfer_id = 0`, a `key` for which this side already holds a receipt of this link;
+   `receipt.hash` and `receipt.size` equal this side's own values (the trailer it sent, or the `hash` it
+   offered); for PC receipts: `ledger_id` equals the `ledger_id` of the PC's `HELLO`, `root_id` is a kind-1
+   root of the current `STATUS`, `session_seq` equals the current session, `commit_seq` is in range (5.7),
+   and `verify_level` is 0, 1 or 2. The phone keeps, per link and `ledger_id`, the highest `commit_seq` of
+   the receipts it stored (`receipt_hwm`, 8.10). A receipt that fails is ignored and reported in the diagnostic log; the
+   item stays `SENT` and is offered again.
 
 ### 6.6 Receiver rules
 
@@ -1664,15 +1695,20 @@ end     = u32be(0)
 2. Verify each record's hash before the chunk counts as received. On a mismatch: stop the stream,
    discard that chunk, `ITEM_RESULT(E_VERIFY)`.
 3. Never accept more than `size` bytes, a short non-final record, or a record after the final one.
-4. At the trailer: if `changed`, or the sizes disagree, discard the item and its partial file entirely
+4. At the trailer: if `changed`, or the sizes disagree, discard the item and its temporary file entirely
    (`E_CHANGED`); it is not resumable.
 5. Then commit: the PC follows section 7; the phone follows 9.1. The receipt is sent only after the commit.
 6. A receiver never executes, opens, previews with an external program, or installs what it received.
+   Because Windows Explorer itself parses some file types when a folder is merely displayed, the Windows
+   receiver also stores those types under a neutralised name (6.8 rule 9).
 
 ### 6.7 Resume
 
-1. The receiver keeps partial files across connections, keyed by `(link, key, size)`, with the list of
-   chunk hashes it has verified.
+Resume is an optimisation the receiver MAY offer. A receiver that keeps no partial state always answers
+`send` with offset 0 (the PC store as built does this); nothing else in the protocol depends on resume.
+
+1. A receiver that supports resume keeps unfinished temporary files across connections, keyed by
+   `(link, key, size)`, with the list of chunk hashes it has verified, in its ledger.
 2. When the same key is offered again, the receiver determines the valid prefix by **reading the partial
    file back from disk** and comparing each whole chunk with the recorded chunk hash (after a crash, written
    data may never have reached the disk). The valid prefix is the longest run of matching whole chunks.
@@ -1686,57 +1722,97 @@ end     = u32be(0)
 ### 6.8 Name sanitisation
 
 Names and paths from the peer are hostile input in both directions. The receiver, and only the receiver,
-decides the stored name. `path` is an array of components, so no separator is ever interpreted.
+decides the stored name. `path` is an array of components, so no separator is ever interpreted. The Windows
+rules below are the rules of the store's sanitiser (`core/kiwi-store`), which is the reference for the
+`names-windows` test vectors.
 
 **Step A, reject** (the item is answered `declined` with `E_NAME`): a component (of `path`, or `name`) that
-is empty, is `.` or `..`, or contains U+0000 or `/`.
+is empty, is `.` or `..`, contains U+0000, `/` or `\`, or consists only of dots, white space, control
+characters and invisible formatting characters (Windows would read such a name as `.`, `..` or nothing).
 
 **Step B, clean each component** (common to both platforms, in this order):
 
 1. Normalise to Unicode NFC.
-2. Delete control characters U+0001-U+001F and U+007F-U+009F, bidirectional controls (U+061C, U+200E,
-   U+200F, U+202A-U+202E, U+2066-U+2069), U+200B and U+FEFF.
-3. Replace each of `< > : " \ | ? *` with `_`. (The colon rule removes NTFS alternate data stream syntax:
-   `photo.jpg:x` becomes `photo.jpg_x`.)
-4. Remove leading spaces, and trailing spaces and dots (repeat until none is left).
-5. If nothing is left, reject as in step A.
-6. Shorten to the platform limit (below) by cutting the stem (the part before the last `.`) and keeping the
-   extension when the extension is at most 16 units long; never cut inside a code point or surrogate pair;
-   then apply rule 4 again.
+2. Replace with `_`: each of `< > : " | ? *`; every control character (U+0001-U+001F, U+007F-U+009F);
+   the invisible formatting characters U+202A-U+202E, U+2066-U+2069, U+200B, U+2060, U+FEFF, U+2028,
+   U+2029, U+FFF9-U+FFFB; and Unicode noncharacters. (The colon rule removes NTFS alternate data stream
+   syntax: `photo.jpg:x` becomes `photo.jpg_x`. The direction marks U+200E, U+200F and U+061C and the
+   joiners U+200C, U+200D are kept: Arabic, Hebrew and emoji names need them.)
+3. Remove trailing spaces and dots (repeat until none is left).
+4. If nothing is left, the component becomes `_`.
+5. Apply the platform's prefix and suffix rules (7 to 9, or 15 and 16), then shorten to the platform limit
+   by cutting the stem (the part before the last `.`) and keeping the extension when the extension, with
+   its dot, is at most 32 units long; never cut inside a code point or surrogate pair. If shortening exposes
+   a name that rule 7 or 8 matches, apply that rule again. **The limit applies to the finished component,
+   with every prefix and suffix this section adds (KT-29).**
 
 **Windows receiver, in addition:**
 
-7. Limit for rule 6: 200 UTF-16 code units per component. At most 16 components in `path`.
-8. Reserved device names: take the component up to its first `.`, drop trailing spaces, compare without
+6. Limit for rule 5: 240 UTF-16 code units per component, and that includes the collision suffix ` (n)`
+   of 6.9 (the stem is shortened again to make room for it). At most 32 `path` components from the peer;
+   the whole relative path below the root, with the folders the PC's own layout adds, at most 64
+   components. More is `E_NAME`; a path is never truncated.
+7. Reserved device names: take the component up to its first `.`, drop trailing spaces, compare without
    regard to case with `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `COM¹`, `COM²`, `COM³`, `LPT0`-`LPT9`,
-   `LPT¹`, `LPT²`, `LPT³`, `CONIN$`, `CONOUT$`. On a match, prefix the component with `_`
+   `LPT¹`, `LPT²`, `LPT³`, `CONIN$`, `CONOUT$`, `CLOCK$`. On a match, prefix the component with `_`
    (`nul.tar.gz` becomes `_nul.tar.gz`).
-9. Long paths: every file-system call uses an absolute extended-length path (`\\?\` prefix) built by the
-   receiver from its canonical root and the cleaned components. No peer string is ever passed to an API
-   that interprets `.`, `..`, separators, drive letters or device namespaces. The PC SHOULD tell the user
-   when a stored path is longer than 259 characters (older programs cannot open it).
-10. Case: NTFS and ReFS compare names without regard to case; two source names that differ only in case, or
+8. **The engine's own names (KT-13).** A component that begins with `.kiwi-` (compared without regard to
+   case, after rules 1-4) is prefixed with `_`. The store's temporary files (`.kiwi-tmp-...part`), its
+   marker directory (`.kiwi-store`) and anything else it creates all begin with `.kiwi-`, so no name that
+   comes from a peer, at any depth, can ever be, or lie inside, one of the store's own objects.
+9. **Shell-active names are neutralised (KT-17).** Windows Explorer reads some files when it merely lists a
+   folder (to draw an icon or resolve a target), and for these types that can make the PC contact a remote
+   server and disclose the user's Windows credentials hash, or run a handler. A component is shell-active
+   if, compared without regard to case after rules 1-4:
+   - its last extension is one of `.lnk`, `.pif`, `.url`, `.website`, `.scf`, `.library-ms`,
+     `.searchconnector-ms`, `.search-ms`, `.appref-ms`, `.settingcontent-ms`, `.theme`, `.themepack`,
+     `.deskthemepack`; or
+   - the whole name is `desktop.ini`, `autorun.inf` or `thumbs.db`; or
+   - its last extension has the form `.{` + 36 characters of a GUID + `}` (a folder or file with such a
+     name is shown by Explorer as a shell object, for example the Recycle Bin).
+
+   The receiver appends the **neutralised suffix** `.kiwi-blocked` (constant `NEUTRAL_SUFFIX`): `x.url`
+   is stored as `x.url.kiwi-blocked`, `desktop.ini` as `desktop.ini.kiwi-blocked`. The rule applies to
+   every purpose (backup, send, repair), to files and to directory names, on the primary destination and
+   on every second copy. The content is untouched and the hash is that of the original bytes. The ledger
+   keeps the name the phone sent; `BROWSE` shows that original name and a fetch or restore gives the file
+   back to the phone under it. The PC program MUST NOT register any handler, icon or association for
+   `.kiwi-blocked`, and never renames such a file back by itself. The list may grow in a later minor
+   version (11.1 rule 6); a file stored before it grew is not renamed.
+10. Long paths: every file-system call uses an absolute extended-length path (`\\?\` prefix) built by the
+    receiver from its canonical root and the cleaned components. No peer string is ever passed to an API
+    that interprets `.`, `..`, separators, drive letters or device namespaces. The PC SHOULD tell the user
+    when a stored path is longer than 259 characters (older programs cannot open it).
+11. Case: NTFS and ReFS compare names without regard to case; two source names that differ only in case, or
     only in Unicode normalisation, collide and are handled by 6.9.
-11. Junctions and symbolic links at the destination: the canonical root is resolved once when the user
-    chooses it. Below the root, every existing directory on the way to the file, the temporary directory,
-    and any existing object with the target name is opened with `FILE_FLAG_OPEN_REPARSE_POINT` and
-    inspected; a reparse point of any kind (junction, symbolic link, mount point, cloud placeholder) is
-    never followed. Directories are created one level at a time. Before the final rename, the resolved
-    path of the open destination directory (`GetFinalPathNameByHandle`) must lie inside the canonical
-    root. A violation fails the item with `E_NAME` and is reported to the PC user (somebody placed a link
-    inside the destination folder).
+12. Junctions and symbolic links at the destination: the canonical root is resolved once when the user
+    chooses it and is stored in one normalised form (`\\?\Volume{GUID}\...`). Below the root, every
+    existing directory on the way to the file, and any existing object with the target name, is opened with
+    `FILE_FLAG_OPEN_REPARSE_POINT` and inspected; a reparse point of any kind (junction, symbolic link,
+    mount point, cloud placeholder) is never followed. Directories are created one level at a time. Before
+    the final rename, and again for the finished file, the resolved path (`GetFinalPathNameByHandle`,
+    converted to the same normalised form) must equal the expected path **component by component**; a
+    string-prefix test is not sufficient (`D:\Backup2` is not inside `D:\Backup`). A violation fails the
+    item with `E_NAME` and is reported to the PC user (somebody placed a link inside the destination
+    folder).
+13. Attributes and marks: the program never sets the System or Read-only attribute on a directory it
+    creates (Explorer honours a `desktop.ini` only in such a directory). Every file received with
+    purpose 2 from a phone gets a `Zone.Identifier` stream with `ZoneId=3` (Mark-of-the-Web), written
+    before the final rename; backup files (purposes 1 and 5) get none.
 
 **Android receiver, in addition** *(platform)*:
 
-12. Limit for rule 6: 200 bytes of UTF-8 per component. At most 8 components in `path`.
-13. A component that starts with `.` gets the prefix `_` (no hidden files, and `.nomedia` cannot be planted
+14. Limit for rule 5: 200 bytes of UTF-8 per component. At most 8 components in `path`; more is `E_NAME`.
+15. A component that starts with `.` gets the prefix `_` (no hidden files, and `.nomedia` cannot be planted
     to hide a folder from the gallery).
-14. The destination base folder is chosen by the phone, never by the peer: `Download/Kiwi Transfer/` for
-    purposes 2 and 3; a "restored" folder under `DCIM/` or `Download/` for purpose 4 (9.4). `path` only
-    adds sub-folders below that base.
-15. API 29+: files are created through MediaStore with a relative path built from the cleaned components
-    (`IS_PENDING = 1` until committed). API 24-28: files are created by path with create-exclusive and
-    no-follow flags.
+16. A component whose last extension is `.apk`, `.apks`, `.xapk` or `.apkm` is stored as it is, but 9.1
+    rule 6 applies: the app never asks the system to install it.
+17. The destination base folder is chosen by the phone, never by the peer (9.1 rule 5, 9.4, 9.6). `path`
+    only adds sub-folders below that base.
+18. API 29+: files are created through MediaStore with a relative path built from the cleaned components
+    (`IS_PENDING = 1` until committed). MediaStore may itself change the name on a conflict, so after the
+    insert the app reads back `DISPLAY_NAME` and `RELATIVE_PATH` and records those. API 24-28: files are
+    created by path with create-exclusive and no-follow flags.
 
 ### 6.9 Collision policy: never overwrite
 
@@ -1744,18 +1820,26 @@ is empty, is `.` or `..`, or contains U+0000 or `/`.
    an existing file to make room. No message of `kiwi/1` can make the peer overwrite, rename or delete a
    stored file.
 2. Final names are created with create-new semantics only (PC: `MoveFileExW` without
-   `MOVEFILE_REPLACE_EXISTING`; Android: MediaStore insert, or `O_EXCL`). "Already exists" is decided by
+   `MOVEFILE_REPLACE_EXISTING`; Android API 24-28: `O_EXCL`; Android API 29+: a MediaStore insert, which
+   never replaces and may pick a free name itself, 6.8 rule 18). On the PC "already exists" is decided by
    the file system at that moment, so there is no check-then-write gap.
 3. If the name exists, the receiver tries `stem (2).ext`, `stem (3).ext`, ... up to `(999)`, then fails
    with `E_NAME`.
-4. PC, before using a suffix: if the ledger of this link already has a record with the same `hash` and
-   `size`, the PC re-reads that existing file unbuffered. If it matches, the new temporary file is
-   discarded and the receipt refers to the existing file (at the level section 7 allows for that volume: it
-   was just read from disk). If it does
-   not match or is missing, that is an integrity alert (8.9) and the new file is kept under the next free
-   name (this repairs the damage).
-5. The folder layout on the PC (year/month, per phone, custom) is a PC setting. The PC builds the folder
-   from its own template and the item's metadata; the sender cannot choose a location.
+4. PC, before using a suffix, two cases save a duplicate; both are decided **by reading the existing file
+   from disk**, never from the ledger alone:
+   a. The ledger of this link already has a record with the same `hash` and `size`: the PC re-reads that
+      existing file unbuffered. If it matches, the new temporary file is discarded and the receipt refers
+      to the existing file (at the level section 7 allows for that volume). If it does not match or is
+      missing, that is an integrity alert (8.9) and the new file is kept under the next free name (this
+      repairs the damage).
+   b. A file with identical content already sits at the target path **inside this link's namespace** (the
+      user copied it there by hand, or a crash happened between the rename and the ledger record): the PC
+      reads it unbuffered; if it equals the verified bytes, the PC records that file instead of creating
+      ` (2)`. This is what makes a retry idempotent.
+5. The folder layout on the PC (year/month, kept phone folders, custom) is a PC setting, per phone. The PC
+   builds the folder from its own template and the item's metadata; the sender cannot choose a location.
+   Every layout places a phone's files **below that phone's own folder**; the name of that folder is fixed
+   when the phone is paired and is never derived again from a name the phone sends later.
 
 ---
 
@@ -1763,44 +1847,69 @@ is empty, is `.` or `..`, or contains U+0000 or `/`.
 
 Purpose: when the phone receives a receipt, the bytes are on the PC's disk, were read back from the disk
 and matched, and the ledger knows them, even if the power fails one millisecond later. Measured on NTFS in
-the spike (section 3): all four primitives work; the flush dominates the cost.
+the spike (section 3): all four primitives work; the flush dominates the cost. This section describes the
+store (`core/kiwi-store`) as built, plus the changes Draft 2 requires of it (listed in
+`docs/CHANGES-DRAFT-2.md`).
 
-All paths are on the destination volume. Temporary files live in `<root>\.kiwi-tmp\` (same volume, so the
-final rename is atomic).
+All paths are on the destination volume. A temporary file is created **in the directory of its final
+file** (same volume, so the final rename is atomic) and is named `.kiwi-tmp-<tag>-<unique>.part`, where
+`<tag>` identifies one run of the store and is written durably to the ledger before the first temporary
+file with that tag is created. Peer names can never begin with `.kiwi-` (6.8 rule 8).
 
 | Step | Action | Must hold before continuing |
 |---|---|---|
-| 1 | Check space and quota (5.10). Create `<root>\.kiwi-tmp\<32 random hex>.part` with `CREATE_NEW`, no sharing. Insert a `partial` row in the ledger. | Created. |
-| 2 | Receive records, verify each chunk hash (6.6), write. Append verified chunk hashes to the `partial` row. | Every chunk verified. |
+| 1 | Check space and quota (5.10). Build the destination directory from the phone's folder, the layout and the cleaned `path`; create missing directories one level at a time with the reparse checks (6.8 rule 12). Create the temporary file with `CREATE_NEW`, no sharing, and confirm from its handle that it is where it was meant to be. | Created, inside the phone's namespace. |
+| 2 | Receive records, verify each chunk hash (6.6), write, and feed a running `BLAKE3` of everything received. | Every chunk verified. |
 | 3 | At the trailer: bytes written == offered `size` == `trailer.size`, and `changed` is false. | Else discard (`E_CHANGED`). |
-| 4 | Set the last-write time to the item's `mtime` (`SetFileTime`). | |
+| 4 | Set the last-write time to the item's `mtime` (`SetFileTime`), if it is in range (5.7). | |
 | 5 | `FlushFileBuffers(handle)`, then close. | Returned success. A failure is `E_IO`; nothing is renamed. |
 | 6 | Reopen read-only with `FILE_FLAG_NO_BUFFERING` (and `FILE_FLAG_SEQUENTIAL_SCAN`), read the whole file with a sector-aligned buffer (4 MiB), compute `disk_hash` and `disk_size`. | Read completed. |
-| 7 | Compare: `disk_size == size` and `disk_hash == trailer.hash` (and `== Item.hash` if one was offered). | Equal. Else delete the temporary file and the `partial` row, `ITEM_RESULT(E_VERIFY)`. If every chunk hash had verified and the PC's own running hash of the received bytes equals `trailer.hash`, the disk returned different bytes than were written: raise an integrity alert (8.9). |
-| 8 | Choose the final name (6.8, 6.9), create missing directories with the reparse checks. Write the intended final path and the verified hash into the `partial` row (durable). | Row committed. |
+| 7 | Compare three hashes: the running hash of what arrived, `disk_hash`, and `trailer.hash` (and `Item.hash` if one was offered); and `disk_size == size`. | All equal. Else delete the temporary file, `ITEM_RESULT(E_VERIFY)`. If the running hash equals `trailer.hash` but `disk_hash` differs, the disk returned different bytes than were written: raise an integrity alert (8.9). |
+| 8 | Choose the final name (6.8, 6.9), including the duplicate cases of 6.9 rule 4. | |
 | 9 | `MoveFileExW(temp, final, MOVEFILE_WRITE_THROUGH)`. The flags are exactly `MOVEFILE_WRITE_THROUGH`: no `MOVEFILE_REPLACE_EXISTING` (never overwrite), no `MOVEFILE_COPY_ALLOWED` (a cross-volume copy would not be atomic). | Success. "Already exists": next name, back to step 8. |
-| 10 | One ledger transaction: insert the file record, delete the `partial` row. | `COMMIT` returned success. |
+| 9a | **Make the new name durable (KT-13).** `MOVEFILE_WRITE_THROUGH` guarantees a flush only for a move done as copy-and-delete; a rename inside one volume can still be undone by a power failure. So: open the final file and call `FlushFileBuffers`; open its parent directory (`FILE_FLAG_BACKUP_SEMANTICS`) and call `FlushFileBuffers`; and confirm from the file's handle that its resolved path is the expected one, component by component (6.8 rule 12). | All three succeeded. A failure is `E_IO`: no record, no receipt; the file stays where it is and is adopted by a retry (6.9 rule 4b). |
+| 10 | Ledger transaction: insert the file record (and delete the item's resume state, if any). | `COMMIT` returned success with `synchronous = FULL`. |
 | 11 | Send `ITEM_RESULT(committed, receipt)`. | Never before step 10. |
 
+**Batching.** The ledger commit of step 10 MAY cover several files that have all passed step 9a (a group
+commit); the receipts of all of them are sent only after that `COMMIT` has returned. Nothing that confirms
+a final move is ever batched: 8.5 requires its own durable commit per item, before the answer is sent.
+
 **Receipt level.** `verify_level = 2` if step 6 really ran with `FILE_FLAG_NO_BUFFERING` and the volume
-qualifies for final move at that moment (8.2). If unbuffered access is not available (some file systems),
-the PC re-reads through the cache and issues level 1; level 1 is never enough for final move.
+passes destination rules 1 to 9 of 8.2 at that moment. If unbuffered access is not available (some file
+systems), the PC re-reads through the cache and issues level 1; level 1 is never enough for final move.
+
+**The only files the PC program ever deletes by itself (KT-13)** are its own temporary files, and only
+when **all** of these hold: the name matches `.kiwi-tmp-<tag>-<unique>.part` exactly; `<tag>` is a tag
+recorded in this ledger; the object is a regular file, not a reparse point, inside the root; it does not
+belong to a transfer in progress; and no committed record of the same size is currently without its file.
+In that last case the temporary file is first read and hashed: if it equals the record's hash it **is**
+that file (its rename was lost) and it is given its final name again, create-new, with step 9a; only a
+temporary file that is not a lost committed file may be deleted. A file that looks like a temporary file
+but whose tag is unknown is left alone and reported as an unexpected file. A file under a final name is
+never deleted, renamed or modified by the program (8.1 I7).
 
 **Ledger** *(PC)*: SQLite with `journal_mode = WAL` and `synchronous = FULL`, stored in
-`%LOCALAPPDATA%\FastKiwi\KiwiTransfer\`. A file record holds at least: link, `key`, `hash`, `size`, `mtime`,
-root and relative path, `commit_seq`, `session_seq`, `verify_level`, the PC link clock at commit, item
-flags, `Media` identity, final-move state (8.3), and the sequence number of the last scan that verified it.
-The database has a random `ledger_id` (Id16) created with it. At start the PC runs an integrity check on
-the database; a failure is handled as ledger loss (8.10), and the damaged file is kept aside, not deleted.
+`%LOCALAPPDATA%\FastKiwi\KiwiTransfer\` (decision D26). A marker file `<root>\.kiwi-store\id` ties the
+destination folder to its ledger, and a lock file there allows one store per destination. A file record
+holds at least: link, `key`, `hash`, `size`, `mtime`, item `kind`, the name the phone sent (`name`,
+`orig_name`), root and stored relative path, `commit_seq`, `session_seq`, `verify_level`, the PC link clock
+and wall clock when the record reached its level, item flags, `Media` identity, final-move state (8.3),
+the sequence number of the last scan that verified it, the second-copy records of 8.13, and a checksum
+over these fields. The database has a random `ledger_id` (Id16) created with it, and per link the durable
+`commit_hwm`. At start the PC runs an integrity check on the database; a failure is handled as ledger loss
+(8.10), and the damaged file is kept aside, not deleted. **A ledger that is restored from any copy
+(a backup on a second disk, a system image) is a different ledger: it MUST be given a new `ledger_id`
+whenever the program can tell; when it cannot, 8.10 "ledger rollback" detects it.**
 
 **Crash recovery** (at program start, before the listener opens):
 
 | Crash happened | Found at restart | Action |
 |---|---|---|
-| Before step 5 completes | `partial` row and a temporary file of unknown validity | Keep for resume; the valid prefix is found by re-reading (6.7). |
-| Between steps 5 and 8 | Complete temporary file, `partial` row without a final path | Same as above: on the next offer the PC grants a resume point up to the last whole chunk; steps 3-11 run again. |
-| Between steps 8 and 10 | `partial` row with a final path; the temporary file is gone and the final file exists, or the rename did not happen | If the final file exists: re-read it unbuffered; if its hash equals the hash stored in the row, finish step 10; if not, leave the file where it is (the PC never deletes a file at a final path), drop the row, and raise an integrity alert. If the temporary file still exists: redo from step 8. |
-| After step 10, before the phone has the receipt | Committed record | Nothing. The phone offers the item again and gets `have` (level 0), then a level-2 receipt after the unbuffered re-read of 6.3(3). |
+| Before step 9 | A temporary file; no record | A store that supports resume keeps it with its resume state (6.7); otherwise it is deleted under the rule above. No receipt was sent. |
+| Between steps 9 and 10 | A file under its final name without a record; or, if the rename did not survive, the temporary file again | The temporary file is looked at **first** and handled by the row above. A file under a final name is left alone: the phone has no receipt and offers the item again; if the content at the target path equals the bytes received, 6.9 rule 4b records that file; if a different file sits there, it is simply somebody else's file and the new one gets the next free name. Neither case is an integrity alert. |
+| After step 10, before the phone has the receipt | Committed record | Nothing. The phone offers the item again and gets `have` (level 0), then a level-2 receipt after the unbuffered re-read of 6.3(4). |
+| After step 10, the rename was lost anyway (a drive that acknowledged a flush it had not done) | A committed record without its file, and a temporary file | The deletion rule above: the temporary file is hashed, recognised and renamed again. If no such file exists, the record is `DAMAGED` (8.9). |
 
 **Limits, stated plainly.** `FILE_FLAG_NO_BUFFERING` bypasses the Windows cache, not the drive's own cache.
 `FlushFileBuffers` asks the drive to flush; a drive that acknowledges a flush it has not done can still
