@@ -2838,7 +2838,7 @@ so that nothing can ever be lost to a forgotten password.
 
 ---
 
-## 10. Update check, problem report, and the complete endpoint list
+## 10. Update check, problem report, endpoint list, release signing
 
 ### 10.1 Update check
 
@@ -2846,60 +2846,47 @@ Builds distributed through a store (F-Droid, Google Play) compile this feature o
 app. For direct downloads:
 
 1. **Request.** `GET https://api.github.com/repos/<owner>/<repo>/releases/latest` (owner and repository are
-   constants in the program; open question Q5). Headers: `Accept: application/vnd.github+json`,
+   constants in the program: the project's own repository). Headers: `Accept: application/vnd.github+json`,
    `User-Agent: KiwiTransfer` (a constant: no version, no operating system, no identifier). No cookie, no
    token, no query parameter, no body. HTTPS with the platform trust store. Redirects are not followed.
    The response is capped at 1 MiB.
 2. **What is disclosed.** GitHub sees the public IP address, the time, and that some Kiwi Transfer program
    asked. Nothing about files, devices, the installed version or the user.
 3. **When.** When the user taps "Check for updates"; and, if the automatic check is enabled, at most once
-   per 24 hours while the program is open.
+   per 24 hours while the program is open. The automatic check is **on by default**; the first-run screen
+   says what it contacts and offers the switch.
 4. **Result.** The tag (`vX.Y.Z`, SemVer) is compared with the installed version. Release notes are shown
    as plain text (at most 4 KiB).
-5. **Download**, only after "Update now": the release manifest `kiwi-release.json`, its signature
-   `kiwi-release.json.sig`, and the asset for this platform. URLs must be HTTPS on `github.com` under
-   `/<owner>/<repo>/releases/download/`; redirects are followed only to GitHub's own asset hosts
-   (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`).
-6. **Verification.** All of the following, before anything is installed or run:
-   a. `kiwi-release.json.sig` is a valid detached Ed25519 signature (RFC 8032) over the exact bytes of
-      `kiwi-release.json`, under one of the release public keys compiled into the program (an active key
-      and a reserve key for rotation). The release keys are used for nothing else.
-   b. The manifest's `version` equals the tag and is greater than the installed version (no downgrade).
-   c. The downloaded asset's size, SHA-256 and BLAKE3 equal the manifest entry for its file name.
-   d. Android: the system installer also enforces that the APK is signed with the same certificate as the
-      installed app. Windows: there is no Authenticode signature in 1.0 (certificates cost money and the
-      project uses free tools only), so (a)-(c) are the whole check.
-7. A failed check deletes the download and tells the user; the program never offers to "install anyway".
-
-Manifest:
-
-```json
-{
-  "schema": 1,
-  "version": "1.1.0",
-  "protocol": { "major": 1, "minor": 0 },
-  "assets": {
-    "KiwiTransfer-1.1.0-arm64-v8a.apk": { "size": 8812345, "sha256": "<hex>", "blake3": "<hex>" },
-    "KiwiTransfer-1.1.0-x64-setup.exe": { "size": 24117248, "sha256": "<hex>", "blake3": "<hex>" }
-  }
-}
-```
-
-The first installation cannot be checked by the program itself; releases therefore also publish the
-manifest, its signature and build provenance for manual checking.
+5. **Manifest.** When the tag is newer than the installed version, the program downloads the release
+   manifest `kiwi-release.json` (at most 64 KiB) and its signature `kiwi-release.json.sig`, verifies them
+   (10.4) and applies the key changes they carry, **whether or not the user then updates**: a revocation
+   must reach every client that checks.
+6. **Download of the asset**, only after "Update now": the asset for this platform. URLs must be HTTPS on
+   `github.com` under `/<owner>/<repo>/releases/download/`; redirects are followed only to GitHub's own
+   asset hosts (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`).
+7. **Verification before anything is installed or run**: the manifest rules of 10.4, then: the downloaded
+   asset's size, SHA-256 and BLAKE3 equal the manifest entry for its file name. Android: the system
+   installer also enforces that the APK is signed with the same certificate as the installed app.
+   Windows: there is no Authenticode signature (certificates cost money and the project uses free tools
+   only), so the manifest signature and the hashes are the whole check; the verified installer is kept in
+   a folder only this account can write and is hashed again from the open handle immediately before it is
+   started.
+8. A failed check deletes the download and tells the user; the program never offers to "install anyway".
 
 ### 10.2 Problem report
 
 1. Only when the user asks. The program builds a plain-text report and shows **all of it** before anything
    leaves the device.
-2. The program hands the text to the user's own mail program (`mailto:` / Android `ACTION_SENDTO`), or the
-   user copies it. The user sends it. **The program itself opens no network connection for a report.**
-   There is no crash reporter and no analytics library in the program.
+2. The program hands the text to the user's own mail program (`mailto:` / Android `ACTION_SENDTO`,
+   addressed to the project's support alias, not to a personal address), or the user copies it. The user
+   sends it. **The program itself opens no network connection for a report.** There is no crash reporter
+   and no analytics library in the program.
 3. Allowed content: program version; platform, OS version, CPU type, memory class; number of paired
-   devices; number of folders per mode; last error codes; and, if the user leaves the switch on, the last
-   40 lines of the diagnostic log.
-4. Never included: file names, paths, album names, device names, Wi-Fi names, IP or MAC addresses, device
-   ids or fingerprints, keys, pairing or weekly codes, clipboard text, hashes of user files.
+   devices; number of folders per mode; which data sets are on; last error codes; and, if the user leaves
+   the switch on, the last 40 lines of the diagnostic log.
+4. Never included: file names, paths, album names, device names, Wi-Fi or network names, IP or MAC
+   addresses, device ids or fingerprints, keys, pairing or weekly codes, clipboard text, hashes of user
+   files, anything from contacts, calendars or the app list.
 5. Diagnostic log: off by default, stored locally only, at most 1 MiB. The logging interface accepts only
    allow-listed value types (numbers, enumerations, durations, error codes), so that a name or address
    cannot be logged by mistake.
@@ -2909,20 +2896,134 @@ manifest, its signature and build provenance for manual checking.
 | # | Endpoint | Protocol | When | Which program |
 |---|---|---|---|---|
 | 1 | The paired device, at an on-link address (4.4) | QUIC over UDP; port from QR, mDNS or cache | Pairing and sessions | Both |
-| 2 | `224.0.0.251:5353` and `[ff02::fb]:5353` (link-local multicast) | mDNS | Discovery | PC advertises; phone browses |
+| 2 | `224.0.0.251:5353` and `[ff02::fb]:5353` (link-local multicast) | mDNS | Discovery, on eligible interfaces only | PC advertises; phone browses |
 | 3 | `api.github.com`, TCP 443 | HTTPS | Update check (10.1) | Both, direct-download builds only |
-| 4 | `github.com`, then GitHub asset hosts, TCP 443 | HTTPS | Update download after the user's tap | Both, direct-download builds only |
+| 4 | `github.com`, then GitHub asset hosts, TCP 443 | HTTPS | Manifest when a newer release exists; asset after the user's tap | Both, direct-download builds only |
+| 5 | Certificate-status and certificate-download servers of the certificate authority behind rows 3 and 4, and Windows' root-certificate update (`ctldl.windowsupdate.com`) | HTTP | **Caused by the operating system on behalf of the program** while it verifies GitHub's certificate for rows 3 and 4 | Windows program (and Android where the system does the same) |
+| 6 | Microsoft's download servers for the WebView2 runtime | HTTPS | **Caused by the installer**, only when the PC has no WebView2 runtime and the installer has to install one | Windows installer |
 
-Nothing else. In particular there is no analytics, crash reporting, advertising, push service, time
-server, connectivity check, remote configuration, web font or web script, link preview, relay, STUN or
-TURN server, and no DNS lookup other than for rows 3 and 4. Rows 1 and 2 never leave the local link.
+The programs themselves contact nothing else. In particular there is no analytics, crash reporting,
+advertising, push service, time server, connectivity check, remote configuration, web font or web script,
+link preview, relay, STUN or TURN server, and no DNS lookup other than for rows 3 to 6. Rows 1 and 2 never
+leave the local link.
 
 Things the project does not control, stated for honesty: the address `fastkiwi.app/transfer` shown during
 onboarding is opened by the user in a browser, not fetched by the app; a problem report travels through
-the user's mail program; Android and Windows make their own connections; the WebView2 runtime that draws
-the PC window is a Microsoft component with its own update and reputation services. The PC program loads
-only its own local files into WebView2, blocks every navigation and request to a remote origin, and
-switches off the runtime's optional network features where its API allows (open question Q12).
+the user's mail program; Android and Windows make their own connections; **the Microsoft WebView2 runtime
+and Windows update themselves**. The PC program loads only its own local files into WebView2, refuses
+every navigation and request to a remote origin, and switches off SmartScreen reputation checks, autofill
+and password saving in it (9.5 rule 5). The wording used in the product is: "Kiwi Transfer contacts
+nothing else. The Microsoft WebView2 runtime and Windows update themselves."
+
+### 10.4 Release signing: keys, manifest, rotation, revocation, custody
+
+This is the trust root of every later update. It cannot be repaired after 1.0 ships, because the installed
+programs are the ones that would have to understand the repair (KT-03).
+
+**Keys.** Release keys are Ed25519 keys used for nothing else. A key is named by its
+`key_id = lowercase hex of the first 8 bytes of SHA-256(public_key)` (16 characters; `public_key` is the 32
+raw bytes). Version 1.0 has two keys compiled in: the **active** key and the **reserve** key. Their ids and
+public keys are published in the repository, on the project site and in the notes of the first release.
+
+**What is signed (domain separation).**
+
+```
+signed_message = "kiwi-release-manifest-v1\n" || manifest_bytes
+                 (the 24 ASCII characters, one line feed 0x0a, then the exact bytes of kiwi-release.json)
+kiwi-release.json.sig = SIG(release_private_key, signed_message)          exactly 64 raw bytes
+```
+
+A release key therefore never signs anything that could be mistaken for another kind of message, and a
+signature made for any other purpose can never be a release signature.
+
+**Manifest.**
+
+```json
+{
+  "schema": 1,
+  "key_id": "3f9a1c0b5d6e7f80",
+  "seq": 7,
+  "version": "1.1.0",
+  "min_supported": "1.0.2",
+  "protocol": { "major": 1, "minor": 0 },
+  "assets": {
+    "KiwiTransfer-1.1.0-arm64-v8a.apk": { "size": 8812345, "sha256": "<hex>", "blake3": "<hex>" },
+    "KiwiTransfer-1.1.0-x64-setup.exe": { "size": 24117248, "sha256": "<hex>", "blake3": "<hex>" }
+  },
+  "keys": {
+    "revoke": [ "<key_id>" ],
+    "add":    [ { "key_id": "<key_id>", "public_key": "<64 hex>" } ]
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `key_id` | The key that signed this manifest. |
+| `seq` | Manifest sequence number: a whole number that is larger in every manifest the project publishes. |
+| `version` | The release this manifest describes; equals the tag. |
+| `min_supported` | Every version below it is known to be bad. Optional. |
+| `keys.revoke` | Key ids that must never be trusted again. Optional. |
+| `keys.add` | New release keys. Optional. |
+
+**What each installation stores, durably:** `revoked` (a set of key ids that only ever grows), `added`
+(keys accepted from manifests), `seq_seen` and `min_supported_seen` (the highest values accepted). The
+**trusted set** is (compiled-in keys, plus `added`) minus `revoked`. `revoked` survives program updates: a
+key that was revoked stays revoked even if a later, or an older, program has it compiled in.
+
+**Accepting a manifest**, in this order; any failure rejects the manifest and changes nothing:
+
+1. The signature file is exactly 64 bytes and verifies (strict Ed25519, section 0) over `signed_message`
+   under a key of the trusted set. The signature is checked **before** the manifest is parsed.
+2. The manifest parses as JSON (UTF-8, no duplicate member names, `schema` = 1) and its `key_id` is the id
+   of the key that verified it.
+3. `seq >= seq_seen`. An older manifest is a replay and is refused.
+4. `keys.add` entries are well formed (`key_id` matches `public_key`), and after applying `revoke` and
+   `add` at least one trusted key would remain and at most `MAX_RELEASE_KEYS` (4).
+5. Then, durably: every id of `keys.revoke` is added to `revoked`; every key of `keys.add` that is not in
+   `revoked` is added to `added`; `seq_seen` and `min_supported_seen` are raised. This happens as soon as a
+   valid manifest is seen. A manifest may revoke the very key that signed it (a key retiring itself): it
+   is valid, and it is the last one that key signs.
+6. To install: `version` equals the tag, is greater than the installed version (no downgrade), and is not
+   below `min_supported_seen` (a replayed manifest for a version that a later manifest declared bad is
+   refused, even though that version is newer than the installed one).
+
+A program that runs a version below `min_supported_seen` tells the user that the version is no longer
+supported and should be updated. There is no remote switch that stops a program.
+
+**Rotation and revocation (the procedures, part of this specification):**
+
+| Situation | What the owner does | What installed programs then do |
+|---|---|---|
+| Planned replacement of the active key | A manifest signed by the active key adds the new key. Later releases compile the new key in and, once most users have it, revoke the old one. | Trust the new key from the first manifest that adds it. |
+| **Active key stolen or suspected** | At once: a manifest **signed by the reserve key** that revokes the active key and adds a new key; published as a new release (a version number is enough; the code may be unchanged). | Every program that sees it stops trusting the stolen key for ever. |
+| Active key lost (not stolen) | The same, with the reserve key. | The same. |
+| Reserve key lost or stolen | A manifest signed by the active key revokes it and adds a new reserve key. | The same. |
+| Both keys lost | No update can be signed. A new build with new keys is published for manual installation and announced on the project site and in the repository. It installs over the old program (Windows: same folders, the identity and all data stay; Android: same APK signing key, a normal update). | Nothing automatic. |
+| Both keys stolen | As "both lost", and the announcement tells users not to accept in-app updates until they have installed the new build. | Programs that already saw a malicious manifest are compromised; this cannot be undone remotely. |
+
+What revocation cannot do, stated plainly: it reaches a program only when that program sees a manifest. An
+attacker who holds a release key **and** controls what the program downloads (the GitHub account, or the
+TLS connection) can show its own manifest first, and can withhold the owner's. Custody is therefore the
+real protection; revocation limits the damage afterwards.
+
+**Custody requirements for the owner** (requirements on the release process, not on the programs):
+
+| | Requirement |
+|---|---|
+| K1 | Both release keys are generated on a computer that is offline while a private key is unprotected, with a free tool (`openssl genpkey -algorithm ed25519`, OpenSSL 3). |
+| K2 | A private release key is never a CI secret, never in a repository, never in a cloud drive, a chat, an e-mail or a synchronised password manager. |
+| K3 | Each private key is stored only in encrypted form with a passphrase, on **two offline media in two different places**. The active and the reserve key are never on the same medium nor in the same place. The passphrases are written on paper and kept apart from the media: a forgotten passphrase is a lost key. |
+| K4 | CI publishes **unsigned** assets with build provenance. The owner checks the asset hashes against that provenance, signs the manifest on the offline computer, and uploads only the 64-byte signature. |
+| K5 | The reserve key signs one test manifest when it is created, to prove that it works (checked against the `release` test vectors), and is then used only to rotate or revoke. |
+| K6 | Once a year: every medium is readable, every passphrase works, the procedure above is rehearsed with a test manifest. |
+| K7 | The GitHub account that publishes releases uses two-factor authentication, and release tags are protected. |
+| K8 | The **Android APK signing key** is kept under K1 to K6 as well. Losing it means that no update can be installed over the app: users would have to uninstall, which destroys the phone's identity (1.6) and every final-move state. It can be rotated only with the proof-of-rotation of APK Signature Scheme v3. |
+
+Signing and checking need only free tools: `openssl pkeyutl -sign -rawin` and `-verify -rawin` over a file
+that holds `signed_message`, or the small signing tool in the project's repository. The first installation
+cannot be checked by the program itself; releases therefore also publish the manifest, its signature, the
+public keys and build provenance for manual checking.
 
 ---
 
@@ -2937,18 +3038,21 @@ switches off the runtime's optional network features where its API allows (open 
    message types, optional fields, capability ids, error codes, values of enumerations.
 3. Receiver rules that make this safe: unknown map keys are ignored; an unknown request gets
    `E_UNSUPPORTED`; an unknown error code is treated as `E_INTERNAL`; an unknown enumeration value in a
-   reply means "failed" for that item. The safe reading of anything unknown is always "do not delete".
+   reply means "failed" for that item; an unknown item kind is declined. The safe reading of anything
+   unknown is always "do not delete".
 4. **Capabilities** gate features. A feature is used only if both sides listed it.
 5. Pairing has its own versions (`qr_version`, `pair_version`). An unknown value is refused with a message
    asking the user to update.
-6. Within major version 1, safety constants may only become stricter (`FM_DELAY`, `CONFIRM_PERIOD`, attempt
-   limits, trash retention minimum).
+6. Within major version 1, safety rules may only become stricter: the constants `FM_DELAY`,
+   `CONFIRM_PERIOD`, the attempt limits, the trash-period minimum, `CLOCK_AGREE`; and the lists (the
+   storage-bus allow-list of 8.2 may only shrink, the shell-active names of 6.8 may only grow).
 7. Program versions follow SemVer and are independent of the protocol version. Promise: any 1.x phone app
    works with any 1.y PC program.
 8. Message codes `0x70`-`0x7F` are for experiments and never appear in a release. All other unlisted codes
-   are reserved.
+   are reserved. Codes and map keys that Draft 1 assigned and Draft 2 retired are never reassigned (5.11).
 9. Every context string contains `kiwi/1`; a new major version uses new strings, so hashes, proofs and
-   signatures never carry over between majors.
+   signatures never carry over between majors. The release-signing prefix (10.4) is independent of the
+   protocol version on purpose.
 
 ### 11.2 Test vectors
 
@@ -2970,47 +3074,73 @@ over the 8-byte big-endian `seed`.
 | Suite | Inputs | Expected |
 |---|---|---|
 | `identity` | Seed | Public key, `SPKI` (44 bytes), device id, display fingerprint, one valid certificate. |
+| `ed25519-strict` | Signatures with non-canonical `S`, small-order keys, non-canonical encodings | Each must be rejected. |
 | `qr` | `pc_id`, `pair_secret`, port, addresses, flags | Payload bytes and QR text. Negative: wrong prefix, unknown flag bit, truncated, `n = 0`, `n = 7`, bad Base32. |
-| `pairing` | `E_pair`, `ID_ph`, `ID_pc`, `m1`, `m2`, `nonce_p`, `pair_secret` | `commit`, `TH`, `SAS`, `K_pair`, `proof_ph`, `proof_pc`. Negative: altered nonce. |
+| `pairing` | `E_pair`, `ID_ph`, `ID_pc`, `m1`, `m2` (the Draft 2 messages, without names), `nonce_p`, `pair_secret` | `commit`, `TH`, `SAS`, `K_pair`, `proof_ph`, `proof_pc`. Negative: altered nonce. |
+| `pairing-typed` | Candidate sets (one or two SAS values) and typed numbers | Which candidate is accepted, attempts left, window state: one match, no match, both match, third failure, spaces in the input. |
 | `session` | `E_sess`, ids, `h_ph`, `h_pc`, both seeds | `TH_sess`, `sig_ph`, `sig_pc` (Ed25519 is deterministic). |
-| `discovery` | `ID_pc`, instance name | `h`. |
-| `cbor` | One example per message type | Exact frame bytes. Negative list: float, tag, indefinite length, duplicate key, non-minimal integer, unsorted keys, trailing bytes, depth 9, oversize length. |
-| `chunks` | `content(seed, size)` for sizes 0, 1, `CHUNK - 1`, `CHUNK`, `CHUNK + 1`, `3 * CHUNK` | Chunk hashes, file hash, `prefix_hash` for each `k`, BLAKE3 of the complete data-stream bytes. |
+| `discovery` | `discovery_key` values, instance name, slot order | `K_hint`, each `hint`, the 128-character `h`; and for a phone: match or no match. |
+| `cbor` | One example per message type | Exact frame bytes. Negative list, each `E_MALFORMED`: float, tag, indefinite length, duplicate key, non-minimal integer, non-minimal length, unsorted keys, trailing bytes, depth 9, oversize length, a declared array count larger than the frame. |
+| `ranges` | One value at each edge of every row of the 5.7 range table (for example `size` = 2^42 and 2^42 + 1; `confirm_age` = 2^32 and 2^64 - 1; `last_session_seq` = 2^53 - 1 and 2^53; `Time` = 2^53 + 1) | The reaction the table names. |
+| `chunks` | `content(seed, size)` for sizes 0, 1, `CHUNK - 1`, `CHUNK`, `CHUNK + 1`, `3 * CHUNK` | Chunk hashes, file hash, `prefix_hash` for each `k`, BLAKE3 of the complete data-stream bytes. Negative: `resume_offset` above `size`, and not a multiple of `CHUNK` (sender restarts from 0). |
 | `fm-proof` | Nonce, ids, stage, size, `content(seed, size)` | `K_v`, `proof`. |
-| `names-windows`, `names-android` | Components such as `..`, `a/b`, `CON`, `nul.txt`, `COM¹`, `x.`, `x `, `a:b`, a name with U+202E, decomposed (NFD) names, 300-unit names, a cut that would split a surrogate pair, `.nomedia` | Cleaned component, or "reject". |
-| `collision` | Existing names and an incoming name | Chosen final name. |
-| `link-clock` | Sequences of checkpoints (wall time, boot id, monotonic reading) | `LC` after each step, anomaly flag. |
-| `confirm-state` | Pairs of (`epoch`, `age`, `anomaly`) | State, adopted epoch and age. |
-| `tls-negative` | The five handshakes of 1.4 | Each must fail. |
+| `names-windows`, `names-android` | Components such as `..`, `a/b`, `a\b`, `CON`, `nul.txt`, `COM¹`, `CLOCK$`, `x.`, `x `, `a:b`, a name with U+202E, a name with U+200F (kept), decomposed (NFD) names, 300-unit names, a cut that would split a surrogate pair, `.nomedia`, `.kiwi-tmp-1.part`, `.Kiwi-store`, `x.url`, `X.LNK`, `desktop.ini`, `a.library-ms`, `Bin.{645FF040-5081-101B-9F08-00AA002F954E}`, a 240-unit name that needs ` (2)` | Cleaned component (with `_` prefix or `.kiwi-blocked` suffix where the rules say so), or "reject". |
+| `collision` | Existing names and an incoming name | Chosen final name, within the length limit. |
+| `link-clock` | Sequences of checkpoints (wall time, boot id, monotonic reading), including a gap of -299 s, -301 s, and a monotonic reading that went down with the same boot id | `LC` after each step, anomaly flag. |
+| `confirm-state` | Pairs of (`epoch`, `age`, `anomaly`, `need_confirm`) for both sides, with the local `LC` and stored `age_base`/`age_lc`: age 0; 604 799; 604 800; 2^32; 2^64 - 1 on the wire; `LC < age_lc`; epochs equal, PC ahead by one (with and without the phone's anomaly flag), PC behind (restored PC), phone ahead; then a successful code exchange in each case | State, the values each side stores, and `new_epoch`. No case may produce a wrap or leave `REQUIRED` without an exit. |
+| `rollback` | `receipt_hwm`, `commit_hwm`, and a `commit_seq` named in a request | Rollback or not, on each side; the PC's new `commit_hwm`. |
+| `keep-period` | Capture time, date added, `restored_at`, now, period, favourite and keep flags | Anchor, eligible or not: capture later than date added; capture in the future; no capture time; restored yesterday; favourite. |
+| `release` | Seeds for three release keys; manifests | `key_id` values; `signed_message`; signatures; and for sequences of manifests the accept/reject result and the stored state: valid; wrong prefix; signed by an unknown key; `key_id` mismatch; lower `seq` (replay); revoke the active key by the reserve key, then a manifest by the revoked key; add then revoke; a revoked key offered again in `add`; a version below `min_supported_seen`; a manifest that would leave no trusted key. |
+| `tls-negative` | The eleven cases (a) to (k) of 1.4 | Each behaves as the table says. |
 
 ### 11.3 Conformance tests beyond vectors
 
 Every row of the failure table in 8.11 is an automated test in the reference implementation (fault
 injection at the named point, then the assertion "nothing is deleted"). The integration suite also covers:
-resume after a kill at every step of section 7; a planted junction; two files that differ only in case; a
-pairing with a wrong QR secret; SAS mismatch; weekly code attempts and lockout; quota and reserve.
+
+- a kill at every step of section 7, including between steps 9 and 9a and a simulated lost rename;
+- a planted junction; two files that differ only in case; a peer name that begins with `.kiwi-`;
+- pairing: a wrong QR secret; a second device using the same QR; two interleaved pairing connections
+  (1.4 test j); a typed number that matches no candidate; the phone answering "No" in method SAS; method
+  SAS refused on a Public network; an expired provisional pin and the tombstone's close code;
+- weekly code: attempts, lockout, arming only by the explicit click, and that an expired link still
+  accepts backup offers while it refuses `FM_VERIFY`, `BROWSE`, `FETCH` and sends nothing from the outbox;
+- quota and reserve, per phone;
+- **two phones on one PC storing the same content**: neither gets `have` or `need_hash` because of the
+  other; a stage-1 verification of phone B fails with status 6 when only phone A's file exists; damaging
+  phone A's file does not change any answer about phone B's file except through the PC-wide block;
+- ledger rollback (restore an older ledger copy) seen from the phone and from the PC; `AUDIT` after files
+  were removed;
+- second copy: copy with an injected read error, a second disk removed in mid-copy, catch-up after
+  reconnection, self-repair in both directions, a failing-disk block, rebuild of the primary, and that no
+  step of 8.4 to 8.7 changes its result when a second copy is present or absent;
+- shell-active names end with `.kiwi-blocked` on disk and come back under their original name;
+- the thumbnail helper cannot open a second file or a socket;
+- contacts restore run twice adds nothing twice and changes no existing contact.
 
 ### 11.4 Platform independence (iOS later)
 
 iPhone support is deferred, not cancelled. To keep it possible:
 
 - The wire protocol has no field that only Android can fill: `Media` is optional and `platform = 3` is
-  reserved for iOS.
+  reserved for iOS. Contacts and calendars travel as vCard and iCalendar, which iOS also produces.
 - The core reaches the system only through adapters: `KeyWrap` (wrap/unwrap the identity seed),
   `Storage` (durable database, no-backup location), `Clock` (monotonic time including sleep, boot id, wall
-  time), `MediaSource` (enumerate, open original bytes, re-check metadata), `Trash` (trash, read back,
-  restore, purge; a flag says whether retention is system-managed), `Discovery` (candidates in),
-  `NetworkPolicy` (eligible interfaces, on-link prefixes, socket binding), `Prompts` (pairing consent, SAS,
-  accept dialog).
+  time), `MediaSource` (enumerate, open original bytes, re-check metadata, favourite flag, dates),
+  `DataSource` (contacts, calendars, app list, other apps' backup folders: each optional), `Trash` (trash,
+  read back, restore, purge; a flag says whether the trash period is system-managed), `Discovery`
+  (candidates in), `NetworkPolicy` (eligible interfaces, on-link prefixes, socket binding), `Prompts`
+  (show the pairing number, the "did the PC accept" question, the accept dialog).
 - The phone is always the QUIC client and never listens, which fits iOS background rules.
-- The trash model of API 30+ (system dialog, system-managed 30-day retention, warn before expiry) is the
+- The trash model of API 30+ (system dialog, system-managed 30-day period, warn before expiry) is the
   model an iOS client would use with the Photos "Recently Deleted" album.
 
 ---
 
 ## 12. Decisions
 
-Each line: the choice, then the alternative that was not taken and why.
+Each line: the choice, then the alternative that was not taken and why. D1 to D28 are from Draft 1 (some
+were changed by Draft 2 and say so); D29 onwards are new.
 
 | # | Decision | Instead of | Reason |
 |---|---|---|---|
@@ -3019,55 +3149,100 @@ Each line: the choice, then the alternative that was not taken and why.
 | D3 | Phone is always the QUIC client, PC always the server | Either side may listen | Android (and iOS) background limits; one firewall rule; the phone has no inbound attack surface. Cost: PC-to-phone sending waits for the phone to connect. |
 | D4 | One ALPN and one listener; pairing gated by a user-opened window | A separate pairing port or ALPN | No standing pairing listener; fewer states to get wrong. UNPAIRED connections are never upgraded. |
 | D5 | QR with a one-time 128-bit secret, plus a 6-digit SAS with commitment | A typed short code with a PAKE | No audited PAKE crate exists (spike section 5). |
-| D6 | The SAS is always shown; comparing it is mandatory only without the QR | SAS only as a hidden fallback | Matches the approved screens; one message sequence for both methods. |
-| D7 | CBOR, deterministic, integer keys, length-prefixed frames | Protobuf, JSON, postcard, MessagePack | See 5.2. |
+| D6 | **Changed.** In both methods the number is shown on the phone only and **typed on the PC**; the PC shows no number, no name and no Allow button before it matched | Draft 1: both screens show the number and the PC user clicks Allow | A click can be given to the wrong device (a bystander with a photo of the QR, an attacker who answered first); a typed number cannot (KT-06). |
+| D7 | CBOR, deterministic, integer keys, length-prefixed frames; canonical form enforced by receivers | Protobuf, JSON, postcard, MessagePack; lenient decoding | See 5.2. |
 | D8 | Fixed 4 MiB chunks with independent BLAKE3 chunk hashes, plus a whole-file BLAKE3 | BLAKE3 verified streaming (Bao) | No stable, audited Bao crate; 4 MiB matches the unbuffered verify buffer of the spike. |
 | D9 | The file hash is computed in the same pass that streams the bytes; pre-hashing only on `need_hash` | Always hash first, then send | No double read of large videos, and "hash exactly what was streamed". |
-| D10 | Deduplication per link only | Across all phones of a PC | One phone's sole copy must not depend on another phone's folder. |
+| D10 | **Strengthened.** Deduplication per link only; every phone's copy is its own file in its own folder; no answer depends on another phone's files | Deduplication across all phones of a PC; hard links between phones | One phone's sole copy must not depend on another phone's folder, a proof must be over a file recorded for that phone, and one phone must not learn what another holds. Saving disk space across phones is left to a later version. |
 | D11 | Never overwrite; `name (n).ext`; create-new rename | Replace when the hash differs; ask the user | No destructive write can be triggered from the network. |
-| D12 | No TLS session tickets or resumption (and no 0-RTT) | Resumption without 0-RTT | Unpairing must take effect on the next connection; resumption would skip the pin check. |
+| D12 | No TLS session tickets, no resumption, no 0-RTT, no `NEW_TOKEN`, set by explicit configuration and tested | Library defaults | Unpairing must take effect on the next connection; the defaults of rustls and quinn enable all of them (KT-04). |
 | D13 | QUIC Retry for every new connection | Retry only under load | One extra round trip on a LAN is negligible; simpler and deterministic. |
-| D14 | Weekly check measured by a link clock (monotonic, the larger of both devices) and an epoch counter | Wall-clock timestamps | Wall clocks can be set back. |
-| D15 | A weekly code exists only while a person at the PC is shown it; 3 attempts; a new code needs a PC click | Code always available to guess | Makes a 2-digit code a sound presence check. |
-| D16 | An expired weekly check pauses every data-plane request | Pausing only final move | The brief asks that automatic backup pauses. See open question Q2. |
+| D14 | Weekly check measured by a link clock (monotonic, the larger of both devices), an epoch counter and a durable "required" flag | Wall-clock timestamps; a stored time that is moved backwards | Wall clocks can be set back; moved values can wrap (KT-01). |
+| D15 | A weekly code exists only while a person at the PC asked for it by a click; 3 attempts; a new code needs a PC click | Code always available to guess; shown when the program opens | Makes a 2-digit code a sound presence check. |
+| D16 | **Replaced by D32.** | | |
 | D17 | Second verification by a keyed proof computed on both sides with a fresh nonce | The PC stating "hash matches" | Makes "never trust the ledger" a property of the protocol: the PC cannot pass without reading the bytes. |
 | D18 | Trash, never direct deletion; a third verification before purge; no `MANAGE_MEDIA`, no `createDeleteRequest` | Silent deletion | The user keeps an undo and sees the system dialog. |
 | D19 | An integrity problem blocks final moves for all phones of that PC | Per file or per phone | A damaged file suggests a failing disk. |
 | D20 | Browse by opaque handles | Relative path strings | Traversal cannot be expressed. |
 | D21 | Thumbnails and listings on the control stream | Extra stream types | Fewer stream states; 64 KiB cap keeps head-of-line delay small. |
-| D22 | Update: detached Ed25519 signature over a manifest, verified by the core | minisign format; Sigstore; Authenticode | No new cryptographic code (the core already has Ed25519); free tools only. |
+| D22 | **Extended by D39.** Update: detached Ed25519 signature over a manifest, verified by the core | minisign format; Sigstore; Authenticode | No new cryptographic code (the core already has Ed25519); free tools only. |
 | D23 | Problem report through the user's mail program | An HTTPS endpoint | The program sends nothing; the user sees everything. |
-| D24 | "LAN only" enforced by an on-link address rule (and hop limit 1) | Trusting the UI or private address ranges | Works for IPv6 and odd subnets; defeats port-forwarding. |
+| D24 | "LAN only" enforced by an on-link address rule and a mandatory hop limit of 1 | Trusting the UI or private address ranges; hop limit as a recommendation | Works for IPv6 and odd subnets; defeats port-forwarding and forged prefixes (KT-25). |
 | D25 | No deep link or URI scheme for pairing | `kiwi://pair?...` | A web page must not be able to start a pairing. |
-| D26 | PC ledger in the user's local application data, not in the destination folder | Next to the files | Users browse and reorganise the destination. Ledger loss is handled by 8.10. |
-| D27 | ring as the TLS crypto provider; X25519 | aws-lc-rs with a hybrid post-quantum group | Smaller, no cmake (spike section 1). See open question Q10. |
+| D26 | PC ledger in the user's local application data, with a marker in the destination folder | The whole ledger next to the files | Users browse and reorganise the destination. Ledger loss and rollback are handled by 8.10. |
+| D27 | ring as the TLS crypto provider; X25519; no post-quantum group in 1.0 | aws-lc-rs with a hybrid post-quantum group | Smaller, no cmake (spike section 1); traffic never leaves the local link. The key-exchange list stays library-defined, so a later build can add X25519MLKEM768 without a protocol change. |
 | D28 | No in-app "empty trash now" in 1.0 | A manual purge that bypasses the checks | Every deletion by the app follows 8.7. A file manager remains available to the user. |
+| D29 | Public networks are usable after a one-click, per-network choice in the PC program; Domain networks never; the program never changes a network's Windows category | Private profile only | Windows marks most new networks (and every phone hotspot) Public; telling users to switch them to Private opens more than this listener. Authentication does not depend on the category. |
+| D30 | "Home" = a paired PC answers on the current network | Reading Wi-Fi names; an allowed-networks list on the phone | No location permission; nothing to configure. |
+| D31 | Discovery hints keyed by a per-link secret, in 8 fixed slots | A hint derived from the PC's public key | The public key is visible to any prober; a former phone must not be able to track the PC; the slot count hides how many phones are paired (KT-24). |
+| D32 | An expired weekly check pauses final move, trash purges, browse/restore, PC-to-phone delivery and clipboard; **backup copying continues**; per phone | Draft 1 (D16): every data-plane request pauses | Owner decision. Pausing backup creates the loss the product exists to prevent; an uploader gains nothing. |
+| D33 | Final-move verification is per device (invariant I8) | A proof satisfied by any file with that hash on the PC | Owner decision: a copy stored by phone A must never confirm a deletion on phone B. |
+| D34 | No password, no encryption and no lock of the program's own for the files on the PC | A vault, or an optional password | Owner decision: nothing may be lost to a forgotten password. The residual risk is stated (threat model R22 to R24). |
+| D35 | The second copy is made by the PC alone; final move never waits for it; a failing disk blocks final moves while an absent second disk does not | Phone-driven mirroring; waiting for two copies before deletion | Owner decision. The phone's trash covers the one-copy window; the warnings are in 8.13. |
+| D36 | Keep-on-phone period: one phone setting; age = the later of capture time and date added; favourites and "keep on phone" never moved; a restore restarts it | A PC-side policy; age from capture time alone | Owner decision. An old photo that just arrived on the phone is new to the user. |
+| D37 | Contacts, calendars, app lists, APKs and WhatsApp's backup travel as ordinary files of a declared kind; the PC never parses them; contacts and calendar restore is add-only merge; APKs are saved, never installed; no SMS, no call log | Special sync messages; "replace" restore; automatic install | One transfer path and one commit path for everything; a restore that cannot destroy. |
+| D38 | Shell-active file names are stored with the suffix `.kiwi-blocked` | Refusing such files; storing them as they are; the shorter `.kiwi` | Explorer parses these types when a folder is merely shown (KT-17). The file is kept, byte-identical, and the suffix says what happened; the program registers no handler for it. |
+| D39 | Release keys have ids; the signature covers a fixed prefix plus the manifest; revocations are stored for ever; manifests carry a sequence number and `min_supported`; keys are held offline by the owner | Two anonymous keys accepted for ever | KT-03: revocation cannot be added after 1.0. |
+| D40 | The PC user must allow final move per phone (default off) | A notice only | The PC becomes the store of sole copies; its user must agree (review, Q15). |
+| D41 | Pairing compares the typed number with every candidate connection and accepts the single match | One pending consent dialog at a time, others `E_BUSY` (review's proposal for KT-06) | An attacker who connects first can no longer block the real phone, and the typed number, not the arrival order, selects the device. |
+| D42 | For the address filter a too-wide on-link prefix is narrowed to /64 or /16 | Ignoring such prefixes altogether (review's proposal for KT-25) | Same protection against a forged prefix; home networks configured as a /8 keep working inside one /16. |
+| D43 | Thumbnails are decoded only in a restricted helper process | In-process decoding with limits | The image is chosen by whoever holds a phone key (KT-15). |
+| D44 | Ledger rollback is detected by two high-water marks and a weekly audit | Comparing `ledger_id` only | A restored system image keeps the `ledger_id` (KT-02). |
+| D45 | The outbox has no silent expiry; "always accept from this PC" is optional and off by default | Draft 1: 7-day outbox, no automatic accept | Owner decision. |
+| D46 | Resume of an interrupted file is optional for the receiver | Mandatory partial files with chunk lists | The store as built keeps no partial files; nothing else depends on resume. |
 
 ---
 
 ## 13. Open questions
 
-Flagged for the manager; nothing below was guessed into the normative text beyond the stated default.
+### 13.1 The questions of Draft 1, closed
 
-| # | Question | Default written in this document |
+| # | Question (short) | Answer in Draft 2 | Where |
+|---|---|---|---|
+| Q1 | Private-only networks? | No. Public networks by a one-click, per-network choice in the PC program (no administrator rights); Domain never; firewall rule for this program, UDP, the stored port, `LocalSubnet`, Private and Public; QR pairing on Public with the typed number; SAS pairing and `pm=1` Private-only; mDNS on Public carries only the secret-keyed hint; hop limit 1 MUST. | 4.4, 4.5, 2.1 |
+| Q2 | Scope of an expired weekly check | Narrow: copying continues; final move, purges, browse/restore, PC-to-phone delivery and clipboard pause. Per phone. | 3.5 |
+| Q3 | Android 11+ system trash | Accepted as warn-and-restore. The period is Android's (30 days), warnings at 7 and 2 days, scheduled from the link clock too; the trash-period setting exists on Android 7-10 only; the PC also watches the expiry. The device test is item V1. | 8.6, 8.10 |
+| Q4 | Destination inside a sync folder | Copy allowed with a lasting warning; final move refused; never proposed as the default. Also refused for final move: Downloads, temporary folders, folders writable by other accounts. | 8.2 |
+| Q5 | Release keys, repository, support address, automatic check | Two offline Ed25519 keys held by the owner under K1-K8, with ids, rotation and revocation; the project's own repository; a project support alias; automatic check on, at most daily, disclosed and switchable at first run. | 10.1, 10.4, 10.2 |
+| Q6 | Allowed Wi-Fi networks | No Wi-Fi names, no location permission. Home = a paired PC answers. The PC's policy is per network id. | 4.8 |
+| Q7 | `NsdManager` on tethering | Not relied on: the core browses on tethering interfaces itself; cached address and QR remain. Device test is item V2. | 4.3 |
+| Q8 | Android 17 local-network permission | Runtime permission, in context, no fallback path; fixed with the target SDK before the beta. Item V3. | 4.7 |
+| Q9 | Hop limit 1; port 47474 | Hop limit 1 is a MUST with no setting. Any port is accepted (it is always learned); the registry check for 47474 is item V7. | 4.4, 4.5 |
+| Q10 | Post-quantum key exchange | Not in 1.0; the key-exchange list stays library-defined. | D27 |
+| Q11 | PC-to-phone when the app is closed | Outbox until the phone connects; no foreground service; the phone shows the outbox count when opened. | 9.1 |
+| Q12 | WebView2 network features | SmartScreen reputation checks, autofill and password saving off; every non-local request refused; wording fixed. | 9.5, 10.3 |
+| Q13 | Android 10 trash folder | To be verified on a device; if legacy storage does not work, Android 10 is copy-only. Item V4. | 8.6 |
+| Q14 | Trash batch size | 100 items per system dialog until tested on several manufacturers; a local constant. Item V6. | 8.6 |
+| Q15 | PC-side approval of final move | Yes: a per-phone switch, default off. | 8.1, 8.2 |
+| Q16 | Mark-of-the-Web | On every file a phone sends with purpose 2; none on backups; shell-active names neutralised for every purpose. | 6.8 |
+| Q17 | Limits | 8 phones per PC, 4 PCs per phone, one final-move target PC per folder; enforced at pairing; local policy. | 2.6 |
+
+### 13.2 New questions for the manager (a default is written into the text)
+
+| # | Question | Default in this document |
 |---|---|---|
-| Q1 | Windows marks most new networks (home Wi-Fi, phone hotspot, USB tethering) as **Public**. With "Private profile only", many users cannot connect until they change the network type in Windows Settings (which may need administrator rights). How should the PC program guide this, and is Private-only final? | Private only; the program explains and opens the Windows settings page. |
-| Q2 | Scope of an expired weekly check. The brief says automatic backup pauses; the approved screens say the code is asked "before final moves" and "normal copying continues". | Everything on the data plane pauses (D16). Narrowing it to final move is a one-line change in 3.5. |
-| Q3 | Android 11+ system trash: retention is fixed by the system, cannot be suspended, and the "trash period" setting cannot apply. Is the warning-and-restore rule (8.6) acceptable, and should the setting be hidden on those versions? Also to verify on a device: whether the app can list trashed items it does not own. | As written in 8.6. |
-| Q4 | Default destination: the design uses the largest fixed drive. If that folder is inside OneDrive or another sync client, final move is refused (8.2) and files are uploaded to a cloud by that client. Should the PC warn, or refuse such a destination even for copying? | Copy allowed with a warning; final move refused. |
-| Q5 | Release signing: who holds the Ed25519 release keys, where (offline or CI secret), and how the reserve key is kept. Repository owner/name for the update check. Support e-mail address for reports. Is the automatic update check on or off by default? | Not decided; automatic check assumed on, at most daily. |
-| Q6 | "Allowed Wi-Fi networks" (advanced setting): reading the Wi-Fi name on Android needs the location permission. Alternative without it: treat a network as allowed when a paired PC answers on it. | Not specified in `kiwi/1` (local policy). |
-| Q7 | Does `NsdManager` find the PC when the phone itself is the hotspot or shares over USB? Not tested (no device in the spike). Fallbacks: cached address, QR, or mDNS from the core. | Candidates from any source are accepted (4.3). |
-| Q8 | Android 17 local-network permission: exact name, group and behaviour at the chosen target SDK. | 4.7, to be verified. |
-| Q9 | Hop limit 1 on QUIC sockets breaks routed home networks (some mesh systems in router mode). Keep as SHOULD, make it a setting, or drop? Also: confirm that UDP port 47474 is unassigned and unblocked. | SHOULD; port 47474 preferred, any port accepted. |
-| Q10 | Post-quantum key exchange (X25519MLKEM768) needs aws-lc-rs (larger library, cmake). Traffic recorded on the LAN today could be decrypted by a future quantum computer. | Not in 1.0. |
-| Q11 | PC-to-phone sending when the phone app is closed: there is no push without a cloud. Is "open the app on your phone" acceptable, or is a foreground service wanted? | Outbox, delivered at the next session. |
-| Q12 | WebView2: which runtime network features (SmartScreen, autofill, updates) can and should be disabled, and how to word "nothing else leaves the device" given the runtime is Microsoft's. | 10.3 note. |
-| Q13 | Android 10 (API 29): the trash folder relies on legacy external storage; the spike could not verify this on a device. If it does not work, Android 10 becomes copy-only. | Assumed to work. |
-| Q14 | Batch size for `createTrashRequest` (500 items per system dialog) must be verified on devices. | 500. |
-| Q15 | Should the PC user have to approve final move per phone (a PC-side switch), in addition to the notice? | Notice only. |
-| Q16 | Mark-of-the-Web on files received by the PC: none (current), or on executable and script types from "Send to PC". | None. |
-| Q17 | Limits: 8 phones per PC, 4 PCs per phone; one final-move target PC per folder. | As written. |
+| N1 | On Android 7-10 the app controls the purge. When a second disk is configured but has not yet received a file, should the purge of that file wait (for a bounded time) for the second copy? | No: owner decision 5 says final move does not wait; the app warns at 7 and 2 days (8.13 rule 11). A bounded wait would cost only phone space and is recommended by the author. |
+| N2 | Should files that are not media (kind 2: documents, downloads) ever be removable by final move? | No. Copy and restore only (8.2). |
+| N3 | Snapshots accumulate on the PC (contacts, calendar, app list, WhatsApp database versions). Should the PC program remove old versions by itself ("keep the newest N")? That would be the first exception to invariant I7. | No automatic removal; the PC user removes old versions by hand (9.6). |
+| N4 | Google Play restricts all-files access, the app-list permission and (by declaration) contacts and calendar access. Which data sets does a Play build carry? | All data sets in the direct-download and F-Droid builds; a Play build ships only what policy allows, decided at submission. |
+| N5 | May a network share (NAS) be a second disk? | Not in 1.0 (8.13 rule 3): flush and unbuffered read-back cannot be relied on over a share. |
+| N6 | Shared PC folders (root kind 2) remain as a feature, with the rule that they can never overlap any phone's namespace. Is that the intended reading of "a phone can only browse and restore its own namespace"? | Yes, kept; default none shared (9.3). |
+| N7 | The per-phone PC switch "Allow this phone to free up space using this PC" and the per-network switch "Use Kiwi Transfer on this network" are new controls on the PC screens; pairing on the PC is now a number field instead of an Allow button. | Specified as written; the approved screens need these three changes. |
+| N8 | Installation without administrator rights cannot add the firewall rule. Support it, or require the machine-wide installer? | The machine-wide installer is the supported path; a per-user install detects the missing or blocking rule and explains (4.5 rule 5). |
+
+### 13.3 Items to verify on real devices before release (no decision needed)
+
+| # | Item | If the test fails |
+|---|---|---|
+| V1 | Android 11+: can the app list and read trashed items it does not own (stage 2 over the trashed copy, re-check after the dialog)? | Metadata-only comparison; stage 2 decides warnings only (already written, 8.6, 8.7). |
+| V2 | Does `NsdManager` find the PC on the phone's own hotspot and USB tethering interfaces? Does the core's own query work there on the common manufacturers? | Cached address and QR. |
+| V3 | Android 17 local-network permission at the chosen target SDK. | No fallback: the feature needs it. |
+| V4 | Android 10: does legacy external storage give the trash folder path access? | Android 10 is copy-only. |
+| V5 | Android 11+: can the app read WhatsApp's folder under `Android/media`, and write a restored backup back into it? | Read: the WhatsApp data set is hidden on that version. Write: restore to `Download/Kiwi Transfer/Restored/WhatsApp/` only. |
+| V6 | `createTrashRequest` with 100 items on at least three manufacturers. | A smaller `FM_BATCH`. |
+| V7 | UDP port 47474 against the IANA registry and common blocklists. | Another preferred port; no protocol change. |
+| V8 | Do the common gallery apps write favourites to MediaStore `IS_FAVORITE`? | Only the app's own "keep on phone" mark protects an item on those devices; the app says so. |
+| V9 | Windows: lifetime of the volatile registry marker used as boot id for a standard user. | The wall-clock branch of 3.2 is taken more often (safe). |
 
 ---
 
@@ -3080,24 +3255,48 @@ Flagged for the manager; nothing below was guessed into the normative text beyon
 | `MAX_FRAME_UNPAIRED` | 4 096 bytes | 2.1 |
 | `MAX_DATA_STREAMS` | 4 per direction | 5.5 |
 | `CHUNK` | 4 194 304 bytes | 6.4 |
+| `MAX_FILE_SIZE` | 2^42 bytes (4 TiB) | 5.7 |
+| Counter limit | 2^53 | 5.7 |
+| `AGE_CAP` | 2^32 s | 3.2, 5.7 |
+| `REQUEST_TIMEOUT` | 60 s (parts: one at least every 30 s) | 5.4 |
+| `ACCEPT_TIMEOUT` | 300 s | 9.1 |
 | `PAIR_WINDOW` | 180 s (allowed 120-300 s) | 2.1 |
+| `PAIR_ENTRY_TIME` | 120 s | 2.1 |
 | `PAIR_SECRET_LEN` | 16 bytes | 2.1 |
-| Pairing attempts per window | 3 | 2.1 |
-| Provisional pin lifetime | 600 s | 2.4 |
+| `PAIR_ATTEMPTS` | 3 per window | 2.1 |
+| `PROVISIONAL_PIN_LIFETIME` | 600 s | 2.4 |
+| `TOMBSTONE_LIFETIME` | 90 days; at most 64 entries | 2.7 |
+| `MAX_PHONES` / `MAX_PCS` | 8 phones per PC / 4 PCs per phone | 2.6 |
+| `HINT_SLOTS` | 8 hints of 8 bytes | 4.2 |
 | `CONFIRM_PERIOD` | 604 800 s (7 days) | 3.3 |
 | `RECONFIRM_TTL` | 300 s | 3.4 |
 | Weekly code attempts | 3 per challenge; lock 900 s doubling to 86 400 s after 3 dead challenges | 3.4 |
 | Link clock checkpoint | Every 300 s at most | 3.2 |
+| `CLOCK_TOLERANCE` | 300 s | 3.2 |
+| `CLOCK_AGREE` | 3 600 s | 8.6 |
 | `SETTLE_TIME` | 120 s | 6.2 |
-| Partial file lifetime | 7 days without progress | 5.10, 6.7 |
+| Temporary file lifetime | 7 days without progress | 5.10, 6.7 |
+| Stored name limit (Windows) | 240 UTF-16 units per component, 64 components | 6.8 |
+| Stored name limit (Android) | 200 bytes per component, 8 `path` components | 6.8 |
+| `NEUTRAL_SUFFIX` | `.kiwi-blocked` | 6.8 |
 | `FM_DELAY` | 86 400 s (24 h) | 8.2, 8.5 |
 | `FM_VERIFY_VALIDITY` | 900 s | 8.5 |
-| Final-move batch | 500 items | 8.6 |
-| `TRASH_RETENTION` | 2 592 000 s (30 days); minimum 604 800 s | 8.6, 8.7 |
+| `FM_BATCH` | 100 items per trash request | 8.6 |
+| `PRE_EXPIRY_CHECK` | From 10 days before the trash expiry | 8.6 |
+| Trash expiry warnings | 7 days and 2 days before | 8.6, 8.13 |
+| `TRASH_RETENTION` (Android 7-10 only) | 2 592 000 s (30 days); minimum 604 800 s | 8.6, 8.7 |
+| Keep-on-phone presets | 7, 30 (preselected), 90, 365 days; custom `KEEP_MIN` 1 day to `KEEP_MAX` 3 650 days | 8.12 |
 | `SCAN_PERIOD` | 604 800 s (7 days) | 8.9 |
 | `SCAN_MAX_AGE` | 1 209 600 s (14 days) | 8.2, 8.5 |
+| `AUDIT_PERIOD` | 604 800 s (7 days) | 8.10 |
+| `MAX_SECOND_DISKS` | 4 | 8.13 |
+| Second-disk reminders | 7, 14, 30 days absent; 14, 7, 2 days before a trash expiry | 8.13 |
+| `SNAPSHOT_MIN_INTERVAL` | 86 400 s | 9.6 |
+| `APP_BACKUP_MIN_INTERVAL` | 604 800 s (minimum 86 400 s) | 9.6 |
+| `OUTBOX_MAX` | 10 000 entries per phone; no expiry | 9.1 |
+| `MAX_RELEASE_KEYS` | 4 | 10.4 |
 | Idle timeout / keep-alive | 30 s / 10 s | 1.3 |
-| Outbox lifetime | 7 days | 9.1 |
+| Hop limit | 1 | 4.4 |
 | Preferred UDP port | 47474 | 4.5 |
 
 ## Appendix B. Context strings and labels
@@ -3113,10 +3312,11 @@ Exactly these ASCII strings, without quotes and without a terminator.
 | `KDF` context | `kiwi/1 pairing sas` |
 | `KDF` context | `kiwi/1 pairing key` |
 | `KDF` context | `kiwi/1 session transcript` |
-| `KDF` context | `kiwi/1 discovery hint` |
+| `KDF` context (input: the link's `discovery_key`) | `kiwi/1 discovery hint` |
 | `KDF` context | `kiwi/1 item key` |
 | `KDF` context | `kiwi/1 fm verify` |
 | `KDF` context (tests only) | `kiwi/1 test content` |
 | Signature prefix | `kiwi/1 session auth` followed by one role byte (`0x01` phone, `0x02` PC) |
 | `MAC` prefix bytes | `0x01` for `proof_ph`, `0x02` for `proof_pc` |
 | Key-wrap associated data / DPAPI entropy | `kiwi/1 identity seed` |
+| Release manifest signature prefix (10.4) | `kiwi-release-manifest-v1` followed by one line feed (`0x0a`) |
