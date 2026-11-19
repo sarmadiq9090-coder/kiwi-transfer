@@ -1,16 +1,20 @@
 # Kiwi Transfer protocol specification: `kiwi/1`
 
-Status: Draft 1, 2026-11-19, for Kiwi Transfer 1.0. Licence: Apache-2.0.
-Companion documents: `docs/SPIKE-REPORT.md` (measurements this design relies on), `docs/THREAT-MODEL.md`.
+Status: Draft 2, 2026-11-19, for Kiwi Transfer 1.0. Licence: Apache-2.0.
+Companion documents: `docs/SPIKE-REPORT.md` (measurements this design relies on), `docs/THREAT-MODEL.md`,
+`docs/REVIEW-PROTOCOL-1.md` (independent review of Draft 1; its findings are named `KT-nn` here) and
+`docs/CHANGES-DRAFT-2.md` (what changed since Draft 1, finding by finding).
 
 Scope: an Android phone app and a Windows PC program that copy files between each other over a local link
 (Wi-Fi LAN, phone hotspot, USB tethering). No cloud, no account, no telemetry, **no internet mode**: the two
-devices only ever talk to each other directly, on the same IP link.
+devices only ever talk to each other directly, on the same IP link. One PC serves several phones; each phone
+has its own pairing, folder, settings, quota and weekly code.
 
 Contents: 0 Conventions - 1 Identities and transport security - 2 Pairing - 3 Weekly re-confirmation -
-4 Discovery - 5 Session and streams - 6 File transfer - 7 Durable commit on the PC - 8 Final move -
-9 Other features - 10 Update check, problem report, endpoint list - 11 Versioning and test vectors -
-12 Decisions - 13 Open questions - Appendix A constants - Appendix B context strings.
+4 Discovery and networks - 5 Session and streams - 6 File transfer - 7 Durable commit on the PC - 8 Final move
+(8.12 keep-on-phone period, 8.13 second copy) - 9 Other features (9.1 sending, 9.6 data backup beyond media,
+9.7 plain files on the PC) - 10 Update check, release signing, problem report, endpoint list - 11 Versioning
+and test vectors - 12 Decisions - 13 Open questions - Appendix A constants - Appendix B context strings.
 
 ---
 
@@ -22,10 +26,17 @@ Contents: 0 Conventions - 1 Identities and transport security - 2 Pairing - 3 We
 A **link** is one paired (PH, PC) couple. In a file transfer, the **sender** and the **receiver** are roles
 that either device can take.
 
+**Namespace.** The **namespace** of a link is everything the PC stores for that one phone: its backup
+folder (one directory that no other link uses), the ledger records made for it, its "sent files" folder, and
+any namespace the PC user explicitly handed over to it (9.4). Every request of a phone is answered from its
+own namespace only. No message lets a phone read, list, verify against, or learn of the existence of, a file
+in another phone's namespace.
+
 **Core and platform.** The **core** is the shared Rust library (`kiwi_core`, exposed through UniFFI). It
 implements everything in this document that is not marked *(platform)*. The core MUST NOT assume Android or
 Windows: it reaches the operating system only through adapter interfaces (key wrapping, media source, trash,
-discovery results, clocks, durable storage). This keeps a later iOS client possible (see 11.4).
+discovery results, clocks, durable storage). This keeps a later iOS client possible (see 11.4). The **store**
+is the PC storage engine (`core/kiwi-store`): it implements section 7, the PC half of section 8 and 8.13.
 
 **Notation.**
 
@@ -37,13 +48,23 @@ discovery results, clocks, durable storage). This keeps a later iOS client possi
 | `KDF(ctx, m)` | BLAKE3 `derive_key` mode: context string `ctx` (ASCII, exactly as written, no terminator), key material `m`, 32-byte output. |
 | `MAC(k, m)` | BLAKE3 `keyed_hash` mode with a 32-byte key `k`, 32-byte output. |
 | `SIG(sk, m)` | Ed25519 signature (RFC 8032, pure Ed25519, no prehash, no context), 64 bytes. |
-| `ct_eq(a, b)` | Constant-time comparison. All comparisons of MACs, proofs and commitments MUST use it. |
+| `ct_eq(a, b)` | Constant-time comparison. All comparisons of MACs, proofs, commitments and typed codes MUST use it. |
 | `RAND(n)` | `n` bytes from the operating system CSPRNG. |
+
+**Ed25519 verification is strict** everywhere in this document (TLS `CertificateVerify`, `HELLO_AUTH`,
+release manifests): a verifier MUST reject a signature whose `S` is not canonical (`S >= L`), a public key or
+`R` that is not a canonical encoding, and a public key of small order. Two implementations must never
+disagree on whether a signature is valid (KT-05). In Rust: `ed25519-dalek` `verify_strict`, or an equivalent.
+
+**Arithmetic.** Every addition, subtraction and multiplication on a value that came from the peer, from a
+file, or from a clock is checked or saturating. No protocol value is ever allowed to wrap. The value ranges
+are in 5.7; a value outside its range is handled as that table says, before it is used for anything.
 
 All context strings are listed in Appendix B. All named constants (`CHUNK`, `FM_DELAY`, ...) are in Appendix A.
 
-**Time.** Wall-clock times on the wire are signed integers: milliseconds since 1970-01-01T00:00:00Z. Wall-clock
-time is never used alone for a safety decision; see the *link clock* in 3.2.
+**Time.** Wall-clock times on the wire are signed integers: milliseconds since 1970-01-01T00:00:00Z. A
+wall-clock value is never sufficient to *permit* a deletion; it may be used to *refuse* one (8.6) and to
+apply the user's keep-on-phone period (8.12), always together with the *link clock* of 3.2.
 
 ---
 
@@ -62,6 +83,11 @@ time is never used alone for a safety decision; see the *link clock* in 3.2.
 5. If the identity key cannot be loaded (blob missing, unwrap fails, see 1.6), the device MUST generate a
    new identity, MUST treat every existing pairing as void, and MUST tell the user that pairing is needed
    again. It MUST NOT silently keep old pins with a new key.
+6. **Reset this device's identity** (KT-20). Both programs offer this action in their settings. It generates
+   a new key pair, destroys the old seed, and voids every pairing exactly as rule 5 does; for final move each
+   former link is handled as unpaired (8.10). Unpairing and pairing again does *not* change the key, so it
+   does not help after a key was copied; the guidance shown after a malware clean-up, a restored system
+   image or a suspected clone therefore says "reset the identity, then pair again".
 
 ### 1.2 Certificate
 
@@ -91,36 +117,62 @@ TLS MUST contain exactly one certificate.
 | Key exchange | `x25519` MUST be supported and offered. Other groups offered by the TLS library MAY stay enabled. |
 | Cipher suites | `TLS_AES_256_GCM_SHA384`, `TLS_AES_128_GCM_SHA256`, `TLS_CHACHA20_POLY1305_SHA256` (the ring provider's TLS 1.3 set). |
 | 0-RTT | Disabled. The server MUST set its early-data limit to 0 and MUST reject early data. The client MUST NOT send early data. |
-| Resumption | Disabled. The server MUST NOT send `NewSessionTicket`; the client MUST NOT offer a PSK. Every connection performs a full certificate handshake, so that unpairing takes effect at once (decision D12). |
-| SNI | The client SHOULD NOT send SNI. If the library needs a name, it MUST be the constant `kiwi.invalid`. The server MUST ignore SNI. |
+| Resumption | Disabled on both sides, **by explicit configuration** (the library defaults enable it; see below). The server MUST NOT send `NewSessionTicket` and MUST NOT accept a PSK; the client MUST NOT store a ticket and MUST NOT offer a PSK. Every connection performs a full certificate handshake, so that unpairing takes effect at once (decision D12). |
+| Address-validation tokens | The server MUST NOT send QUIC `NEW_TOKEN` frames; the client MUST NOT store or send such tokens. Only Retry tokens exist (5.9). |
+| SNI | The client MUST NOT send the `server_name` extension. The server MUST ignore SNI if a client sends it. |
 | QUIC datagrams | Not used. |
 | Idle timeout | `max_idle_timeout` = 30 000 ms on both sides. |
 | Keep-alive | While a session is in use, each side sends a QUIC PING after 10 s without sending. |
+| Hop limit | IP TTL / IPv6 hop limit of every QUIC socket is 1 (4.4). |
 | Exporters | RFC 8446 section 7.5 exporter, 32 bytes, empty context, labels `EXPORTER-kiwi-1-pairing` and `EXPORTER-kiwi-1-session`. |
+
+**Normative library configuration (KT-04).** The reference implementation uses rustls 0.23 and quinn. Their
+defaults do not give the profile above, so these settings are part of the specification. An implementation
+on another stack MUST reach the same observable behaviour.
+
+| Where | Setting | Why |
+|---|---|---|
+| rustls `ServerConfig` | `send_tls13_tickets = 0`; `session_storage = Arc::new(NoServerSessionStorage {})`; no `ticketer`; `max_early_data_size = 0`; `send_half_rtt_data = false` | The default sends 2 tickets and keeps an in-memory session store. |
+| rustls `ClientConfig` | `resumption = Resumption::disabled()`; `enable_early_data = false`; `enable_sni = false` | The default caches tickets by server name; with one constant name a ticket from one PC would be offered to another and would be readable in the Initial packet. |
+| quinn server | Built from the rustls configuration above, **not** from a convenience constructor (those set `max_early_data_size = u32::MAX`). The number of validation tokens sent is 0 where the pinned quinn version has that setting. Every incoming connection for which `remote_address_validated()` is false is answered with `retry()`. | No `NEW_TOKEN`, Retry always (decision D13). |
+| quinn client | Built from the rustls configuration above; no token store. | |
+| Both | The verifier objects of 1.4 are installed with `dangerous().with_custom_certificate_verifier` / `with_client_cert_verifier`; no root store is loaded. | |
+
+Because a library change could re-enable one of these silently, the negative tests (f), (g) and (h) of 1.4
+are release gates, and `HELLO_AUTH` (5.3) never relies on the TLS layer's idea of the peer alone.
 
 ### 1.4 Verifier obligations (normative)
 
 Both sides install a custom certificate verifier (rustls `ServerCertVerifier` on PH, `ClientCertVerifier` on
-PC). The verifier works in one of two modes, fixed before the handshake starts:
+PC). A verifier works in one of these modes, fixed before the handshake starts:
 
 - **PINNED mode** (every normal connection): the expected peer `SPKI` set is known in advance.
-  PH expects exactly one `SPKI` (the PC it is dialling). PC expects any `SPKI` in its pin store.
-- **PAIRING mode** (only as allowed in section 2): any well-formed Ed25519 `SPKI` is accepted and recorded
-  as the *candidate*; nothing is pinned by the verifier itself.
+  PH expects exactly one `SPKI` (the PC it is dialling). PC expects any `SPKI` in its pin store, or in its
+  tombstone list (2.7): a tombstoned key completes the handshake only so that the PC can close the connection
+  with code `3`; it never reaches `HELLO`.
+- **PAIRING mode** (only as allowed in section 2): any well-formed Ed25519 `SPKI` is accepted. Nothing is
+  pinned and **nothing is remembered** by the verifier.
 
-In both modes the verifier MUST do all of the following, and MUST fail the handshake if any step fails:
+**The verifier keeps no state across connections (KT-05).** The verifier object is shared by every
+handshake; it MUST NOT store a "candidate", a "last seen key" or any other per-connection value. Whenever a
+later step needs the peer's key (to compute `ID_ph`, to check a proof, to compare a typed number, to write a
+pin), it MUST take the `SPKI` from the certificate of **that same connection object** (in quinn:
+`Connection::peer_identity()`), the connection on which the verified `PAIR_REVEAL` or `HELLO` arrived.
+
+In every mode the verifier MUST do all of the following, and MUST fail the handshake if any step fails:
 
 1. **Certificate step** (`verify_server_cert` / `verify_client_cert`):
    a. The chain has exactly one certificate, at most 1024 bytes, and it parses as X.509.
-   b. Its `SPKI` is exactly 44 bytes with the prefix in 1.1 (algorithm Ed25519, no parameters).
-   c. PINNED mode: `SPKI` equals a pinned `SPKI` byte for byte. (Only during QR pairing the phone knows
-      the PC by its id alone; the check is then `BLAKE3(SPKI) == pc_id`.) PAIRING mode: record `SPKI` as
-      candidate.
+   b. Its `SPKI` is exactly 44 bytes with the prefix in 1.1 (algorithm Ed25519, no parameters), and the
+      public key passes the strict checks of section 0 (canonical, not of small order).
+   c. PINNED mode: `SPKI` equals a pinned (or, on the PC, tombstoned) `SPKI` byte for byte. (Only during QR
+      pairing the phone knows the PC by its id alone; the check is then `BLAKE3(SPKI) == pc_id`.)
+      PAIRING mode: no further check.
    d. Names, validity dates, extensions, key usage and the certificate's self-signature are NOT evaluated
       (clocks on phones are unreliable and a self-signed validity period proves nothing).
 2. **Handshake signature step** (`verify_tls13_signature`): verify the TLS 1.3 `CertificateVerify` signature
    over the handshake transcript with the public key from that same certificate, accepting only the scheme
-   `ed25519`. This is the proof that the peer holds the private key.
+   `ed25519`, with strict verification (section 0). This is the proof that the peer holds the private key.
    **The method MUST perform a real signature verification. It MUST NOT return success unconditionally,
    MUST NOT be a stub, and MUST NOT accept any other scheme.** A verifier that checks the pin but skips this
    step lets anyone who has seen the certificate impersonate the device.
@@ -132,17 +184,33 @@ In both modes the verifier MUST do all of the following, and MUST fail the hands
 
 Defence in depth: after the handshake, both sides also sign a session transcript bound to the TLS exporter
 with the identity key (5.3). A verifier bug that skipped step 2 is therefore caught at the application layer.
+For that reason `HELLO_AUTH` MUST look the peer's `SPKI` (taken from the connection object) up in the pin
+store **again** and verify the signature with the pinned key; it MUST NOT accept "the TLS layer said this
+peer is authenticated" as a fact.
 
-Required negative tests (11.2): (a) correct pinned certificate presented by a peer that signs
-`CertificateVerify` with a different key MUST fail; (b) unknown key in PINNED mode MUST fail; (c) RSA or
-ECDSA certificate MUST fail; (d) two-certificate chain MUST fail; (e) ALPN `kiwi/2` or `h3` MUST fail.
+Required negative tests (11.2), each a release gate:
+
+| | Test | Must |
+|---|---|---|
+| a | Correct pinned certificate, `CertificateVerify` signed with a different key | fail |
+| b | Unknown key in PINNED mode | fail |
+| c | RSA or ECDSA certificate | fail |
+| d | Two-certificate chain | fail |
+| e | ALPN `kiwi/2` or `h3` | fail |
+| f | A client that offers a PSK (a ticket from an earlier connection, or a forged one) | get a full certificate handshake or fail; never a resumed one |
+| g | A complete session, observed from the client | contain no `NewSessionTicket` and no `NEW_TOKEN` frame |
+| h | A phone that was unpaired, holding a ticket or token from before | be refused (close code `3` through the tombstone, or handshake failure) |
+| i | A signature with non-canonical `S`, and a small-order public key | fail in the handshake and in `HELLO_AUTH` |
+| j | Two pairing connections interleaved message by message (2.4) | each proof, typed number and pin is bound to its own connection; the key of connection A is never pinned on the evidence of connection B |
+| k | An Initial packet without a Retry token | be answered by Retry only, with no connection state |
 
 ### 1.5 Order of authentication
 
 In TLS 1.3 the server authenticates first. PH MUST verify the PC pin before it sends its own certificate
 (this is the normal TLS 1.3 flight order; the client aborts on a pin mismatch and its identity is not
 revealed to a wrong server). The PC certificate is visible to any host on the link that starts a handshake;
-see the threat model, residual risk R7.
+see the threat model, residual risk R7. In pairing method `SAS` the phone has no pin yet, so its certificate
+is shown to whichever host answered (2.4; threat model C2).
 
 ### 1.6 Key storage
 
@@ -181,6 +249,10 @@ see the threat model, residual risk R7.
    - There is no hardware binding and no user-presence check.
    - A local password reset by an administrator, a new Windows profile, or a Windows reinstall makes the blob
      undecryptable. Then rule 1.1(5) applies: new identity, re-pair.
+   - A system image or profile backup contains the blob: restoring it restores the identity together with an
+     older ledger. That case is detected as a ledger rollback (8.10), not here.
+4. This protection covers the **identity seed only**. The files the PC stores for a phone are plain files
+   with no password, no encryption and no lock of the program's own (9.7, owner decision).
 
 ---
 
