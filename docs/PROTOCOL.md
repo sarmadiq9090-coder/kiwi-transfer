@@ -113,7 +113,9 @@ In both modes the verifier MUST do all of the following, and MUST fail the hands
 1. **Certificate step** (`verify_server_cert` / `verify_client_cert`):
    a. The chain has exactly one certificate, at most 1024 bytes, and it parses as X.509.
    b. Its `SPKI` is exactly 44 bytes with the prefix in 1.1 (algorithm Ed25519, no parameters).
-   c. PINNED mode: `SPKI` equals a pinned `SPKI` byte for byte. PAIRING mode: record `SPKI` as candidate.
+   c. PINNED mode: `SPKI` equals a pinned `SPKI` byte for byte. (Only during QR pairing the phone knows
+      the PC by its id alone; the check is then `BLAKE3(SPKI) == pc_id`.) PAIRING mode: record `SPKI` as
+      candidate.
    d. Names, validity dates, extensions, key usage and the certificate's self-signature are NOT evaluated
       (clocks on phones are unreliable and a self-signed validity period proves nothing).
 2. **Handshake signature step** (`verify_tls13_signature`): verify the TLS 1.3 `CertificateVerify` signature
@@ -208,7 +210,10 @@ There is no typed short-code PAKE in `kiwi/1` (no audited PAKE crate exists; spi
    When no window is open, unknown keys fail the handshake.
 4. The window closes, and `pair_secret` is destroyed, at the first of: timeout; user cancel; a valid
    `PAIR_REVEAL` proof (the secret is single use, whatever the user then answers); 3 failed attempts
-   (bad proof, bad commitment, protocol error, or a declined SAS); program exit.
+   (bad proof, bad commitment, protocol error, or a declined SAS); program exit. "Closes" means that no
+   further unknown key is accepted; a pairing whose `PAIR_REVEAL` was already verified continues until the
+   user answers, for at most 120 s. Only one consent dialog is shown at a time: while it is pending, any
+   other `PAIR_HELLO` is answered `E_BUSY`.
 5. If no device is paired and no window is open, the PC MUST NOT bind any UDP socket and MUST NOT advertise.
 
 An UNPAIRED connection is restricted: one bidirectional stream; only the messages `PAIR_*`, `ERROR`;
@@ -745,7 +750,7 @@ on the control stream.
 | Connections per paired device | 1 (a new authenticated one supersedes the old one, close code `4`) |
 | Sessions on a PC at one time | One per paired phone (at most 8 by default) |
 | Outstanding requests per direction | 32 |
-| Items per `OFFER`, `FM_VERIFY`, `FM_STATE`, `FETCH`, `REPAIR_REQUEST` | 500 |
+| Items per `OFFER`, `FM_VERIFY`, `FM_STATE`, `FETCH`, `REPAIR_REQUEST` | 500, and the message must still fit `MAX_FRAME` (senders split) |
 | Open (unfinished) transfers per direction | 8 |
 | Entries per `BROWSE_REPLY` | 200 |
 | Outstanding `THUMB` requests | 8 |
