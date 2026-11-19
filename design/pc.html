@@ -42,6 +42,7 @@ svg.i{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .index{display:flex;flex-direction:column;gap:2px;max-height:calc(100vh - 170px);overflow:auto}
 .index b{font-size:12px;color:var(--text-2);margin:10px 8px 2px}
 .index button{text-align:start;padding:6px 10px;border-radius:10px;font-size:14px}
+.index .new{font-size:10px;font-weight:700;color:var(--on-accent-soft);background:var(--accent-soft);border-radius:8px;padding:0 6px;margin-inline-start:6px}
 .index button[aria-current=true]{background:var(--accent-soft);color:var(--on-accent-soft);font-weight:700}
 body.shot .tools{display:none}body.shot .shell{display:block;padding:24px}
 
@@ -138,6 +139,39 @@ table.h td.n{white-space:nowrap;width:1%;color:var(--text-2);font-size:13px}
 .menu button{display:flex;align-items:center;gap:12px;width:100%;height:40px;padding:0 12px;border-radius:5px;text-align:start}
 .menu button:hover,.menu button.hv{background:var(--surface-2)}
 .menu hr{border:0;border-top:1px solid var(--line);margin:4px 0}
+/* added after 1.0 approval: phone cards, info bars, typed pairing code, second disk, right-click menu */
+.crumb{display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-2);margin:-8px 0 8px}.crumb button{color:var(--accent);padding:2px 4px;border-radius:4px}.crumb .sepc svg.i{width:14px;height:14px}
+.sechead{display:flex;align-items:center;justify-content:space-between;font-size:14px;font-weight:700;margin:4px 0 8px}
+.pcard{display:flex;flex-direction:column}
+.pcard .ph{display:flex;align-items:center;gap:14px;padding:14px 16px 8px;text-align:start;width:100%}
+.pcard .ph .ic{width:36px;height:36px;border-radius:8px;background:var(--surface-2);color:var(--accent);display:grid;place-items:center;flex:none}
+.pcard .ph .tx{flex:1}.pcard .ph .tx b{display:block;font-size:15px}.pcard .ph .tx span{font-size:13px;color:var(--text-2)}
+.pcard .facts{display:flex;flex-direction:column;gap:4px;padding:0 16px 10px 16px;padding-inline-start:66px;font-size:13px;color:var(--text-2)}
+.pcard .pacts{display:flex;align-items:center;gap:4px;border-top:1px solid var(--line);padding:6px 10px;margin-top:auto}.pcard .pacts .sp{flex:1}
+.pcard .pacts .fb.link{height:32px;font-size:13px}.pcard .pacts svg.i{width:16px;height:16px}
+.ibtn{width:32px;height:32px;border-radius:5px;display:grid;place-items:center;color:var(--text-2)}.ibtn:hover{background:var(--surface-2)}
+.copies{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}.cdot{width:9px;height:9px;border-radius:50%;flex:none}.cdot.two{background:var(--accent)}.cdot.one{border:2px solid var(--warn);margin-inline-start:8px}
+.queued{display:flex;align-items:center;gap:8px;color:var(--text);font-weight:700;margin-top:2px}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--accent-soft);border-top-color:var(--accent);animation:rot 1s linear infinite;flex:none}@keyframes rot{to{transform:rotate(1turn)}}
+.infobar{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:8px;background:var(--surface-2);border:1px solid var(--line);margin-bottom:16px;font-size:13px;color:var(--text-2)}
+.infobar>svg.i{color:var(--accent)}.infobar .tx{flex:1}.infobar .tx b{color:var(--text)}
+.infobar.warn{background:var(--warn-soft);border-color:transparent;color:var(--text)}.infobar.warn>svg.i{color:var(--warn)}
+.drop.slim{flex-direction:row;min-height:0;padding:16px 20px;margin-top:16px;text-align:start;gap:16px}.drop.slim .tx{flex:1}.drop.slim .dic{width:44px;height:44px;border-radius:10px}.drop.slim .dic svg.i{width:22px;height:22px}
+.pin6{display:flex;gap:8px;justify-content:center;direction:ltr;margin:16px 0 14px}.pin6 span{width:44px;height:54px;border:1px solid var(--line);border-bottom:2px solid var(--accent);border-radius:5px;display:grid;place-items:center;font-size:26px;font-weight:700;background:var(--surface)}.pin6 span.gap{margin-right:12px}
+.fb.danger{background:var(--danger);color:var(--surface);border-color:transparent;font-weight:700}
+.cbx{width:20px;height:20px;border-radius:4px;border:1px solid var(--outline);display:grid;place-items:center;flex:none}.cbx.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}.cbx svg.i{width:14px;height:14px;stroke-width:3}
+.drive .rd{margin-inline-end:2px}
+.selbar{display:flex;align-items:center;gap:14px;padding:10px 12px 10px 16px;border-radius:8px;background:var(--accent-soft);color:var(--on-accent-soft);margin-bottom:6px}.selbar .sp{flex:1}.selbar .cap{color:var(--on-accent-soft)}
+.mh{font-size:14px;font-weight:700;margin:14px 0 8px}
+.tile{position:relative}.tile .sel{position:absolute;top:6px;inset-inline-start:6px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgb(0 0 0/.15);display:grid;place-items:center}
+.tile.on{outline:3px solid var(--accent);outline-offset:-3px}.tile.on .sel{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}.tile .sel svg.i{width:12px;height:12px;stroke-width:3}
+.explorer{position:absolute;top:40px;inset-inline-start:60px;width:620px;height:420px;background:var(--bg);border-radius:8px;box-shadow:var(--sh-3);border:1px solid var(--line);overflow:hidden}
+.explorer .xbar{height:44px;display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--mica);border-bottom:1px solid var(--line);font-size:13px}
+.xgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:18px}
+.xf{display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 4px;border-radius:6px;font-size:12px;text-align:center}.xf>span{width:48px;height:48px;border-radius:8px;background:var(--surface-2);color:var(--accent);display:grid;place-items:center}.xf.on{background:var(--accent-soft);outline:1px solid var(--accent)}
+.menu.ctx{top:150px;bottom:auto;inset-inline-start:330px;inset-inline-end:auto;width:250px}
+.menu.sub{top:186px;bottom:auto;inset-inline-start:574px;inset-inline-end:auto;width:230px}
+.menu .sp{flex:1}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -158,7 +192,7 @@ table.h td.n{white-space:nowrap;width:1%;color:var(--text-2);font-size:13px}
 const S = { s:'first', l:'ar', t:'light', adv:false, tpl:'ym', over:false };
 const T = (ar, en) => S.l === 'ar' ? ar : en;
 const PH = () => T('هاتف سارة','Sara’s phone');
-const PH2 = () => T('هاتف كريم','Karim’s phone');
+const PH2 = () => T('هاتف أحمد','Ahmed’s phone');
 const PCN = () => T('حاسوب البيت','Home PC');
 
 /* simplified line glyphs for the mock-up; production uses Fluent UI System Icons (MIT) on Windows */
@@ -177,7 +211,9 @@ const P = {
   sparkle:'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z', expand:'M6 9l6 6 6-6', collapse:'M6 15l6-6 6 6', chev:'M9 6l6 6-6 6', plus:'M12 5v14M5 12h14',
   sun:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4|c12,12,4', moon:'M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z',
   power:'M12 3v8M7 6.5a7 7 0 1 0 10 0', globe:'M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18|c12,12,9', wifi:'M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01',
-  win:'M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z', search:'M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13ZM15.5 15.5 20 20', up:'M6 15l6-6 6 6'
+  win:'M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z',
+  contacts:'M7 3h11a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H7ZM4.5 7.5h2.5M4.5 12h2.5M4.5 16.5h2.5M9.8 16.5a3.2 3.2 0 0 1 6.4 0|c13,10.5,2.4', calendar:'M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1ZM4 10h16M8.5 3v4M15.5 3v4',
+  apps:'M4.5 4.5h5.5v5.5H4.5ZM14 4.5h5.5v5.5H14ZM4.5 14h5.5v5.5H4.5ZM16.75 14v5.5M14 16.75h5.5', chat:'M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H10l-5 4v-4a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 5 4.5Z', search:'M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13ZM15.5 15.5 20 20', up:'M6 15l6-6 6 6'
 };
 function I(n, cls='') {
   let s = `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">`;
@@ -202,6 +238,8 @@ const tileSvg=i=>{const [h,s,l]=HUES[i%6];const d=S.t==='dark'?-12:0;return `<sv
 const tgl = on => `<span class="tgl" role="switch" aria-checked="${on}" data-toggle></span>`;
 const row = (ic, title, sub='', trail='', go='') => `<button class="row" ${go?`data-go="${go}"`:''}>${ic?`<span class="ic ${ic.split(':')[1]||''}">${I(ic.split(':')[0])}</span>`:''}<span class="tx"><b>${title}</b>${sub?`<span>${sub}</span>`:''}</span>${trail}</button>`;
 const fb = (label, go='', cls='', icon='') => `<button class="fb ${cls}" ${go?`data-go="${go}"`:''}>${icon?I(icon):''}${label}</button>`;
+/* a button look inside a row (rows are buttons themselves, so no nested <button>) */
+const fbs = (label, go='', cls='', icon='') => `<span class="fb ${cls}" role="button" ${go?`data-go="${go}"`:''}>${icon?I(icon):''}${label}</span>`;
 const chev = `<span style="color:var(--text-2)">${I('chev','flip')}</span>`;
 const NAV = [['home','home',['الرئيسية','Home']],['history','history',['السجل','History']],['dest','folder',['مكان الحفظ','Where files go']],['scanOk','shield',['فحص الملفات','File check']]];
 function chrome(inner, navSel, full=false){
@@ -211,10 +249,67 @@ function chrome(inner, navSel, full=false){
 }
 const dialog = (body, acts) => `<div class="scrim"></div><div class="dialog" role="dialog"><div class="dbody">${body}</div><div class="dacts">${acts}</div></div>`;
 
-/* ---------- screens ---------- */
+/* ---------- shared sample data (synthetic) ---------- */
+const DIR = n => `D:\\Kiwi Transfer\\${n}`;
+const crumb = (parts) => `<div class="crumb">${parts.map(([t,go])=>go?`<button data-go="${go}">${t}</button>`:`<span>${t}</span>`).join(`<span class="sepc">${I('chev','flip')}</span>`)}</div>`;
+const copies = (two, one) => `<span class="copies"><span class="cdot two"></span>${T(`نسختان: ${two}`,`Two copies: ${two}`)}${one?`<span class="cdot one"></span>${T(`نسخة واحدة: ${one}`,`One copy: ${one}`)}`:''}</span>`;
+const infobar = (kind, ic, title, text, acts='') => `<div class="infobar ${kind}">${I(ic)}<div class="tx"><b>${title}</b> ${text}</div>${acts}</div>`;
+function phoneCard({name, online, sub, two, one, keep, queued=false, go='phone'}){
+  return `<div class="card pcard">
+    <button class="ph" data-go="${go}"><span class="ic">${I('phone')}</span><span class="tx"><b>${name}</b><span>${sub}</span></span><span class="pill ${online?'ok':''}">${online?T('متصل','Online'):T('غير متصل','Offline')}</span></button>
+    <div class="facts">${copies(two, one)}<span>${T(`على الهاتف: ${keep[0]}`,`On the phone: ${keep[1]}`)}</span>
+      ${queued?`<span class="queued"><span class="spin"></span>${T('3 ملفات · ينتظر اتصال الهاتف','3 files · waiting for the phone to connect')}</span>`:''}</div>
+    <div class="pacts">${fb(T('افتح المجلد','Open folder'),'','link','folder')}${fb(T('رمز الأسبوع','Weekly code'),'weekly','link','key')}<span class="sp"></span><button class="ibtn" data-go="phoneSettings" aria-label="${T('إعدادات الهاتف','Phone settings')}">${I('settings')}</button></div>
+  </div>`;
+}
+function home(mode='ok'){
+  const bad = mode==='bad', rb = mode==='rebuild', r2 = mode==='remind2';
+  const hero = bad ? [T('القرص الثاني (E:) لا يُقرأ','The second disk (E:) can’t be read'), T('أوقفنا النقل النهائي من الهواتف. النسخ مستمر إلى D:.','We paused final moves from the phones. Copying to D: continues.')]
+    : rb ? [T('نعيد بناء النسخة الثانية','Rebuilding the second copy'), T('على القرص F: · النسخ مستمر، والنقل النهائي يعود حين تكتمل.','On disk F: · copying continues; final moves resume when it’s done.')]
+    : r2 ? [T('37 ملفاً لها نسخة واحدة فقط','37 files have only one copy'), T('وصّل القرص الخارجي (E:) قبل أن تخرج من سلة الهاتف.','Connect the external disk (E:) before they leave the phone’s trash.')]
+    : [T('صور هواتفكم في أمان على هذا الحاسوب','Your phones’ photos are safe on this PC'), T(`آخر نسخ اليوم 9:41 ص من ${PH()} · 24 عنصراً`, `Last backup today 9:41 AM from ${PH()} · 24 items`)];
+  const warn = bad || r2;
+  const bars = {
+    remind: infobar('', 'usb', T('القرص الخارجي (E:) لم يُوصل منذ 9 أيام.','The external disk (E:) hasn’t been connected for 9 days.'), T('وصّله حين يناسبك ليُحفظ 37 ملفاً مرتين.','Plug it in when it suits you so 37 files are saved twice.'), fb(T('لاحقاً','Later'),'','link')),
+    remind2: infobar('warn', 'usb', T('بقي 6 أيام.','6 days left.'), T(`بعدها تخرج 37 صورة من سلة ${PH()}، وتبقى لها نسخة واحدة على D: فقط.`, `After that, 37 photos leave ${PH()}’s trash and only one copy remains, on D:.`)),
+    bad: infobar('warn', 'warn', T('النسخة الثانية متوقفة.','The second copy has stopped.'), T('ملفاتك على D: سليمة.','Your files on D: are fine.'), fb(T('اختر قرصاً جديداً لإعادة بناء النسخة','Choose a new disk to rebuild the copy'),'disk2','accent','drive')),
+    rebuild: `<div class="infobar">${I('refresh')}<div class="tx" style="flex:1"><b>${T('2,140 من 5,789 ملفاً','2,140 of 5,789 files')}</b> ${T('· نحو 40 دقيقة','· about 40 min left')}<div class="bar" style="margin-top:8px"><i style="width:37%"></i></div></div>${fb(T('إيقاف مؤقت','Pause'),'','','pause')}</div>`,
+  };
+  const c1 = rb ? ['2,140','2,709'] : bad ? ['0','4,849'] : ['4,812','37'];
+  const c2 = rb ? ['0','940'] : bad ? ['0','940'] : ['940',''];
+  return chrome(`
+   <div class="status-hero" style="margin-bottom:18px"><span class="ok ${warn?'warn':''}">${I(warn?'warn':rb?'refresh':'check')}</span><div>
+     <h1 class="pt" style="margin:0">${hero[0]}</h1>
+     <p class="lead">${hero[1]}</p></div></div>
+   ${bars[mode]||''}
+   <div class="sechead"><span>${T('الهواتف','Phones')}</span>${fb(T('أضف هاتفاً','Add a phone'),'addPhone','link','plus')}</div>
+   <div class="grid2">
+     ${phoneCard({name:PH(), online:true, sub:T('آخر نسخ اليوم 9:41 ص','Last backup today 9:41 AM'), two:c1[0], one:c1[1], keep:[T('آخر شهر',''),'last month']})}
+     ${phoneCard({name:PH2(), online:false, sub:T('آخر نسخ قبل 3 أيام','Last backup 3 days ago'), two:c2[0], one:c2[1], keep:[T('آخر 3 أشهر',''),'last 3 months'], queued:mode==='queued'})}
+   </div>
+   <div class="drop slim ${S.over?'over':''}" id="drop">
+     <span class="dic">${I('upload')}</span>
+     <div class="tx"><b style="font-size:15px;display:block">${T('اسحب ملفات إلى هنا لإرسالها إلى الهاتف','Drop files here to send them to a phone')}</b><span class="cap">${T('أو انقر بالزر الأيمن على أي ملف واختر «أرسل إلى الهاتف».','Or right‑click any file and choose “Send to phone”.')}</span></div>
+     ${fb(T('اختر ملفات','Choose files'),'sendTo',warn||rb?'big':'accent big')}
+   </div>`, 'home');
+}
+function settings(adv){
+  const g = (t, rows) => `<div class="sec">${t}</div><div class="card">${rows}</div>`;
+  return chrome(`<h1 class="pt" style="margin-bottom:4px">${T('الإعدادات','Settings')}</h1>
+   ${g(T('الهواتف','Phones'), row('phone',PH(),T('مربوط · متصل الآن','Paired · online now'),chev,'phoneSettings')+row('phone',PH2(),T('مربوط · آخر اتصال قبل 3 أيام','Paired · last seen 3 days ago'),chev,'phoneSettings')+row('plus',T('أضف هاتفاً','Add a phone'),T('لكل هاتف مجلده ورمزه الأسبوعي','Each phone gets its own folder and weekly code'),chev,'addPhone'))}
+   ${g(T('التخزين','Storage'), row('folder',T('مكان الحفظ','Where files go'),`<bdi dir="ltr">D:\\Kiwi Transfer</bdi>`,chev,'dest')+row('usb',T('القرص الثاني','Second disk'),T('قرص USB (E:) · وُصل قبل يومين','USB disk (E:) · connected 2 days ago'),chev,'disk2'))}
+   ${g(T('عام','General'), row('power',T('شغّل مع ويندوز','Start with Windows'),T('ليعمل النسخ دون أن تفتح البرنامج','So backups run without opening the program'),tgl(true))+row('globe',T('اللغة','Language'),T('العربية','English'),chev)+row('sun',T('المظهر','Appearance'),T('حسب النظام','Use system setting'),chev))}
+   ${g(T('المساعدة','Help'), row('flag',T('الإبلاغ عن مشكلة','Report a problem'),'',chev,'report')+row('info',T('حول البرنامج','About'),T('الإصدار 1.0.0','Version 1.0.0'),chev,'about'))}
+   <div class="card" style="margin-top:16px"><button class="exp" data-go="${adv?'settings':'settingsAdv'}"><span class="tx"><b>${T('خيارات متقدمة','Advanced')}</b><div class="cap">${T('الشبكة والتشخيص','Network and diagnostics')}</div></span>${I(adv?'collapse':'expand')}</button>
+   ${adv? row('wifi',T('المنفذ','Port'),T('تلقائي · يُفتح في جدار الحماية على الشبكات الخاصة، وعلى الشبكة التي تسمح بها','Automatic · opened in the firewall on private networks and on networks you allow'),`<span class="field ltr" style="width:110px">auto</span>`)
+        + row('shield',T('الفحص الأسبوعي للملفات','Weekly file check'),T('الأحد 3:00 ص · القرصان','Sunday 3:00 AM · both disks'),chev,'scanOk')
+        + row('doc',T('سجل التشخيص','Diagnostic log'),T('محفوظ على هذا الحاسوب فقط','Kept on this PC only'),tgl(false)) : ''}</div>`, 'settings');
+}
+
+/* ---------- screens (nw: new or changed after the owner approved the 1.0 screens) ---------- */
 const SCREENS = [
  { g:['البداية','First run'] },
- { id:'first', n:['التشغيل الأول: رمز الربط','First run: pairing code'], r:()=>chrome(`
+ { id:'first', nw:1, n:['التشغيل الأول: رمز الربط','First run: pairing code'], r:()=>chrome(`
    <div style="text-align:center;padding-top:6px">
      <h1 class="pt" style="margin-bottom:6px">${T('امسح الرمز بهاتفك','Scan this code with your phone')}</h1>
      <p class="lead">${T('افتح Kiwi Transfer على الهاتف واختر «امسح الرمز». الجهازان على شبكة Wi‑Fi نفسها.','Open Kiwi Transfer on your phone and choose “Scan the code”. Both on the same Wi‑Fi.')}</p>
@@ -230,62 +325,147 @@ const SCREENS = [
        <p class="cap" style="margin-top:10px"><span dir="ltr">fastkiwi.app/transfer</span></p>
      </div>
    </div>
-   <p class="cap" style="text-align:center;margin-top:34px">${T('لا تعمل الكاميرا؟','Camera not working?')} ${fb(T('استخدم رمزاً من 6 أرقام','Use a 6‑digit code instead'),'approve','link')}</p>`, '', true)},
- { id:'approve', base:'first', n:['طلب ربط: أتسمح؟','Pairing request: allow?'], r:()=>dialog(`
-     <div style="display:flex;gap:14px;align-items:center;margin-bottom:14px"><span class="row" style="padding:0;min-height:0;width:auto"><span class="ic">${I('phone')}</span></span><h3 style="margin:0">${T(`«${PH()}» يريد الربط. أتسمح؟`, `“${PH()}” wants to pair. Allow?`)}</h3></div>
-     <p class="lead">${T('تأكد أن الهاتف يعرض الرقم نفسه:','Check the phone shows the same number:')}</p>
-     <div class="sas" style="margin:16px 0 12px">482 913</div>
-     <p class="cap">${T('إن لم يطابق الرقم، اضغط «رفض». لن يُرسل أي شيء قبل موافقتك.','If the number doesn’t match, choose Deny. Nothing is sent until you allow it.')}</p>`,
-   fb(T('السماح','Allow'),'home','accent') + fb(T('رفض','Deny'),'first'))},
+   <p class="cap" style="text-align:center;margin-top:34px">${T(`لا تعمل الكاميرا؟ في الهاتف اختر «أدخل يدوياً»، ثم «${PCN()}» من القائمة.`,`Camera not working? On the phone choose “Enter manually”, then “${PCN()}” from the list.`)} ${fb(T('ثم ماذا؟','Then what?'),'approve','link')}</p>`, '', true)},
+ { id:'approve', nw:1, base:'first', n:['طلب ربط: اكتب الرقم','Pairing request: type the number'], r:()=>dialog(`
+     <div style="display:flex;gap:14px;align-items:center;margin-bottom:14px"><span class="row" style="padding:0;min-height:0;width:auto"><span class="ic">${I('phone')}</span></span><h3 style="margin:0">${T(`«${PH()}» يريد الربط`, `“${PH()}” wants to pair`)}</h3></div>
+     <p class="lead">${T('اكتب الرقم الظاهر على الهاتف:','Type the number shown on the phone:')}</p>
+     <div class="pin6">${'482913'.split('').map((d,i)=>`<span class="${i===2?'gap':''}">${d}</span>`).join('')}</div>
+     <p class="cap">${T('إن لم يكن الهاتف هاتفك، اضغط «رفض». لا يُرسل أي شيء قبل الربط.','If it isn’t your phone, choose Deny. Nothing is sent until you pair.')}</p>`,
+   fb(T('اربط','Pair'),'home','accent') + fb(T('رفض','Deny'),'first'))},
+ { id:'netPublic', nw:1, base:'home', n:['الشبكة «عامة»: اسمح عليها','Public network: allow on it'], r:()=>dialog(`
+     <div style="display:flex;gap:14px;align-items:center;margin-bottom:12px"><span class="row" style="padding:0;min-height:0;width:auto"><span class="ic">${I('wifi')}</span></span><h3 style="margin:0">${T('هواتفك لا تصل إلى هذا الحاسوب','Your phones can’t reach this PC')}</h3></div>
+     <p class="lead">${T('يعدّ ويندوز شبكة «Home‑5G» شبكةً عامة، فيُخفي الحاسوب عنها.','Windows marks “Home‑5G” as a public network, so it hides the PC on it.')}</p>
+     <p class="cap" style="margin-top:10px">${T('السماح يفتح الطريق لـ Kiwi Transfer وحده على هذه الشبكة. باقي الحاسوب يبقى مخفياً. قد يطلب ويندوز موافقتك.','Allowing opens the way for Kiwi Transfer only, on this network only. The rest of the PC stays hidden. Windows may ask you to confirm.')}</p>`,
+   fb(T('اسمح على هذه الشبكة','Allow on this network'),'home','accent') + fb(T('ليس الآن','Not now'),'home'))},
 
- { g:['الرئيسية','Home'] },
- { id:'home', n:['الرئيسية','Home'], r:()=>chrome(`
-   <div class="status-hero"><span class="ok">${I('check')}</span><div>
-     <h1 class="pt" style="margin:0">${T('صورك في أمان على هذا الحاسوب','Your photos are safe on this PC')}</h1>
-     <p class="lead">${T(`آخر نسخ اليوم 9:41 ص من ${PH()} · 24 عنصراً`, `Last backup today 9:41 AM from ${PH()} · 24 items`)}</p></div></div>
-   <div class="grid2">
-     <div class="card">
-       ${row('phone',PH(),T('متصل · 2,184 عنصراً','Connected · 2,184 items'),`<span class="pill ok">${T('متصل','Online')}</span>`)}
-       ${row('phone',PH2(),T('آخر نسخ قبل 3 أيام · 940 عنصراً','Last backup 3 days ago · 940 items'),`<span class="pill">${T('غير متصل','Offline')}</span>`)}
-     </div>
-     <div class="card pad">
-       <div style="display:flex;justify-content:space-between;align-items:baseline"><b>${T('المساحة المستخدمة','Storage used')}</b><span class="cap" dir="ltr">D:\\</span></div>
-       <div style="font-size:28px;font-weight:700;margin:6px 0 10px">48.6 GB</div>
-       <div class="bar"><i style="width:38%"></i></div>
-       <p class="cap" style="margin-top:8px">${T('612 GB متاحة من 1 TB','612 GB free of 1 TB')}</p>
-     </div>
+ { g:['الرئيسية والهواتف','Home and phones'] },
+ { id:'home', nw:1, n:['الرئيسية: عدة هواتف','Home: several phones'], r:()=>home('ok')},
+ { id:'phone', nw:1, n:['مجلد هاتف: أرسل إلى الهاتف','A phone’s folder: send to phone'], r:()=>chrome(`
+   ${crumb([[T('الرئيسية','Home'),'home'],[PH()]])}
+   <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px"><div style="flex:1"><h1 class="pt" style="margin:0">${PH()}</h1>
+     <p class="cap" style="display:flex;gap:14px;flex-wrap:wrap;align-items:center"><span>${T('متصل · 4,849 عنصراً','Online · 4,849 items')}</span>${copies('4,812','37')}</p></div>
+     ${fb(T('افتح المجلد','Open folder'),'','','folder')}<button class="fb" data-go="phoneSettings" aria-label="${T('إعدادات الهاتف','Phone settings')}">${I('settings')}</button></div>
+   <div class="selbar"><b>${T('3 محددة','3 selected')}</b><span class="cap">${T('تصل إلى الهاتف في مكانها الأصلي.','They go back to their original place on the phone.')}</span><span class="sp"></span>${fb(T('أرسل 3 إلى الهاتف','Send 3 to the phone'),'home','accent','download')}</div>
+   <div class="mh">${T('نوفمبر 2026','November 2026')}</div>
+   <div class="tiles">${Array.from({length:12},(_,i)=>`<div class="tile ${[1,4,8].includes(i)?'on':''}">${tileSvg(i)}<span class="sel">${[1,4,8].includes(i)?I('check'):''}</span></div>`).join('')}</div>
+   <div class="mh">${T('أكتوبر 2026','October 2026')}</div>
+   <div class="tiles">${Array.from({length:6},(_,i)=>`<div class="tile">${tileSvg(i+3)}<span class="sel"></span></div>`).join('')}</div>`, 'home')},
+ { id:'phoneSettings', nw:1, n:['إعدادات هاتف','Phone settings'], r:()=>chrome(`
+   ${crumb([[T('الإعدادات','Settings'),'settings'],[PH()]])}
+   <h1 class="pt" style="margin-bottom:14px">${PH()}</h1>
+   <div class="card">
+     ${row('phone',T('الاسم','Name'),PH(),fbs(T('إعادة تسمية','Rename')))}
+     ${row('folder',T('المجلد','Folder'),`<bdi dir="ltr">${DIR(T('هاتف سارة','Sara’s phone'))}</bdi>`,fbs(T('افتح المجلد','Open folder'),'','','folder'))}
+     ${row('key',T('رمز الأسبوع','Weekly code'),T('آخر تأكيد: الإثنين','Last confirmed: Monday'),fbs(T('اعرض الرمز','Show code'),'weekly'))}
+     ${row('storage',T('أبقِ على الهاتف','Keep on the phone'),T('آخر شهر · يُغيَّر من الهاتف','Last month · changed on the phone'))}
+     ${row('contacts',T('نسخة احتياطية لبيانات الهاتف','Phone data backup'),T('جهات الاتصال، التقويم، نسخ واتساب','Contacts, Calendar, WhatsApp backups'),chev,'dataPc')}
    </div>
-   <div class="sec" style="margin-top:26px">${T(`أرسل إلى ${PH()}`, `Send to ${PH()}`)}</div>
-   <div class="drop ${S.over?'over':''}" id="drop">
-     <span class="dic">${I('upload')}</span>
-     <div><b style="font-size:16px;display:block">${T('اسحب الملفات إلى هنا','Drop files here')}</b><span class="cap">${T('تصل إلى الهاتف في مجلد التنزيلات › Kiwi Transfer، بعد موافقتك عليه.','They arrive in Downloads › Kiwi Transfer on the phone, once you accept there.')}</span></div>
-     ${fb(T('اختر ملفات','Choose files'),'','accent big')}
-   </div>`, 'home')},
- { id:'weekly', base:'home', n:['رمز التأكيد الأسبوعي','Weekly code'], r:()=>dialog(`
+   <div class="card" style="margin-top:14px">${row('close:warn',T('افصل هذا الهاتف','Detach this phone'),T('يتوقف النسخ منه. ملفاته تبقى في مجلده.','Backups from it stop. Its files stay in its folder.'),fbs(T('افصل…','Detach…'),'detach'))}</div>`, 'settings')},
+ { id:'detach', nw:1, base:'phoneSettings', n:['فصل هاتف: تأكيد','Detach a phone: confirm'], r:()=>dialog(`
+     <h3>${T(`افصل «${PH()}»؟`, `Detach “${PH()}”?`)}</h3>
+     <p class="lead">${T('لن يُنسخ منه شيء بعد الآن، ولن يستلم من هذا الحاسوب.','Nothing more is backed up from it, and it won’t receive from this PC.')}</p>
+     <div class="note" style="margin-top:14px">${I('folder')}<span>${T(`ملفاته الـ 4,849 تبقى في <bdi dir="ltr">${DIR('هاتف سارة')}</bdi>. لا يُحذف شيء.`, `Its 4,849 files stay in <bdi dir="ltr">${DIR('Sara’s phone')}</bdi>. Nothing is deleted.`)}</span></div>`,
+   fb(T('افصل الهاتف','Detach phone'),'settings','danger') + fb(T('إلغاء','Cancel'),'phoneSettings'))},
+ { id:'addPhone', nw:1, base:'home', n:['أضف هاتفاً','Add a phone'], r:()=>dialog(`
+     <h3 style="text-align:center">${T('أضف هاتفاً','Add a phone')}</h3>
+     <div style="text-align:center;margin:14px 0"><div class="qr">${qr(11,168)}</div></div>
+     <p class="cap" style="text-align:center">${T('امسح الرمز بتطبيق Kiwi Transfer على الهاتف الجديد. يكون له مجلده ورمزه الأسبوعي وإعداداته.','Scan this with Kiwi Transfer on the new phone. It gets its own folder, weekly code and settings.')}</p>`,
+   fb(T('إغلاق','Close'),'home'))},
+ { id:'weekly', nw:1, base:'home', n:['رمز التأكيد الأسبوعي','Weekly code'], r:()=>dialog(`
      <h3 style="text-align:center">${T(`اكتب هذا الرقم على ${PH()}`, `Enter this number on ${PH()}`)}</h3>
      <div class="wk"><span>4</span><span>7</span></div>
-     <p class="cap" style="text-align:center">${T('مرة في الأسبوع، قبل النقل النهائي. يتغير الرقم بعد 5 دقائق.','Once a week, before final moves. The number changes in 5 minutes.')}</p>`,
+     <p class="cap" style="text-align:center">${T('مرة في الأسبوع. إن مرّ الأسبوع دون تأكيد، يستمر النسخ، ويتوقف النقل النهائي، والتصفّح والإرجاع، والإرسال إلى الهاتف، حتى يُكتب الرمز. يتغير الرقم بعد 5 دقائق.','Once a week. If the week passes without it, copying continues; final moves, browsing and restoring, and sending to the phone pause until the code is entered. The number changes in 5 minutes.')}</p>`,
    fb(T('إغلاق','Close'),'home'))},
 
+ { g:['القرص الثاني','Second disk'] },
+ { id:'disk2', nw:1, n:['اختيار القرص الثاني','Choose the second disk'], r:()=>chrome(`
+   ${crumb([[T('الإعدادات','Settings'),'settings'],[T('القرص الثاني','Second disk')]])}
+   <h1 class="pt" style="margin-bottom:6px">${T('نسخة ثانية على قرص آخر','A second copy on another disk')}</h1>
+   <p class="lead" style="margin-bottom:18px">${T('كل ملف يُحفظ مرتين: على D: وعلى القرص الثاني. إن تلف أحدهما بقي الآخر.','Every file is saved twice: on D: and on the second disk. If one fails, the other remains.')}</p>
+   <div style="display:flex;flex-direction:column;gap:8px">
+     <div class="drive"><span class="rd"></span><span class="tx"><b>${T('بلا قرص ثانٍ','No second disk')}</b><span>${T('نسخة واحدة على D:','One copy on D:')}</span></span></div>
+     <div class="drive"><span class="rd"></span>${I('drive')}<span class="tx"><b>${T('قرص داخلي (F:)','Internal disk (F:)')}</b><span>${T('ثابت · 930 GB متاحة','Fixed · 930 GB free')}</span></span></div>
+     <div class="drive on"><span class="rd on"></span>${I('usb')}<span class="tx"><b>${T('قرص USB (E:)','USB disk (E:)')}</b><span>${T('خارجي · 1.8 TB متاحة','External · 1.8 TB free')}</span></span></div>
+   </div>
+   <div class="note" style="margin-top:14px">${I('info')}<span>${T('وصّل القرص الخارجي مرة في الأسبوع على الأقل. نكمل النسخة الثانية وحدنا حين تصله، ونذكّرك إن طال غيابه.','Connect the external disk at least once a week. We finish the second copy by ourselves when you plug it in, and remind you if it’s away too long.')}</span></div>
+   <div style="margin-top:20px">${fb(T('استخدم هذا القرص','Use this disk'),'home','accent big')}</div>`, 'settings')},
+ { id:'homeRemind', nw:1, n:['الرئيسية: تذكير هادئ بالقرص','Home: calm disk reminder'], r:()=>home('remind')},
+ { id:'homeRemind2', nw:1, n:['الرئيسية: تذكير أقوى','Home: firmer reminder'], r:()=>home('remind2')},
+ { id:'diskBad', nw:1, n:['الرئيسية: مشكلة في القرص','Home: disk problem'], r:()=>home('bad')},
+ { id:'rebuild', nw:1, n:['الرئيسية: إعادة بناء النسخة','Home: rebuilding the copy'], r:()=>home('rebuild')},
+
+ { g:['الإرسال إلى الهاتف','Send to phone'] },
+ { id:'sendTo', nw:1, base:'home', n:['أرسل إلى: هاتف أو الكل','Send to: one phone or all'], r:()=>dialog(`
+     <h3>${T('أرسل 3 ملفات إلى…','Send 3 files to…')}</h3>
+     <p class="cap" style="margin-bottom:10px">${T('قائمة-المشتريات.pdf ورسم-الحديقة.png وملف آخر · 14 MB','shopping-list.pdf, garden-sketch.png and 1 more · 14 MB')}</p>
+     <div class="card" style="border:0">
+       ${row('',PH(),T('متصل · يصله الآن','Online · arrives now'),'').replace('<span class="tx">','<span class="rd on"></span><span class="tx">')}
+       ${row('',PH2(),T('غير متصل · ينتظر اتصال الهاتف','Offline · waits for the phone to connect'),'').replace('<span class="tx">','<span class="rd"></span><span class="tx">')}
+       ${row('',T('كل الهواتف','All phones'),T('هاتفان','2 phones'),'').replace('<span class="tx">','<span class="rd"></span><span class="tx">')}
+     </div>`,
+   fb(T('أرسل','Send'),'queued','accent') + fb(T('إلغاء','Cancel'),'home'))},
+ { id:'queued', nw:1, n:['الرئيسية: ينتظر اتصال الهاتف','Home: waiting for the phone'], r:()=>home('queued')},
+ { id:'ctxMenu', nw:1, n:['قائمة الزر الأيمن في ويندوز','Windows right‑click menu'], r:()=>`
+   <div class="desk"></div>
+   <div class="explorer">
+     <div class="xbar">${I('folder')}<span>${T('المستندات','Documents')}</span></div>
+     <div class="xgrid">${[['doc',T('قائمة-المشتريات.pdf','shopping-list.pdf'),1],['image',T('رسم-الحديقة.png','garden-sketch.png'),1],['doc',T('جدول-الرحلة.docx','trip-plan.docx'),0],['image',T('بطاقة-العيد.jpg','greeting-card.jpg'),0],['doc',T('وصفات.pdf','recipes.pdf'),0]].map(([ic,n,on])=>`<div class="xf ${on?'on':''}"><span>${I(ic)}</span><bdi>${n}</bdi></div>`).join('')}</div>
+   </div>
+   <div class="menu ctx" role="menu">
+     <button>${I('doc')}${T('فتح','Open')}</button>
+     <button class="hv"><span style="width:20px;height:20px">${ICON}</span>${T('أرسل إلى الهاتف','Send to phone')}<span class="sp"></span>${I('chev','flip')}</button>
+     <button>${I('copy')}${T('نسخ كمسار','Copy as path')}</button>
+     <hr><button>${I('info')}${T('خصائص','Properties')}</button>
+   </div>
+   <div class="menu sub" role="menu">
+     <button class="hv" data-go="queued">${I('phone')}${PH()}</button>
+     <button data-go="queued">${I('phone')}${PH2()}<span class="sp"></span><span class="cap">${T('غير متصل','Offline')}</span></button>
+     <hr><button data-go="queued">${I('send')}${T('كل الهواتف','All phones')}</button>
+   </div>
+   <div class="taskbar"><span class="sp"></span><span class="tb">${I('win')}</span><span class="tb">${I('search')}</span><span class="tb on">${I('folder')}</span><span class="sp"></span><span class="tb">${I('wifi')}</span><span class="clk">9:41<br>${T('19/11/2026','11/19/2026')}</span></div>`},
+
+ { g:['بيانات الهاتف','Phone data'] },
+ { id:'dataPc', nw:1, n:['نسخة احتياطية لبيانات الهاتف','Phone data backup'], r:()=>chrome(`
+   ${crumb([[T('الإعدادات','Settings'),'settings'],[PH(),'phoneSettings'],[T('بيانات الهاتف','Phone data')]])}
+   <h1 class="pt" style="margin-bottom:4px">${T('نسخة احتياطية لبياناتك','Back up your data')}</h1>
+   <p class="lead" style="margin-bottom:16px">${T(`من ${PH()} إلى `,`From ${PH()} to `)}<bdi dir="ltr">${DIR(T('هاتف سارة','Sara’s phone'))}\\${T('بيانات','Data')}</bdi></p>
+   <div class="card">
+     ${row('contacts',T('جهات الاتصال','Contacts'),T('412 جهة · اليوم 9:41 ص','412 contacts · today 9:41 AM'),tgl(true))}
+     ${row('calendar',T('التقويم','Calendar'),T('86 موعداً · اليوم 9:41 ص','86 events · today 9:41 AM'),tgl(true))}
+     ${row('doc',T('الملفات','Files'),T('المستندات والتنزيلات','Documents and Downloads'),tgl(false))}
+     ${row('chat',T('نسخ واتساب الاحتياطية','WhatsApp backups'),T('شغّلتها الآن · سيطلب الهاتف إذن الوصول إلى مجلد واتساب حين يتصل.','Just turned on · the phone will ask for access to the WhatsApp folder when it connects.'),tgl(true))}
+     ${row('apps',T('التطبيقات','Apps'),T('القائمة وملفات التثبيت','The list and install files'),tgl(false))}
+   </div>
+   <div class="note" style="margin-top:12px">${I('info')}<span>${T('بيانات التطبيقات وإعدادات النظام لا يمكن نسخها، فأندرويد لا يسمح بذلك.','App data and system settings can’t be backed up: Android doesn’t allow it.')}</span></div>
+   <div style="margin-top:18px">${fb(T('أعد إلى الهاتف…','Restore to the phone…'),'restorePc','accent big','download')}</div>`, 'settings')},
+ { id:'restorePc', nw:1, base:'dataPc', n:['أعد إلى الهاتف: ماذا','Restore to the phone: what'], r:()=>dialog(`
+     <h3>${T(`أعد إلى ${PH()}`, `Restore to ${PH()}`)}</h3>
+     <div style="display:flex;flex-direction:column;gap:10px;margin:12px 0 14px">
+       ${[[T('جهات الاتصال · 412 · تُدمج','Contacts · 412 · merged'),1],[T('التقويم · 86 · يُدمج','Calendar · 86 · merged'),1],[T('الصور والفيديو · اختر من مجلد الهاتف','Photos and videos · pick from the phone’s folder'),0],[T('التطبيقات · 37 · يؤكد الهاتف كل تثبيت','Apps · 37 · the phone confirms each install'),0]]
+         .map(([t,on])=>`<div style="display:flex;gap:12px;align-items:center"><span class="cbx ${on?'on':''}">${on?I('check'):''}</span>${t}</div>`).join('')}
+     </div>
+     <div class="note">${I('shield')}<span>${T('جهات الاتصال والتقويم تُدمج: لا يُحذف شيء من الهاتف.','Contacts and calendar are merged: nothing is deleted from the phone.')}</span></div>`,
+   fb(T('أعد إلى الهاتف','Restore to phone'),'dataPc','accent') + fb(T('إلغاء','Cancel'),'dataPc'))},
+
  { g:['الملفات','Files'] },
- { id:'dest', n:['مكان الحفظ والترتيب','Destination and folders'], r:()=>chrome(`
+ { id:'dest', nw:1, n:['مكان الحفظ والترتيب','Destination and folders'], r:()=>chrome(`
    <h1 class="pt">${T('مكان الحفظ','Where files go')}</h1>
    <div class="sec" style="margin-top:0">${T('القرص','Drive')}</div>
    <div style="display:flex;flex-direction:column;gap:8px">
-     <div class="drive on">${I('drive')}<span class="tx"><b>${T('البيانات (D:)','Data (D:)')}</b><span>${T('قرص ثابت · 612 GB متاحة','Fixed drive · 612 GB free')}</span></span><span class="pill ok">${T('النسخ والنقل النهائي','Copy and final move')}</span></div>
-     <div class="drive">${I('usb')}<span class="tx"><b>${T('قرص USB (E:)','USB drive (E:)')}</b><span>${T('قابل للإزالة · 118 GB متاحة','Removable · 118 GB free')}</span></span><span class="pill">${T('النسخ فقط','Copy only')}</span></div>
+     <div class="drive on">${I('drive')}<span class="tx"><b>${T('البيانات (D:)','Data (D:)')}</b><span>${T('قرص ثابت · 612 GB متاحة من 1 TB','Fixed drive · 612 GB free of 1 TB')}</span></span><span class="pill ok">${T('النسخة الأولى','First copy')}</span></div>
+     <div class="drive">${I('usb')}<span class="tx"><b>${T('قرص USB (E:)','USB disk (E:)')}</b><span>${T('خارجي · 1.8 TB متاحة','External · 1.8 TB free')}</span></span><span class="pill">${T('النسخة الثانية','Second copy')}</span></div>
    </div>
    <div class="field" style="margin-top:12px"><span style="flex:1;text-align:start" dir="ltr">D:\\Kiwi Transfer</span>${fb(T('تغيير…','Change…'),'','')}</div>
-   <div class="sec">${T('الترتيب','Folders')}</div>
+   <div class="sec">${T('الترتيب داخل مجلد كل هاتف','Inside each phone’s folder')}</div>
    <div class="card">
-     ${[['ym',T('سنة ثم شهر','Year, then month'),'2026\\11\\IMG_0412.jpg'],['phone',T('لكل هاتف، ثم سنة وشهر','Per phone, then year and month'),`${T('هاتف سارة‎','Sara’s phone')}\\2026\\11\\IMG_0412.jpg`],['tpl',T('قالب خاص','Custom template'),'{phone}\\{yyyy}-{MM}\\{name}']]
+     ${[['ym',T('سنة ثم شهر','Year, then month'),`${T('هاتف سارة‎','Sara’s phone')}\\2026\\11\\IMG_0412.jpg`],['tpl',T('قالب خاص','Custom template'),'{phone}\\{yyyy}-{MM}\\{name}']]
        .map(([k,a,b])=>`<button class="row" data-tpl="${k}"><span class="rd ${S.tpl===k?'on':''}"></span><span class="tx"><b>${a}</b><span dir="ltr" style="text-align:${S.l==='ar'?'right':'left'}">${b}</span></span></button>`).join('')}
    </div>
-   <div class="note" style="margin-top:14px">${I('info')}<span>${T('النقل النهائي يُحفظ على قرص ثابت فقط، لأن القرص القابل للإزالة قد يُفصل أو يضيع وهو النسخة الوحيدة.','Final moves only go to a fixed drive: a removable drive can be unplugged or lost while it holds the only copy.')}</span></div>`, 'dest')},
- { id:'history', n:['السجل','History'], r:()=>chrome(`
+   <div class="note" style="margin-top:14px">${I('info')}<span>${T('النسخة الأولى على قرص ثابت فقط. القرص الخارجي يصلح نسخةً ثانية: الإعدادات › القرص الثاني.','The first copy goes on a fixed drive only. An external disk is right for the second copy: Settings › Second disk.')}</span></div>`, 'dest')},
+ { id:'history', nw:1, n:['السجل','History'], r:()=>chrome(`
    <h1 class="pt">${T('السجل','History')}</h1>
-   ${[[T('اليوم','Today'),[['check',T(`نُسخ 24 عنصراً من ${PH()}`,`Backed up 24 items from ${PH()}`),'182 MB',T('9:41 ص','9:41 AM')],['send',T(`أُرسل ملفان إلى ${PH()}`,`Sent 2 files to ${PH()}`),'14 MB',T('8:15 ص','8:15 AM')],['shield',T('فحص الملفات: كل شيء سليم','File check: all good'),T('24,310 ملفاً','24,310 files'),T('3:00 ص','3:00 AM')]]],
-      [T('أمس','Yesterday'),[['storage',T(`نقل نهائي: 38 لقطة شاشة من ${PH()}`,`Final move: 38 screenshots from ${PH()}`),'61 MB',T('9:02 م','9:02 PM')],['download',T(`أُرجعت 3 صور إلى ${PH()}`,`Restored 3 photos to ${PH()}`),'8.4 MB',T('2:10 م','2:10 PM')],['phone',T(`ربط ${PH2()}`,`Paired ${PH2()}`),'',T('11:20 ص','11:20 AM')]]]]
+   ${[[T('اليوم','Today'),[['check',T(`نُسخ 24 عنصراً من ${PH()}`,`Backed up 24 items from ${PH()}`),'182 MB',T('9:41 ص','9:41 AM')],['contacts',T(`جهات الاتصال والتقويم من ${PH()}`,`Contacts and calendar from ${PH()}`),T('412 · 86','412 · 86'),T('9:41 ص','9:41 AM')],['usb',T('اكتملت النسخة الثانية على E:','Second copy on E: complete'),T('1,204 ملفاً','1,204 files'),T('8:30 ص','8:30 AM')],['shield',T('فحص الملفات: كل شيء سليم','File check: all good'),T('24,310 ملفاً','24,310 files'),T('3:00 ص','3:00 AM')]]],
+      [T('أمس','Yesterday'),[['storage',T(`نقل نهائي: 38 عنصراً أقدم من شهر من ${PH()}`,`Final move: 38 items older than a month from ${PH()}`),'61 MB',T('9:02 م','9:02 PM')],['download',T(`أُعيدت 3 صور إلى ${PH()}`,`Sent 3 photos back to ${PH()}`),'8.4 MB',T('2:10 م','2:10 PM')],['phone',T(`ربط ${PH2()}`,`Paired ${PH2()}`),'',T('11:20 ص','11:20 AM')]]]]
      .map(([d,rs])=>`<div class="sec">${d}</div><div class="card"><table class="h">${rs.map(([ic,a,b,c])=>`<tr><td style="width:1%;padding-inline-end:0"><span class="row" style="padding:0;min-height:0"><span class="ic">${I(ic)}</span></span></td><td><b>${a}</b></td><td class="n" dir="ltr">${b}</td><td class="t">${c}</td></tr>`).join('')}</table></div>`).join('')}`, 'history')},
  { id:'scanOk', n:['فحص الملفات: سليم','File check: all good'], r:()=>chrome(`
    <div class="status-hero" style="margin-top:4px"><span class="ok">${I('shield')}</span><div>
@@ -296,27 +476,27 @@ const SCREENS = [
      ${row('storage',T('النقل النهائي يعمل','Final moves are on'),T('سيتوقف تلقائياً إن وجدنا مشكلة.','They pause by themselves if we find a problem.'))}
    </div>
    <div style="margin-top:22px;display:flex;gap:10px">${fb(T('افحص الآن','Check now'),'scanBad','','refresh')}</div>`, 'scanOk')},
- { id:'scanBad', n:['فحص الملفات: مشكلة','File check: problem found'], r:()=>chrome(`
+ { id:'scanBad', nw:1, n:['فحص الملفات: مشكلة','File check: problem found'], r:()=>chrome(`
    <div class="status-hero" style="margin-top:4px"><span class="ok warn">${I('warn')}</span><div>
-     <h1 class="pt" style="margin:0">${T('3 ملفات تغيّرت على القرص','3 files changed on the disk')}</h1>
+     <h1 class="pt" style="margin:0">${T('3 ملفات تغيّرت على القرص D:','3 files changed on disk D:')}</h1>
      <p class="lead">${T('أوقفنا النقل النهائي حتى نصلحها. النسخ العادي مستمر.','We paused final moves until they’re fixed. Normal copying continues.')}</p></div></div>
    <div class="card">
-     ${[['IMG_0391.jpg',T('ما زال على الهاتف','Still on the phone'),'ok'],['IMG_0388.jpg',T('في سلة الهاتف، 26 يوماً','In the phone’s trash, 26 days'),'ok'],['VID_0102.mp4',T('لا توجد نسخة أخرى','No other copy'),'warn']]
-       .map(([f,s,c])=>row(c==='warn'?'image:warn':'image',`<bdi dir="ltr">${f}</bdi>`,T('أكتوبر 2026','October 2026'),`<span class="pill ${c}">${s}</span>`)).join('')}
+     ${[['IMG_0391.jpg',T('ما زال على الهاتف','Still on the phone')],['IMG_0388.jpg',T('في سلة الهاتف، 26 يوماً','In the phone’s trash, 26 days')],['VID_0102.mp4',T('على القرص الثاني (E:)','On the second disk (E:)')]]
+       .map(([f,s])=>row('image',`<bdi dir="ltr">${f}</bdi>`,T('أكتوبر 2026','October 2026'),`<span class="pill ok">${s}</span>`)).join('')}
    </div>
-   <div class="note warn" style="margin-top:14px">${I('info')}<span>${T('قد يكون القرص بدأ يتلف. ننصح بنسخة ثانية على قرص آخر.','The disk may be starting to fail. We suggest a second copy on another drive.')}</span></div>
-   <div style="margin-top:20px;display:flex;gap:10px">${fb(T('أصلح ملفين من الهاتف','Repair 2 from the phone'),'scanOk','accent big','refresh')}${fb(T('أظهر في المجلد','Show in folder'),'','big')}</div>`, 'scanOk')},
+   <div class="note warn" style="margin-top:14px">${I('info')}<span>${T('إن تكرر هذا، فقد يكون القرص D: بدأ يتلف.','If this happens again, disk D: may be starting to fail.')}</span></div>
+   <div style="margin-top:20px;display:flex;gap:10px">${fb(T('أصلح الملفات الثلاثة','Repair all 3 files'),'scanOk','accent big','refresh')}${fb(T('أظهر في المجلد','Show in folder'),'','big')}</div>`, 'scanOk')},
 
  { g:['النظام','System'] },
- { id:'settings', n:['الإعدادات','Settings'], r:()=>settings(false)},
- { id:'settingsAdv', n:['الإعدادات: خيارات متقدمة','Settings: advanced open'], r:()=>settings(true), scroll:400},
- { id:'tray', n:['قائمة شريط المهام','Tray menu'], r:()=>`
+ { id:'settings', nw:1, n:['الإعدادات','Settings'], r:()=>settings(false)},
+ { id:'settingsAdv', nw:1, n:['الإعدادات: خيارات متقدمة','Settings: advanced open'], r:()=>settings(true), scroll:9999},
+ { id:'tray', nw:1, n:['قائمة شريط المهام','Tray menu'], r:()=>`
    <div class="desk"></div>
    <div class="menu" role="menu">
      <div class="mh"><span style="width:32px;height:32px">${ICON}</span><div><b>Kiwi Transfer</b><div class="cap" style="display:flex;gap:6px;align-items:center"><span class="dot"></span>${T(`كل شيء سليم · ${PH()} متصل`,`All good · ${PH()} online`)}</div></div></div>
      <button class="hv" data-go="home">${I('home')}${T('افتح Kiwi Transfer','Open Kiwi Transfer')}</button>
-     <button data-go="home">${I('send')}${T(`أرسل ملفات إلى ${PH()}…`,`Send files to ${PH()}…`)}</button>
-     <button data-go="weekly">${I('key')}${T('اعرض الرقم الأسبوعي','Show weekly number')}</button>
+     <button data-go="sendTo">${I('send')}${T('أرسل ملفات إلى هاتف…','Send files to a phone…')}</button>
+     <button data-go="weekly">${I('key')}${T('اعرض رمز الأسبوع','Show weekly code')}</button>
      <button>${I('pause')}${T('أوقف النسخ لمدة ساعة','Pause backups for 1 hour')}</button>
      <hr><button>${I('power')}${T('إنهاء','Quit')}</button>
    </div>
@@ -326,7 +506,7 @@ const SCREENS = [
      <p class="cap" style="margin-bottom:12px">${T('24 MB · من صفحة الإصدارات الرسمية. نتحقق من التوقيع قبل التثبيت.','24 MB · from the official releases page. We check the signature before installing.')}</p>
      <div style="display:flex;flex-direction:column;gap:6px">${[T('نسخ أسرع للفيديوهات الكبيرة','Faster backup of large videos'),T('ترتيب حسب الألبوم','Organise by album'),T('إصلاح بطء الفحص على الأقراص الكبيرة','Faster file check on large drives')].map(x=>`<div style="display:flex;gap:10px;align-items:center;color:var(--text)"><span style="color:var(--accent)">${I('check')}</span>${x}</div>`).join('')}</div>`,
    fb(T('حدّث الآن','Update now'),'home','accent') + fb(T('لاحقاً','Later'),'home'))},
- { id:'report', n:['الإبلاغ عن مشكلة','Report a problem'], r:()=>chrome(`
+ { id:'report', nw:1, n:['الإبلاغ عن مشكلة','Report a problem'], r:()=>chrome(`
    <h1 class="pt">${T('الإبلاغ عن مشكلة','Report a problem')}</h1>
    <div class="grid2" style="grid-template-columns:1fr 1.1fr;align-items:start">
      <div>
@@ -339,7 +519,7 @@ const SCREENS = [
        <b style="display:block;margin-bottom:6px">${T('هذا ما سيُرسل بالضبط','Exactly what will be sent')}</b>
        <div class="mono">Kiwi Transfer 1.0.0 (windows, x64)
 Windows 11 23H2 · RAM 16 &#71;B
-Phones paired: 2 · Destination: fixed drive
+Phones paired: 2 · Second disk: external
 Free space: 612 &#71;B · Last check: ok
 Last error: E_TIMEOUT after 412 &#77;B
 — log (last 40 lines, no file names) —
@@ -349,7 +529,7 @@ Last error: E_TIMEOUT after 412 &#77;B
      </div>
    </div>
    <div style="margin-top:22px;display:flex;gap:10px">${fb(T('افتح في برنامج البريد','Open in mail program'),'home','accent big','mail')}${fb(T('انسخ النص','Copy text'),'','big','copy')}</div>`, 'settings')},
- { id:'about', n:['حول البرنامج','About'], r:()=>chrome(`
+ { id:'about', nw:1, n:['حول البرنامج','About'], r:()=>chrome(`
    <div style="display:flex;gap:22px;align-items:center;margin-bottom:22px"><span style="width:80px;height:80px">${ICON}</span><div>
      <h1 class="pt" style="margin:0">Kiwi Transfer</h1><p class="cap">${T('الإصدار 1.0.0','Version 1.0.0')}</p></div></div>
    <p class="lead" style="max-width:560px">${T('انقل صورك وملفاتك من هاتفك إلى حاسوبك. بلا سحابة، بلا حساب، بلا إعلانات.','Move your photos and files from your phone to your PC. No cloud, no account, no ads.')}</p>
@@ -361,21 +541,11 @@ Last error: E_TIMEOUT after 412 &#77;B
    </div>
    <div style="margin-top:20px">${fb(T('ابحث عن تحديث','Check for updates'),'update','','refresh')}</div>`, 'settings')},
 ];
-function settings(adv){
-  const g = (t, rows) => `<div class="sec">${t}</div><div class="card">${rows}</div>`;
-  return chrome(`<h1 class="pt" style="margin-bottom:4px">${T('الإعدادات','Settings')}</h1>
-   ${g(T('الهواتف','Phones'), row('phone',PH(),T('مربوط · متصل الآن','Paired · online now'),chev)+row('phone',PH2(),T('مربوط · آخر اتصال قبل 3 أيام','Paired · last seen 3 days ago'),chev)+row('plus',T('ربط هاتف جديد','Pair a new phone'),'',chev,'first'))}
-   ${g(T('عام','General'), row('power',T('شغّل مع ويندوز','Start with Windows'),T('ليعمل النسخ دون أن تفتح البرنامج','So backups run without opening the program'),tgl(true))+row('globe',T('اللغة','Language'),T('العربية','English'),chev)+row('sun',T('المظهر','Appearance'),T('حسب النظام','Use system setting'),chev))}
-   ${g(T('المساعدة','Help'), row('flag',T('الإبلاغ عن مشكلة','Report a problem'),'',chev,'report')+row('info',T('حول البرنامج','About'),T('الإصدار 1.0.0','Version 1.0.0'),chev,'about'))}
-   <div class="card" style="margin-top:16px"><button class="exp" data-go="${adv?'settings':'settingsAdv'}"><span class="tx"><b>${T('خيارات متقدمة','Advanced')}</b><div class="cap">${T('الشبكة والتشخيص','Network and diagnostics')}</div></span>${I(adv?'collapse':'expand')}</button>
-   ${adv? row('wifi',T('المنفذ','Port'),T('تلقائي (يُفتح في جدار الحماية للشبكات الخاصة فقط)','Automatic (opened in the firewall for private networks only)'),`<span class="field ltr" style="width:110px">auto</span>`)
-        + row('shield',T('الفحص الأسبوعي للملفات','Weekly file check'),T('الأحد 3:00 ص','Sunday 3:00 AM'),chev,'scanOk')
-        + row('doc',T('سجل التشخيص','Diagnostic log'),T('محفوظ على هذا الحاسوب فقط','Kept on this PC only'),tgl(false)) : ''}</div>`, 'settings');
-}
 
 /* ---------- render ---------- */
 const byId = Object.fromEntries(SCREENS.filter(s=>s.id).map(s=>[s.id,s]));
 window.SCREEN_IDS = SCREENS.filter(s=>s.id).map(s=>s.id);
+window.NEW_IDS = SCREENS.filter(s=>s.nw).map(s=>s.id);
 function render(){
   const root = document.documentElement;
   root.lang = S.l; root.dir = S.l==='ar'?'rtl':'ltr'; root.dataset.theme = S.t;
@@ -383,7 +553,7 @@ function render(){
   document.getElementById('shSub').textContent = T('نماذج تفاعلية 1.0. اضغط داخل النافذة للتنقل، واسحب ملفاً فوق منطقة الإرسال.','Interactive mock-ups 1.0. Click inside the window to move around; drag a file over the drop zone.');
   document.getElementById('langBtn').textContent = S.l==='ar'?'EN':'ع';
   document.getElementById('themeBtn').innerHTML = I(S.t==='light'?'moon':'sun');
-  document.getElementById('index').innerHTML = SCREENS.map(s=>s.g?`<b>${T(...s.g)}</b>`:`<button data-go="${s.id}" aria-current="${s.id===S.s}">${T(...s.n)}</button>`).join('');
+  document.getElementById('index').innerHTML = SCREENS.map(s=>s.g?`<b>${T(...s.g)}</b>`:`<button data-go="${s.id}" aria-current="${s.id===S.s}">${T(...s.n)}${s.nw?`<span class="new">${T('جديد','new')}</span>`:''}</button>`).join('');
   const sc = byId[S.s] || byId.home;
   let html = (sc.base ? byId[sc.base].r() : '') + sc.r();
   if (S.l==='ar') html = html.replace(/(\d[\d.,]*) GB/g,'$1 غيغابايت').replace(/(\d[\d.,]*) MB/g,'$1 ميغابايت').replace(/(\d[\d.,]*) TB/g,'$1 تيرابايت');
