@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Kiwi Transfer">
 <title>Kiwi Transfer (monochrome)</title>
-<!-- One colour, no tile, same drawing as icon.svg (phone, arrow, computer side by side), enlarged to fill the
+<!-- One colour, no tile, same drawing and size as icon.svg (phone, arrow, computer side by side), centred, inside the
      adaptive-icon safe zone. For Android themed icons (the system tints it), Windows taskbar unplated, notifications.
      Change fill to #FFFFFF for dark surfaces. -->
-<g fill="#123B2A" transform="translate(128 128) scale(1.14) translate(-129 -133)">
+<g fill="#123B2A" transform="translate(128 128) translate(-129 -133)">
 <path fill-rule="evenodd" d="M44 84H76A10 10 0 0 1 86 94V172A10 10 0 0 1 76 182H44A10 10 0 0 1 34 172V94A10 10 0 0 1 44 84ZM44 96V168H76V96Z"/>
 <path d="M98 126H122V112L146 133L122 154V140H98A7 7 0 0 1 98 126Z"/>
 <path fill-rule="evenodd" d="M166 92H214A10 10 0 0 1 224 102V154A10 10 0 0 1 214 164H166A10 10 0 0 1 156 154V102A10 10 0 0 1 166 92ZM168 104V152H212V104Z"/>

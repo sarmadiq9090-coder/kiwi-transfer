@@ -250,7 +250,7 @@ function chrome(inner, navSel, full=false){
 const dialog = (body, acts) => `<div class="scrim"></div><div class="dialog" role="dialog"><div class="dbody">${body}</div><div class="dacts">${acts}</div></div>`;
 
 /* ---------- shared sample data (synthetic) ---------- */
-const DIR = n => `D:\\Kiwi Transfer\\${n}`;
+const DIR = n => `D:\\Kiwi Transfer\\${n}‎`;
 const crumb = (parts) => `<div class="crumb">${parts.map(([t,go])=>go?`<button data-go="${go}">${t}</button>`:`<span>${t}</span>`).join(`<span class="sepc">${I('chev','flip')}</span>`)}</div>`;
 const copies = (two, one) => `<span class="copies"><span class="cdot two"></span>${T(`نسختان: ${two}`,`Two copies: ${two}`)}${one?`<span class="cdot one"></span>${T(`نسخة واحدة: ${one}`,`One copy: ${one}`)}`:''}</span>`;
 const infobar = (kind, ic, title, text, acts='') => `<div class="infobar ${kind}">${I(ic)}<div class="tx"><b>${title}</b> ${text}</div>${acts}</div>`;
