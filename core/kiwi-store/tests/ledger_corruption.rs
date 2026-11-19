@@ -103,11 +103,11 @@ fn check_after_reset(w: &World, store: &Store, hashes: &[ContentHash]) {
 
     for hash in hashes {
         assert!(matches!(
-            store.verify_for_deletion(hash, 1),
+            verify(store, hash, 1),
             Err(DeletionDenied::Blocked(_))
         ));
         assert!(matches!(
-            store.is_safely_stored(hash).unwrap(),
+            store.is_safely_stored(&phone(), hash).unwrap(),
             StoredStatus::NotVerified(NotVerifiedReason::NoRecord)
         ));
     }
@@ -137,11 +137,11 @@ fn check_after_reset(w: &World, store: &Store, hashes: &[ContentHash]) {
         .clear_final_move_block("the user was told about the reset")
         .unwrap();
     assert!(matches!(
-        store.verify_for_deletion(&hashes[0], 1),
+        verify(store, &hashes[0], 1),
         Err(DeletionDenied::TooRecent { .. })
     ));
     assert!(matches!(
-        store.verify_for_deletion(&hashes[1], 1),
+        verify(store, &hashes[1], 1),
         Err(DeletionDenied::NoRecord)
     ));
 }
@@ -256,13 +256,22 @@ fn a_ledger_cut_to_nothing_is_noticed_even_though_sqlite_accepts_it() {
     );
     for hash in &hashes {
         assert!(matches!(
-            store.verify_for_deletion(hash, 1),
+            verify(&store, hash, 1),
             Err(DeletionDenied::Blocked(_))
         ));
     }
     store.clear_final_move_block("acknowledged").unwrap();
+    // The new ledger does not even know the phone ...
     assert!(matches!(
-        store.verify_for_deletion(&hashes[0], 1),
+        verify(&store, &hashes[0], 1),
+        Err(DeletionDenied::UnknownDevice(_))
+    ));
+    // ... and once it does, it has no record of anything the phone stored.
+    store
+        .register_device(&phone(), "Pixel 8", kiwi_store::DeviceLimits::default())
+        .unwrap();
+    assert!(matches!(
+        verify(&store, &hashes[0], 1),
         Err(DeletionDenied::NoRecord)
     ));
     assert_eq!(w.files().len(), hashes.len());
@@ -316,7 +325,7 @@ fn nonsense_in_the_bookkeeping_values_is_corruption() {
     }
     expect_corrupt(w.try_open(), &w);
     let store = reset(&w);
-    assert_eq!(store.session(), 1, "the reset ledger starts over");
+    assert_eq!(store.run_number(), 1, "the reset ledger starts over");
     assert_eq!(
         store.final_move_block().unwrap().unwrap().kind,
         BlockKind::LedgerReset
@@ -331,7 +340,8 @@ fn resetting_a_healthy_ledger_changes_nothing() {
     assert!(store.open_notes().is_empty());
     assert!(store.final_move_block().unwrap().is_none());
     assert_eq!(store.stats().unwrap().files_committed, 6);
-    assert!(store.verify_for_deletion(&hashes[0], 1).is_ok());
+    store.new_session(&phone(), None).unwrap();
+    assert!(verify(&store, &hashes[0], 1).is_ok());
     assert!(!w.ledger_dir.join("ledger.db.corrupt-1").exists());
 }
 
@@ -347,7 +357,7 @@ fn repeated_resets_keep_every_damaged_copy() {
     let second = std::fs::read(w.ledger_dir.join("ledger.db.corrupt-2")).unwrap();
     assert_eq!(&first[..64], &[0xFF; 64]);
     assert_eq!(&second[..64], &[0xEE; 64]);
-    assert_eq!(w.open().session(), 2);
+    assert_eq!(w.open().run_number(), 2);
 }
 
 #[test]
@@ -405,8 +415,8 @@ fn a_ledger_from_a_newer_version_is_left_alone() {
         .unwrap();
     }
     let store = w.open();
-    assert_eq!(store.session(), 2);
-    assert!(store.verify_for_deletion(&hashes[0], 1).is_ok());
+    assert_eq!(store.run_number(), 2);
+    assert!(verify(&store, &hashes[0], 1).is_ok());
 }
 
 #[test]

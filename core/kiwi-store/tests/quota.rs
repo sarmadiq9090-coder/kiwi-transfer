@@ -320,6 +320,7 @@ fn declared_size_is_what_is_checked() {
     w.fs.reset_counters();
     let too_big = FileRequest {
         device: &phone(),
+        key: b"item",
         name: "a",
         size: 101,
         claimed_hash: None,

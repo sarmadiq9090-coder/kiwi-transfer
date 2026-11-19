@@ -139,7 +139,7 @@ fn missing_changed_and_unexpected_files_are_reported_and_block() {
     w.clock.advance_hours(25);
     let store = w.open();
     assert!(matches!(
-        store.verify_for_deletion(&hashes[0], 1),
+        verify(&store, &hashes[0], 1),
         Err(DeletionDenied::Blocked(_))
     ));
     // A second scan does not present old findings as new ones.
@@ -163,9 +163,9 @@ fn missing_changed_and_unexpected_files_are_reported_and_block() {
     let third = scan(&store);
     assert_eq!(third.verdict, ScanVerdict::Clean);
     assert!(third.block.is_none());
-    assert!(store.verify_for_deletion(&hashes[0], 1).is_ok());
-    assert!(store.verify_for_deletion(&hashes[1], 1).is_err());
-    assert!(store.verify_for_deletion(&hashes[3], 1).is_err());
+    assert!(verify(&store, &hashes[0], 1).is_ok());
+    assert!(verify(&store, &hashes[1], 1).is_err());
+    assert!(verify(&store, &hashes[3], 1).is_err());
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn many_changed_files_are_a_mass_change() {
     w.clock.advance_hours(25);
     let store = w.open();
     assert!(matches!(
-        store.verify_for_deletion(&hashes[20], 1),
+        verify(&store, &hashes[20], 1),
         Err(DeletionDenied::Blocked(info)) if info.kind == BlockKind::MassChange
     ));
 }

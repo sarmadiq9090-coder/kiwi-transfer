@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use super::incoming::is_temp_name;
+use super::pipeline::is_temp_name;
 use super::recovery::Visit;
 use super::verify::Probe;
 use super::{Inner, Store};
@@ -189,15 +189,24 @@ pub struct ScanReport {
 }
 
 /// Averages reads down to a byte rate and notices cancellation.
-struct Throttle<'a> {
-    rate: Option<u64>,
-    started: Instant,
-    bytes: u64,
-    cancel: &'a CancelToken,
+pub(crate) struct Throttle<'a> {
+    pub(crate) rate: Option<u64>,
+    pub(crate) started: Instant,
+    pub(crate) bytes: u64,
+    pub(crate) cancel: &'a CancelToken,
 }
 
-impl Throttle<'_> {
-    fn tick(&mut self, n: usize) -> ControlFlow<()> {
+impl<'a> Throttle<'a> {
+    pub(crate) fn new(rate: Option<u64>, cancel: &'a CancelToken) -> Self {
+        Throttle {
+            rate,
+            started: Instant::now(),
+            bytes: 0,
+            cancel,
+        }
+    }
+
+    pub(crate) fn tick(&mut self, n: usize) -> ControlFlow<()> {
         if self.cancel.is_cancelled() {
             return ControlFlow::Break(());
         }
@@ -455,6 +464,12 @@ impl Store {
                         state.unreadable += 1;
                         findings.push(FindingKind::Unreadable, path, why.as_str(), true);
                     }
+                    Probe::IoError(why) => {
+                        // A device error: `apply_probe` has blocked final move.
+                        state.unreadable += 1;
+                        state.suspicious += 1;
+                        findings.push(FindingKind::Unreadable, path, why.as_str(), true);
+                    }
                     Probe::Reparse(at) => {
                         state.suspicious += 1;
                         findings.push(
@@ -485,7 +500,7 @@ impl Store {
         if !stopped && !opts.skip_unexpected {
             let missing = MissingIndex::new(&ledger.missing_since(state.started_seq)?);
             let mut ledger_error = None;
-            let walked = inner.walk(cancel, &mut |visit| match visit {
+            let walked = inner.walk(inner.root(), cancel, &mut |visit| match visit {
                 Visit::File { dir_rel, entry, .. } => {
                     if is_temp_name(&entry.name) || ledger_error.is_some() {
                         return;

@@ -33,6 +33,10 @@ pub struct FileStat {
     pub reparse: bool,
     /// The entry's data is not on the local disk (cloud placeholder, HSM stub).
     pub offline: bool,
+    /// The entry carries the hidden or the system attribute (Windows only;
+    /// always false elsewhere). Such a file is somebody else's business and
+    /// is never taken for a stored copy.
+    pub hidden: bool,
     /// Size in bytes.
     pub size: u64,
     /// Last modification time, if the file system has one.
@@ -68,6 +72,11 @@ pub struct VerifyRead {
 pub enum Checkpoint {
     /// The file has its final name; the ledger has not been told yet.
     BeforeLedgerRecord,
+    /// A mirror copy has its final name; the ledger has not been told yet.
+    BeforeMirrorRecord,
+    /// A file restored from a mirror has its final name; the ledger has not
+    /// been told yet.
+    BeforeRepairRecord,
 }
 
 /// A file being received.
@@ -105,8 +114,15 @@ pub trait Fs: Send + Sync {
     /// Renames `from` to `to`, failing with `AlreadyExists` rather than
     /// replacing anything, and writes the rename through.
     fn rename_noreplace(&self, from: &Path, to: &Path) -> io::Result<()>;
+    /// Flushes a file under its present name: its data, its metadata and, on
+    /// a journaling file system, the log records of a rename that gave it
+    /// this name. The file is not modified.
+    fn sync_file(&self, path: &Path) -> io::Result<()>;
     /// Flushes a directory's entries to the device.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+    /// Reads a whole small file (a marker). Fails with `InvalidData` if it is
+    /// longer than `max_len` bytes; never follows a link.
+    fn read_small(&self, path: &Path, max_len: usize) -> io::Result<Vec<u8>>;
     /// Deletes a file.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     /// Called at pipeline points that are not file-system calls.
@@ -114,6 +130,37 @@ pub trait Fs: Send + Sync {
         let _ = point;
         Ok(())
     }
+}
+
+/// Whether an I/O error says something about the health of the disk.
+///
+/// A file that is in use, protected or simply not there is ordinary life, and
+/// so is a full disk. Anything else that stops a read or a write (a CRC
+/// error, a device error, a vanished device) counts towards the engine's
+/// "this disk is failing" judgement.
+pub fn is_hard_io_error(e: &io::Error) -> bool {
+    use io::ErrorKind as K;
+    if matches!(
+        e.kind(),
+        K::NotFound
+            | K::PermissionDenied
+            | K::AlreadyExists
+            | K::WouldBlock
+            | K::Interrupted
+            | K::InvalidInput
+            | K::StorageFull
+            | K::QuotaExceeded
+            | K::ResourceBusy
+            | K::TimedOut
+            | K::Unsupported
+    ) {
+        return false;
+    }
+    // Windows: sharing violation, lock violation, access denied.
+    if cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | 33)) {
+        return false;
+    }
+    true
 }
 
 /// The real file system.
@@ -149,6 +196,7 @@ fn stat_of(meta: &std::fs::Metadata) -> FileStat {
         kind,
         reparse: sys::is_reparse(meta),
         offline: sys::is_offline(meta),
+        hidden: sys::is_hidden(meta),
         size: meta.len(),
         mtime: meta.modified().ok(),
     }
@@ -246,8 +294,32 @@ impl Fs for RealFs {
         sys::rename_noreplace(from, to)
     }
 
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        sys::sync_file(path)
+    }
+
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         sys::sync_dir(dir)
+    }
+
+    fn read_small(&self, path: &Path, max_len: usize) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+        let file = sys::open_buffered(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        let mut out = Vec::new();
+        file.take(max_len as u64 + 1).read_to_end(&mut out)?;
+        if out.len() > max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the file is longer than a marker can be",
+            ));
+        }
+        Ok(out)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -261,6 +333,10 @@ impl Fs for RealFs {
 pub trait Clock: Send + Sync {
     /// Milliseconds since 1970-01-01T00:00:00Z.
     fn now_unix_ms(&self) -> i64;
+    /// Milliseconds on a clock that only ever runs forward and cannot be
+    /// set: time elapsed since some fixed moment in this process. It is used
+    /// to notice a wall clock that jumped ahead while the program was running.
+    fn monotonic_ms(&self) -> u64;
 }
 
 /// The system clock.
@@ -273,6 +349,12 @@ impl Clock for SystemClock {
             Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
             Err(e) => -i64::try_from(e.duration().as_millis()).unwrap_or(i64::MAX),
         }
+    }
+
+    fn monotonic_ms(&self) -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let start = START.get_or_init(std::time::Instant::now);
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 }
 
