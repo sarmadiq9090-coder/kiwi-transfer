@@ -11,11 +11,26 @@ use kiwi_store::{
 #[test]
 fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     let w = World::new("orphans");
+    // Three transfers die mid-way, at several depths. Their temp files are
+    // the engine's own: it noted creating each of them.
+    let mut orphans = Vec::new();
     {
         let store = w.open();
         put(&store, "DCIM/Camera/keep.jpg", b"a real photo");
+        for (i, name) in ["top.bin", "DCIM/second.bin", "DCIM/Camera/third.bin"]
+            .iter()
+            .enumerate()
+        {
+            let bytes = data(i as u64, 10_000 * (i + 1));
+            let mut incoming = store.begin_file(request(&phone(), name, &bytes)).unwrap();
+            incoming.write(&bytes[..7_000 * (i + 1)]).unwrap();
+            orphans.push(incoming.simulate_crash().unwrap());
+        }
     }
-    // Debris of interrupted transfers, at several depths.
+    assert_eq!(w.temp_files().len(), 3);
+    // Files that are named exactly like temp files, but that the engine never
+    // created: somebody's, not ours. (Before the intent rows existed, every
+    // one of these was deleted on the strength of its name alone.)
     let debris = [
         ".kiwi-tmp-1-0-00000000deadbeef.part",
         "Pixel 8/.kiwi-tmp-2-7-0123456789abcdef.part",
@@ -56,12 +71,26 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     let store = w.open();
     let report = store.recovery_report().unwrap();
     assert!(report.completed);
-    assert_eq!(report.orphan_temps_removed, 5);
-    assert_eq!(
-        report.orphan_temp_bytes,
-        1_000 + 2_000 + 3_000 + 4_000 + 5_000
-    );
+    assert_eq!(report.orphan_temps_removed, 3);
+    assert_eq!(report.orphan_temp_bytes, 7_000 + 14_000 + 21_000);
     assert!(report.orphan_temps_left.is_empty());
+    for orphan in &orphans {
+        assert!(!orphan.exists(), "{orphan:?} is the engine's own debris");
+    }
+    // The look-alikes are reported and left exactly as they were.
+    assert_eq!(report.unowned_temp_count, 5);
+    let mut unowned = report.unowned_temps.clone();
+    unowned.sort();
+    let mut planted: Vec<String> = debris.iter().map(|s| s.to_string()).collect();
+    planted.sort();
+    assert_eq!(unowned, planted);
+    for (i, rel) in debris.iter().enumerate() {
+        assert_eq!(
+            std::fs::read(w.path(rel)).unwrap(),
+            vec![0u8; 1_000 * (i + 1)],
+            "{rel} was touched"
+        );
+    }
     assert_eq!(
         (
             report.records_checked,
@@ -72,6 +101,7 @@ fn orphaned_temp_files_are_removed_and_nothing_else_is() {
     );
 
     let mut expected: Vec<String> = bystanders.iter().map(|s| s.to_string()).collect();
+    expected.extend(debris.iter().map(|s| s.to_string()));
     expected.push("Pixel 8/DCIM/Camera/keep.jpg".to_owned());
     expected.push("Pixel 8/.kiwi-tmp-5-5-dddddddddddddddd.part/inside/file.txt".to_owned());
     expected.sort();
@@ -134,20 +164,23 @@ fn records_of_vanished_files_are_marked_and_block_final_move() {
     assert_eq!(block.kind, BlockKind::IntegrityProblems);
     // Even the intact file cannot be confirmed for deletion while blocked.
     assert!(matches!(
-        store.verify_for_deletion(&hashes[0], 1),
+        store.verify_for_deletion(&phone(), &hashes[0], 1),
         Err(DeletionDenied::Blocked(_))
     ));
-    assert!(store.is_safely_stored(&hashes[0]).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &hashes[0])
+        .unwrap()
+        .is_verified());
     assert!(matches!(
-        store.is_safely_stored(&hashes[1]).unwrap(),
+        store.is_safely_stored(&phone(), &hashes[1]).unwrap(),
         StoredStatus::NotVerified(NotVerifiedReason::Missing)
     ));
     assert!(matches!(
-        store.is_safely_stored(&hashes[2]).unwrap(),
+        store.is_safely_stored(&phone(), &hashes[2]).unwrap(),
         StoredStatus::NotVerified(NotVerifiedReason::Changed(_))
     ));
     assert!(matches!(
-        store.is_safely_stored(&hashes[3]).unwrap(),
+        store.is_safely_stored(&phone(), &hashes[3]).unwrap(),
         StoredStatus::NotVerified(NotVerifiedReason::Changed(_))
     ));
     drop(store);
@@ -170,7 +203,7 @@ fn records_of_vanished_files_are_marked_and_block_final_move() {
     store
         .clear_final_move_block("the user deleted these on purpose")
         .unwrap();
-    assert!(store.verify_for_deletion(&hashes[0], 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hashes[0], 1).is_ok());
     drop(store);
     let store = w.open();
     assert!(
@@ -199,10 +232,16 @@ fn deletions_need_not_block_if_the_policy_says_so() {
     let store = w.open();
     assert_eq!(store.recovery_report().unwrap().newly_missing, 1);
     assert!(store.final_move_block().unwrap().is_none());
-    assert!(!store.is_safely_stored(&gone).unwrap().is_verified());
+    assert!(!store
+        .is_safely_stored(&phone(), &gone)
+        .unwrap()
+        .is_verified());
     // Changed content blocks regardless of that switch.
     corrupt_silently(&w.path("Pixel 8/changed.jpg"));
-    assert!(!store.is_safely_stored(&changed).unwrap().is_verified());
+    assert!(!store
+        .is_safely_stored(&phone(), &changed)
+        .unwrap()
+        .is_verified());
     assert_eq!(
         store.final_move_block().unwrap().unwrap().kind,
         BlockKind::IntegrityProblems
@@ -274,12 +313,13 @@ fn a_recovery_pass_leaves_running_transfers_alone() {
     w.configure = |cfg: &mut StoreConfig| cfg.defer_recovery = true;
     let store = w.open();
     assert!(store.recovery_report().is_none(), "recovery was deferred");
-    std::fs::create_dir_all(w.path("Pixel 8")).unwrap();
-    std::fs::write(
-        w.path("Pixel 8/.kiwi-tmp-0-0-0000000000000000.part"),
-        b"orphan",
-    )
-    .unwrap();
+    // An orphan: a transfer that died.
+    let dead = data(2, 9_000);
+    let mut dying = store
+        .begin_file(request(&phone(), "dead.jpg", &dead))
+        .unwrap();
+    dying.write(&dead[..4_000]).unwrap();
+    dying.simulate_crash().unwrap();
 
     let bytes = data(1, 50_000);
     let mut incoming = store
@@ -305,11 +345,12 @@ fn a_cancelled_recovery_says_it_did_not_finish() {
     w.configure = |cfg: &mut StoreConfig| cfg.defer_recovery = true;
     let store = w.open();
     put(&store, "a.jpg", b"x");
-    std::fs::write(
-        w.path("Pixel 8/.kiwi-tmp-0-0-0000000000000000.part"),
-        b"orphan",
-    )
-    .unwrap();
+    let dead = data(2, 9_000);
+    let mut dying = store
+        .begin_file(request(&phone(), "dead.jpg", &dead))
+        .unwrap();
+    dying.write(&dead[..4_000]).unwrap();
+    dying.simulate_crash().unwrap();
     let cancel = CancelToken::new();
     cancel.cancel();
     let report = store.run_recovery(&cancel).unwrap();
@@ -349,11 +390,11 @@ fn a_ledger_that_lost_its_records_is_noticed() {
     let block = store.final_move_block().unwrap().expect("blocked");
     assert_eq!(block.kind, BlockKind::LedgerLost);
     assert!(matches!(
-        store.verify_for_deletion(&hash, 1),
+        store.verify_for_deletion(&phone(), &hash, 1),
         Err(DeletionDenied::Blocked(_))
     ));
     assert!(matches!(
-        store.is_safely_stored(&hash).unwrap(),
+        store.is_safely_stored(&phone(), &hash).unwrap(),
         StoredStatus::NotVerified(NotVerifiedReason::NoRecord)
     ));
     // The file itself is untouched and is recognised when it is sent again.
@@ -394,7 +435,7 @@ fn a_folder_that_lost_its_marker_is_noticed() {
         "{block:?}"
     );
     assert!(matches!(
-        store.verify_for_deletion(&hash, 1),
+        store.verify_for_deletion(&phone(), &hash, 1),
         Err(DeletionDenied::Blocked(_))
     ));
     assert!(store.events_after(0, 1_000).unwrap().iter().any(|e| e
@@ -447,7 +488,10 @@ fn the_ledger_may_live_inside_the_bookkeeping_directory() {
         put(&store, "a.jpg", &data(1, 3_000)).hash
     };
     let store = w.open();
-    assert!(store.is_safely_stored(&hash).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &hash)
+        .unwrap()
+        .is_verified());
     assert_eq!(w.files(), vec!["Pixel 8/a.jpg"]);
     assert!(store.ledger_path().starts_with(w.root.join(STORE_DIR)));
     // The scan does not mistake the engine's own files for unexpected ones.

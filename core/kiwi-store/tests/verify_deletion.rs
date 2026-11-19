@@ -34,7 +34,7 @@ fn stored_yesterday(w: &World) -> Store {
 }
 
 fn denied(store: &Store, min_sessions: u32) -> DeletionDenied {
-    match store.verify_for_deletion(&hash(), min_sessions) {
+    match store.verify_for_deletion(&phone(), &hash(), min_sessions) {
         Ok(proof) => panic!("expected a denial, got {proof:?}"),
         Err(e) => e,
     }
@@ -89,7 +89,7 @@ fn confirmed_only_in_a_later_session_and_after_24_hours() {
     w.clock.set(T0 + 49 * HOUR);
     let store = w.open();
     let proof = store
-        .verify_for_deletion(&hash(), 1)
+        .verify_for_deletion(&phone(), &hash(), 1)
         .expect("all conditions hold");
     assert_eq!(proof.file.rel_path, STORED);
     assert_eq!(proof.file.file_id, receipt.file_id);
@@ -108,7 +108,7 @@ fn confirmed_only_in_a_later_session_and_after_24_hours() {
     assert_eq!(event.file_id, Some(receipt.file_id));
     // Asking again is fine and re-reads the file again.
     w.fs.reset_counters();
-    let again = store.verify_for_deletion(&hash(), 1).unwrap();
+    let again = store.verify_for_deletion(&phone(), &hash(), 1).unwrap();
     assert!(again.verified_seq > proof.verified_seq);
     assert_eq!(w.fs.count(Op::ReadVerify), 1);
 }
@@ -138,7 +138,10 @@ fn twenty_four_hours_exactly() {
         // The clock moves on within the session: now it is enough.
         w.clock.set(T0 + 24 * HOUR);
         assert_eq!(
-            store.verify_for_deletion(&hash(), 1).unwrap().age_secs,
+            store
+                .verify_for_deletion(&phone(), &hash(), 1)
+                .unwrap()
+                .age_secs,
             86_400
         );
     }
@@ -156,7 +159,7 @@ fn the_requested_number_of_sessions_must_have_passed() {
         let store = w.open();
         assert_eq!(store.session(), session);
         let elapsed = session - 1;
-        match store.verify_for_deletion(&hash(), 3) {
+        match store.verify_for_deletion(&phone(), &hash(), 3) {
             Ok(proof) => {
                 assert!(elapsed >= 3, "confirmed after only {elapsed} sessions");
                 assert_eq!(proof.sessions_elapsed, elapsed);
@@ -173,7 +176,7 @@ fn the_requested_number_of_sessions_must_have_passed() {
             Err(other) => panic!("unexpected: {other:?}"),
         }
         // Zero is not "no waiting": at least one session is always required.
-        assert!(store.verify_for_deletion(&hash(), 0).is_ok());
+        assert!(store.verify_for_deletion(&phone(), &hash(), 0).is_ok());
     }
     // And zero does not help in the session of the commit itself.
     let store = w.open();
@@ -181,7 +184,7 @@ fn the_requested_number_of_sessions_must_have_passed() {
     put(&store, "fresh.jpg", &fresh);
     w.clock.advance_hours(100);
     assert!(matches!(
-        store.verify_for_deletion(&ContentHash::of_bytes(&fresh), 0),
+        store.verify_for_deletion(&phone(), &ContentHash::of_bytes(&fresh), 0),
         Err(DeletionDenied::TooRecent {
             sessions_required: 1,
             ..
@@ -220,7 +223,7 @@ fn the_configured_age_can_be_raised_but_never_lowered() {
             }
         ));
         w.clock.advance_hours(24);
-        assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+        assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
     }
 }
 
@@ -228,7 +231,7 @@ fn the_configured_age_can_be_raised_but_never_lowered() {
 fn a_clock_that_went_backwards_denies() {
     let w = World::new("clock-back");
     let store = stored_yesterday(&w);
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
     // The clock now reads earlier than events already in the ledger.
     w.clock.set(T0 + 20 * HOUR);
     match denied(&store, 1) {
@@ -249,7 +252,7 @@ fn a_clock_that_went_backwards_denies() {
     ));
     // Back to a sane time: fine again.
     w.clock.set(T0 + 26 * HOUR);
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
 }
 
 #[test]
@@ -291,17 +294,20 @@ fn a_clock_that_was_ahead_needs_an_explicit_acknowledgement() {
         }
     ));
     // The re-stamped record is intact (its checksum was renewed with it).
-    assert!(store.is_safely_stored(&hash()).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &hash())
+        .unwrap()
+        .is_verified());
     drop(store);
 
     w.clock.advance_hours(25);
     let store = w.open();
-    let proof = store.verify_for_deletion(&hash(), 1).unwrap();
+    let proof = store.verify_for_deletion(&phone(), &hash(), 1).unwrap();
     assert_eq!(proof.file.committed_session, 2);
     assert_eq!(proof.age_secs, 25 * 3600);
     // With nothing to correct, the call changes nothing.
     assert_eq!(store.acknowledge_clock_change("again").unwrap(), 0);
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
     assert!(store
         .events_after(0, 10_000)
         .unwrap()
@@ -327,11 +333,14 @@ fn a_file_that_resolves_to_another_place_is_not_confirmed() {
         }
         other => panic!("unexpected: {other:?}"),
     }
-    assert!(!store.is_safely_stored(&hash()).unwrap().is_verified());
+    assert!(!store
+        .is_safely_stored(&phone(), &hash())
+        .unwrap()
+        .is_verified());
     assert!(store.final_move_block().unwrap().is_some());
     w.fs.clear_rules();
     store.clear_final_move_block("test").unwrap();
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
 }
 
 #[test]
@@ -409,7 +418,10 @@ fn copy_only_destinations_never_confirm() {
         assert!(!store.destination().supports_final_move(), "{label}");
         // The file is stored and verified like anywhere else...
         assert!(
-            store.is_safely_stored(&hash()).unwrap().is_verified(),
+            store
+                .is_safely_stored(&phone(), &hash())
+                .unwrap()
+                .is_verified(),
             "{label}"
         );
         // ...but deleting the phone's copy is never confirmed.
@@ -458,7 +470,7 @@ fn the_block_denies_until_it_is_cleared_explicitly() {
     assert_eq!(cleared.reason, "the user paused deletions");
     assert!(store.final_move_block().unwrap().is_none());
     assert!(store.clear_final_move_block("again").unwrap().is_none());
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
     let kinds: Vec<String> = store
         .events_after(0, 10_000)
         .unwrap()
@@ -474,7 +486,7 @@ fn unknown_content_has_no_record() {
     let store = stored_yesterday(&w);
     let other = ContentHash::of_bytes(b"never sent");
     assert!(matches!(
-        store.verify_for_deletion(&other, 1),
+        store.verify_for_deletion(&phone(), &other, 1),
         Err(DeletionDenied::NoRecord)
     ));
 }
@@ -545,7 +557,7 @@ fn a_missing_or_resized_file_denies() {
     // The original content comes back: confirmed again.
     std::fs::remove_dir(w.path(STORED)).unwrap();
     std::fs::write(w.path(STORED), bytes()).unwrap();
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
 }
 
 #[test]
@@ -580,7 +592,7 @@ fn a_read_that_fails_or_is_only_cached_denies() {
 
     // None of these is evidence of damage, so none of them blocks.
     assert!(store.final_move_block().unwrap().is_none());
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
 }
 
 #[test]
@@ -593,7 +605,7 @@ fn the_ledger_is_never_taken_at_its_word() {
     drop(store);
     let store = w.open();
     assert!(matches!(
-        store.verify_for_deletion(&fresh_hash, 1),
+        store.verify_for_deletion(&phone(), &fresh_hash, 1),
         Err(DeletionDenied::TooRecent { .. })
     ));
 
@@ -610,19 +622,17 @@ fn the_ledger_is_never_taken_at_its_word() {
             .unwrap();
         assert_eq!(changed, 1);
     }
-    match store.verify_for_deletion(&fresh_hash, 1) {
+    match store.verify_for_deletion(&phone(), &fresh_hash, 1) {
         Err(DeletionDenied::Ledger(e)) => {
             assert!(e.is_corruption(), "{e}");
             assert!(e.to_string().contains("checksum"), "{e}");
         }
         other => panic!("a tampered record must not be believed: {other:?}"),
     }
-    assert!(store.is_safely_stored(&fresh_hash).is_err());
-    assert!(store
-        .find_duplicate(&fresh_hash, kiwi_store::DedupeScope::AnyDevice)
-        .is_err());
+    assert!(store.is_safely_stored(&phone(), &fresh_hash).is_err());
+    assert!(store.find_duplicate(&phone(), &fresh_hash).is_err());
     // A record that was not touched still works.
-    assert!(store.verify_for_deletion(&hash(), 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash(), 1).is_ok());
     drop(store);
 
     // The next start notices on its own and refuses to open the ledger.
@@ -641,7 +651,11 @@ fn the_oldest_intact_copy_qualifies() {
     assert_eq!(second.session, 2);
     // The old copy qualifies.
     assert_eq!(
-        store.verify_for_deletion(&hash(), 1).unwrap().file.rel_path,
+        store
+            .verify_for_deletion(&phone(), &hash(), 1)
+            .unwrap()
+            .file
+            .rel_path,
         STORED
     );
     // If the old copy is lost, the new one is too recent: the answer is
@@ -663,7 +677,7 @@ fn the_oldest_intact_copy_qualifies() {
     store
         .clear_final_move_block("one copy was deleted on purpose")
         .unwrap();
-    let proof = store.verify_for_deletion(&hash(), 1).unwrap();
+    let proof = store.verify_for_deletion(&phone(), &hash(), 1).unwrap();
     assert_eq!(proof.file.rel_path, "Pixel 8/DCIM/copy.jpg");
     assert_eq!(proof.file.committed_session, 2);
 }
@@ -691,7 +705,11 @@ fn a_problem_on_one_copy_blocks_confirmation_through_another() {
     }
     store.clear_final_move_block("reviewed").unwrap();
     assert_eq!(
-        store.verify_for_deletion(&hash(), 1).unwrap().file.rel_path,
+        store
+            .verify_for_deletion(&phone(), &hash(), 1)
+            .unwrap()
+            .file
+            .rel_path,
         "Pixel 8/Other/b.jpg"
     );
 }
@@ -709,7 +727,7 @@ fn on_the_real_volume_of_this_machine() {
         dest.volume(),
         dest.final_move_support()
     );
-    match store.verify_for_deletion(&hash(), 1) {
+    match store.verify_for_deletion(&phone(), &hash(), 1) {
         Ok(proof) => {
             assert!(dest.supports_final_move());
             assert!(proof.file.read_unbuffered);

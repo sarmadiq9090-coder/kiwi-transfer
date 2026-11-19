@@ -1,4 +1,4 @@
-//! The durable commit pipeline for one incoming file.
+//! Receiving one file from a phone.
 //!
 //! ```text
 //! begin_file   sanitise name -> render layout -> quota -> free space
@@ -8,9 +8,13 @@
 //!              set mtime -> flush to device -> close
 //!              reopen UNBUFFERED, re-hash from disk
 //!              disk hash == stream hash == sender's hash?   (else delete temp)
-//!              rename, no replace, write-through            (collision -> " (2)")
-//!              flush directory -> record in ledger -> receipt
+//!              rename, no replace                            (collision -> " (2)")
+//!              flush the file under its new name -> flush the directory
+//!              re-read the file under its new name: there, and still right?
+//!              record in ledger -> receipt
 //! ```
+//!
+//! The steps themselves live in [`super::pipeline`], which the mirror uses too.
 //!
 //! Invariants, whatever fails and wherever:
 //!
@@ -20,22 +24,18 @@
 //! * the only files the engine deletes are its own temp files;
 //! * an error from `finish` means there is no ledger record.
 
-use std::io;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
-use super::{lock, DeviceId, Inner, Store, MAX_PATH_UTF16, TEMP_PREFIX, TEMP_SUFFIX};
+use super::pipeline::{Adoption, PlaceRequest, Placed, TempSlot, PRIMARY};
+use super::{lock, DeviceId, Inner, Store, MAX_PATH_UTF16, TEMP_PREFIX};
 use crate::error::{QuotaKind, StoreError};
-use crate::fsops::{Checkpoint, EntryKind, FileStat, TempFile};
+use crate::fsops::Checkpoint;
 use crate::hash::ContentHash;
-use crate::ledger::{FileRecord, FileState, NewFile};
-use crate::sanitize::{sanitize_rel_path, utf16_len, SafeName, SafeRelPath};
+use crate::ledger::{FileState, NewFile};
+use crate::sanitize::{sanitize_rel_path, utf16_len, SafeName, SafeRelPath, NEUTRAL_SUFFIX};
 use crate::template::{CaptureTime, CivilDate, TemplateContext};
-
-/// Most alternative names (` (2)`, ` (3)`, ...) tried before giving up.
-const MAX_NAME_ATTEMPTS: u32 = 10_000;
 
 /// One file the peer wants to store.
 #[derive(Debug, Clone, Copy)]
@@ -75,7 +75,8 @@ pub struct CommitReceipt {
     /// Ledger row of the file.
     pub file_id: i64,
     /// Path relative to the destination root, `/`-separated. May differ from
-    /// the requested name (sanitising, collision suffix, layout).
+    /// the requested name (sanitising, collision suffix, layout, a
+    /// neutralised extension).
     pub rel_path: String,
     /// Absolute path.
     pub abs_path: PathBuf,
@@ -83,47 +84,41 @@ pub struct CommitReceipt {
     pub hash: ContentHash,
     /// Size in bytes.
     pub size: u64,
-    /// Sequence number of the ledger event that recorded the file.
+    /// The sending device's commit sequence number for the file: the number
+    /// of the ledger event that recorded it for this device.
     pub seq: u64,
-    /// Session in which the file was recorded.
+    /// Session in which the file was recorded for this device.
     pub session: u64,
-    /// The directory flush after the rename succeeded.
+    /// The ledger record had been flushed to the device when this receipt was
+    /// made. Always true for [`IncomingFile::finish`]. After
+    /// [`IncomingFile::finish_batched`] it is false until
+    /// [`Store::flush_batch`] returns: do not acknowledge the file to the
+    /// phone before that.
+    pub durable: bool,
+    /// The flush of the file under its final name and of its directory both
+    /// succeeded.
     pub dir_synced: bool,
     /// The read-back bypassed the operating system's cache.
     pub verified_unbuffered: bool,
     /// The requested modification time was applied.
     pub mtime_applied: bool,
+    /// The file's type is shell-active; it was stored with
+    /// [`NEUTRAL_SUFFIX`] appended to its name.
+    pub neutralised: bool,
 }
 
-struct ActiveFile {
+/// What a live writer has been promised: released when the writer goes away,
+/// on success and on every error path alike.
+struct Reservation {
     inner: Arc<Inner>,
-    temp_path: PathBuf,
-    temp: Option<Box<dyn TempFile>>,
-    hasher: blake3::Hasher,
-    written: u64,
-    declared: u64,
-    claimed: Option<ContentHash>,
     device: String,
-    dir_rel: SafeRelPath,
-    dir_abs: PathBuf,
-    name: SafeName,
-    source_name: String,
-    mtime_unix_ns: Option<i64>,
-    /// The temp file has been renamed into place and must not be deleted.
-    renamed: bool,
-    /// Crash simulation: leave the temp file behind.
-    leak: bool,
+    declared: u64,
+    written: u64,
 }
 
-impl Drop for ActiveFile {
+impl Drop for Reservation {
     fn drop(&mut self) {
-        // Close the handle first: an open handle would block the delete.
-        self.temp = None;
-        if !self.renamed && !self.leak {
-            remove_temp(&self.inner, &self.temp_path);
-        }
         let mut in_flight = lock(&self.inner.in_flight);
-        in_flight.temps.remove(&self.temp_path);
         in_flight.bytes_remaining = in_flight
             .bytes_remaining
             .saturating_sub(self.declared.saturating_sub(self.written));
@@ -137,39 +132,15 @@ impl Drop for ActiveFile {
     }
 }
 
-/// Deletes one of the engine's own temp files. A scanner may hold the file
-/// for a moment, so a refusal is retried briefly; what is left behind is
-/// removed by the next recovery pass.
-fn remove_temp(inner: &Inner, path: &std::path::Path) {
-    debug_assert!(is_temp_name(
-        &path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
-    for attempt in 0..3u64 {
-        match inner.fs.remove_file(path) {
-            Ok(()) => return,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
-            Err(_) => std::thread::sleep(Duration::from_millis(30 * (attempt + 1))),
-        }
-    }
-}
-
-/// Whether `name` is one of the engine's temp-file names.
-pub(crate) fn is_temp_name(name: &str) -> bool {
-    name.len() > TEMP_PREFIX.len() + TEMP_SUFFIX.len()
-        && name.starts_with(TEMP_PREFIX)
-        && name.ends_with(TEMP_SUFFIX)
-}
-
-fn system_time_from_unix_ns(ns: i64) -> Option<SystemTime> {
-    let magnitude = Duration::from_nanos(ns.unsigned_abs());
-    if ns >= 0 {
-        SystemTime::UNIX_EPOCH.checked_add(magnitude)
-    } else {
-        SystemTime::UNIX_EPOCH.checked_sub(magnitude)
-    }
+struct ActiveFile {
+    // Field order matters: the temp file goes (and with it the bytes on
+    // disk) before the reservation that accounted for them is released.
+    slot: TempSlot,
+    reservation: Reservation,
+    claimed: Option<ContentHash>,
+    name: SafeName,
+    source_name: String,
+    mtime_unix_ns: Option<i64>,
 }
 
 /// A file being received. Created by [`Store::begin_file`].
@@ -186,33 +157,21 @@ impl std::fmt::Debug for IncomingFile {
             Some(a) => f
                 .debug_struct("IncomingFile")
                 .field("source_name", &a.source_name)
-                .field("written", &a.written)
-                .field("declared", &a.declared)
+                .field("written", &a.slot.written())
+                .field("declared", &a.reservation.declared)
                 .finish(),
             None => f.write_str("IncomingFile(closed)"),
         }
     }
 }
 
-enum Placed {
-    Stored {
-        name: SafeName,
-        dir_synced: bool,
-    },
-    Adopted {
-        name: SafeName,
-        record: Option<FileRecord>,
-        unbuffered: bool,
-    },
-}
-
 impl Store {
     /// Starts receiving one file.
     ///
-    /// Nothing is written unless every check passes: the name is safe, the
-    /// device is within its limits, the file (plus everything else in flight
-    /// plus the safety margin) fits on the volume, and no reparse point lies
-    /// between the root and the target directory.
+    /// Nothing is written unless every check passes: the device is paired,
+    /// the name is safe, the device is within its limits, the file (plus
+    /// everything else in flight plus the safety margin) fits on the volume,
+    /// and no reparse point lies between the root and the target directory.
     pub fn begin_file(&self, req: FileRequest<'_>) -> Result<IncomingFile, StoreError> {
         let inner = &self.inner;
         let unsafe_name = |source| StoreError::UnsafeName {
@@ -224,6 +183,9 @@ impl Store {
             .ledger
             .device(req.device.as_str())?
             .ok_or_else(|| StoreError::UnknownDevice(req.device.as_str().to_owned()))?;
+        if device.detached {
+            return Err(StoreError::DeviceDetached(device.device_id));
+        }
         let device_folder = SafeName::from_stored(&device.folder_name).ok_or_else(|| {
             StoreError::Ledger(crate::error::LedgerError::Corrupt {
                 path: inner.ledger.path().to_path_buf(),
@@ -256,8 +218,9 @@ impl Store {
             .map_err(unsafe_name)?;
 
         let root_len = utf16_len(&inner.dest.display_root());
-        let path_len =
-            root_len + 1 + dir_rel.utf16_len() + 1 + name.utf16_len().max(TEMP_PREFIX.len() + 64);
+        let longest_name =
+            (name.utf16_len() + utf16_len(NEUTRAL_SUFFIX)).max(TEMP_PREFIX.len() + 64);
+        let path_len = root_len + 1 + dir_rel.utf16_len() + 1 + longest_name;
         if path_len > MAX_PATH_UTF16 {
             return Err(StoreError::PathTooLong {
                 utf16_len: path_len,
@@ -330,72 +293,24 @@ impl Store {
             entry.1 += 1;
         }
 
-        // From here on the reservation is owned by `active` and is released
-        // when it is dropped, on success and on every error path alike.
-        let mut active = ActiveFile {
+        // From here on the reservation is released when it is dropped, on
+        // success and on every error path alike.
+        let reservation = Reservation {
             inner: Arc::clone(inner),
-            temp_path: PathBuf::new(),
-            temp: None,
-            hasher: blake3::Hasher::new(),
-            written: 0,
-            declared: req.size,
-            claimed: req.claimed_hash,
             device: device.device_id.clone(),
-            dir_rel: dir_rel.clone(),
-            dir_abs: PathBuf::new(),
-            name,
-            source_name: source.to_slash_string(),
-            mtime_unix_ns: req.mtime_unix_ns,
-            renamed: true, // nothing to delete yet
-            leak: false,
+            declared: req.size,
+            written: 0,
         };
-
-        let (dir_abs, dir_actual) = inner
-            .walk_dirs(&dir_rel, true)?
-            .expect("walk_dirs(create) returns a path or an error");
-        active.dir_abs = dir_abs;
-        active.dir_rel = dir_actual;
-
-        // Create the temp file next to the final target, under a fresh name.
-        let mut attempts = 0;
-        loop {
-            let candidate = active.dir_abs.join(inner.temp_name());
-            // Register before creating, so a recovery pass running right now
-            // cannot mistake the new file for an orphan.
-            lock(&inner.in_flight).temps.insert(candidate.clone());
-            match inner.fs.create_temp(&candidate) {
-                Ok(temp) => {
-                    active.temp_path = candidate;
-                    active.temp = Some(temp);
-                    active.renamed = false;
-                    break;
-                }
-                Err(e) => {
-                    lock(&inner.in_flight).temps.remove(&candidate);
-                    attempts += 1;
-                    if e.kind() != io::ErrorKind::AlreadyExists || attempts >= 8 {
-                        return Err(StoreError::write("create the temp file", candidate, e));
-                    }
-                }
-            }
-        }
-
-        // The directory was checked before the file was created. Check again
-        // through the file itself: it must be exactly where it was put. This
-        // closes the window in which a directory on the way could have been
-        // swapped for a link between the check and the create.
-        let resolved = inner
-            .fs
-            .resolve(&active.temp_path)
-            .map_err(|e| StoreError::io("resolve", &active.temp_path, e))?;
-        if resolved != active.temp_path {
-            return Err(StoreError::PathMismatch {
-                expected: active.temp_path.clone(),
-                resolved,
-            });
-        }
+        let slot = TempSlot::create(inner, PRIMARY, inner.root(), &dir_rel)?;
         Ok(IncomingFile {
-            active: Some(active),
+            active: Some(ActiveFile {
+                slot,
+                reservation,
+                claimed: req.claimed_hash,
+                name,
+                source_name: source.to_slash_string(),
+                mtime_unix_ns: req.mtime_unix_ns,
+            }),
         })
     }
 }
@@ -407,7 +322,15 @@ impl IncomingFile {
     /// every later call returns [`StoreError::WriterClosed`].
     pub fn write(&mut self, data: &[u8]) -> Result<(), StoreError> {
         let active = self.active.as_mut().ok_or(StoreError::WriterClosed)?;
-        let result = write_all(active, data);
+        let ActiveFile {
+            slot, reservation, ..
+        } = active;
+        let declared = reservation.declared;
+        let result = slot.write(data, declared, &mut |n| {
+            reservation.written += n;
+            let mut in_flight = lock(&reservation.inner.in_flight);
+            in_flight.bytes_remaining = in_flight.bytes_remaining.saturating_sub(n);
+        });
         if result.is_err() {
             self.active = None;
         }
@@ -416,7 +339,7 @@ impl IncomingFile {
 
     /// Bytes received so far.
     pub fn bytes_written(&self) -> u64 {
-        self.active.as_ref().map_or(0, |a| a.written)
+        self.active.as_ref().map_or(0, |a| a.slot.written())
     }
 
     /// Discards everything received. Equivalent to dropping the value.
@@ -427,8 +350,7 @@ impl IncomingFile {
     #[cfg(any(test, feature = "test-util"))]
     pub fn simulate_crash(mut self) -> Option<PathBuf> {
         let mut active = self.active.take()?;
-        active.leak = true;
-        Some(active.temp_path.clone())
+        Some(active.slot.leak())
     }
 
     /// Completes the file: verifies it, gives it its final name and records it.
@@ -439,26 +361,62 @@ impl IncomingFile {
     ///
     /// On success the file is on disk under [`CommitReceipt::rel_path`], its
     /// content read back from the device matched both the received stream and
-    /// the sender's claim, and the ledger has a record of it. On any error the
-    /// received bytes are deleted and nothing was recorded.
+    /// the sender's claim (before the rename, and again under the final
+    /// name), and the ledger has a flushed record of it. On any error nothing
+    /// was recorded.
     ///
-    /// One error can leave a (complete, verified) file behind: a failure to
-    /// write the ledger record after the rename. The file is then simply an
-    /// unrecorded file; sending it again finds it and records it
+    /// An error after the rename can leave the (complete) file behind under
+    /// its final name: a failure to confirm it there, or to write the ledger
+    /// record. The file is then simply an unrecorded file; sending it again
+    /// finds it and, if it is intact, records it
     /// ([`CommitOutcome::AlreadyPresent`]) instead of storing a second copy.
-    pub fn finish(
+    pub fn finish(self, claimed_hash: Option<ContentHash>) -> Result<CommitReceipt, StoreError> {
+        self.finish_with(claimed_hash, true)
+    }
+
+    /// Like [`IncomingFile::finish`], except that the ledger record is not
+    /// flushed to the device before returning: the next
+    /// [`Store::flush_batch`] (or any other flushed ledger write) does that
+    /// for the whole batch at once. On a hard disk this saves one flush per
+    /// file.
+    ///
+    /// **For plain copies only.** The file itself is written, flushed and
+    /// verified exactly as with `finish`; what is deferred is only the
+    /// durability of the ledger row. Until the flush, a power failure may
+    /// forget the row (the file stays on disk and is recorded when it is sent
+    /// again), so:
+    ///
+    /// * do not acknowledge the file to the phone before
+    ///   [`Store::flush_batch`] has returned;
+    /// * nothing the phone deletes may depend on it. The engine itself makes
+    ///   sure of that: [`Store::verify_for_deletion`] flushes the ledger
+    ///   before it looks, and never confirms a file recorded in the session
+    ///   that is still running.
+    ///
+    /// The receipt has [`CommitReceipt::durable`] set to `false`.
+    pub fn finish_batched(
+        self,
+        claimed_hash: Option<ContentHash>,
+    ) -> Result<CommitReceipt, StoreError> {
+        self.finish_with(claimed_hash, false)
+    }
+
+    fn finish_with(
         mut self,
         claimed_hash: Option<ContentHash>,
+        durable: bool,
     ) -> Result<CommitReceipt, StoreError> {
         // `active` cleans up after itself when dropped, which every early
         // return below relies on.
         let mut active = self.active.take().ok_or(StoreError::WriterClosed)?;
-        let inner = Arc::clone(&active.inner);
+        let inner = Arc::clone(active.slot.inner());
+        let declared = active.reservation.declared;
+        let device = active.reservation.device.clone();
 
-        if active.written != active.declared {
+        if active.slot.written() != declared {
             return Err(StoreError::SizeMismatch {
-                declared: active.declared,
-                received: active.written,
+                declared,
+                received: active.slot.written(),
             });
         }
         let claimed = match (active.claimed, claimed_hash) {
@@ -467,7 +425,7 @@ impl IncomingFile {
             (None, Some(b)) => b,
             (None, None) => return Err(StoreError::MissingSenderHash),
         };
-        let stream_hash = ContentHash::from(active.hasher.finalize());
+        let stream_hash = active.slot.stream_hash();
         if stream_hash != claimed {
             return Err(StoreError::SenderHashMismatch {
                 claimed,
@@ -475,54 +433,57 @@ impl IncomingFile {
             });
         }
 
-        // The modification time is set through the write handle, before the
-        // flush: it becomes durable together with the data, and nothing has
-        // to touch the file again after it has been verified.
-        let mut temp = active
-            .temp
-            .take()
-            .expect("an open incoming file has its handle");
-        let mtime_applied = match active.mtime_unix_ns.and_then(system_time_from_unix_ns) {
-            Some(mtime) => temp.set_mtime(mtime).is_ok(),
-            None => false,
-        };
-        temp.sync()
-            .map_err(|e| StoreError::write("flush", &active.temp_path, e))?;
-        drop(temp);
+        let mtime_applied = active.slot.seal(active.mtime_unix_ns)?;
 
         // Read it back from the device, not from the cache.
-        let mut hasher = blake3::Hasher::new();
-        let read = inner
-            .fs
-            .read_verify(&active.temp_path, &mut |chunk| {
-                hasher.update(chunk);
-                ControlFlow::Continue(())
-            })
-            .map_err(|e| StoreError::io("read back", &active.temp_path, e))?;
-        let disk_hash = ContentHash::from(hasher.finalize());
+        let (disk_hash, read) = active.slot.read_back(&mut |_| ControlFlow::Continue(()))?;
         if !read.completed
-            || read.bytes != active.declared
+            || read.bytes != declared
             || disk_hash != stream_hash
             || disk_hash != claimed
         {
             return Err(StoreError::DiskVerifyMismatch {
                 expected: stream_hash,
                 on_disk: disk_hash,
-                expected_size: active.declared,
+                expected_size: declared,
                 on_disk_size: read.bytes,
             });
         }
 
-        let placed = inner.place(&mut active, &stream_hash)?;
+        let base = active.name.clone();
+        let placed = active.slot.place(&PlaceRequest {
+            hash: &stream_hash,
+            size: declared,
+            // The collision suffix goes before the extension, the neutral
+            // suffix after it: "a (2).url.kiwi-safe" restores to "a (2).url".
+            name_for: &|n| base.with_collision_suffix(n).neutralised().0,
+            // An identical file may be used unless the ledger knows the path
+            // for other content (or under another spelling).
+            may_adopt: &|rel: &SafeRelPath| {
+                let record = inner.ledger.file_by_path_key(&rel.collision_key())?;
+                Ok(match record {
+                    Some(r) if r.hash != stream_hash || r.rel_path != rel.to_slash_string() => {
+                        Adoption::No
+                    }
+                    other => Adoption::Yes(other),
+                })
+            },
+            display_name: active.name.as_str(),
+        })?;
         let (name, existing, dir_synced, verified_unbuffered, adopted) = match placed {
-            Placed::Stored { name, dir_synced } => (name, None, dir_synced, read.unbuffered, false),
+            Placed::Stored {
+                name,
+                dir_synced,
+                unbuffered,
+            } => (name, None, dir_synced, read.unbuffered && unbuffered, false),
             Placed::Adopted {
                 name,
                 record,
                 unbuffered,
             } => (name, record, false, unbuffered, true),
         };
-        let rel = active.dir_rel.join(name);
+        let neutralised = active.name.neutralised().1;
+        let rel = active.slot.dir_rel().join(name);
         let rel_path = rel.to_slash_string();
         let abs_path = rel.under(inner.root());
 
@@ -532,7 +493,7 @@ impl IncomingFile {
             .map_err(|e| StoreError::io("record", &abs_path, e))?;
 
         let now = inner.now();
-        let record = match existing {
+        let (record, record_durable) = match existing {
             Some(existing) => {
                 // Already recorded with this content at this path, and just
                 // re-read from disk: refresh what the ledger believes.
@@ -544,29 +505,59 @@ impl IncomingFile {
                         now,
                     )?;
                 }
-                inner.ledger.mark_verified(
-                    existing.id,
-                    "duplicate_received",
-                    Some(&active.device),
+                if existing.device == device {
+                    inner.ledger.mark_verified(
+                        existing.id,
+                        "duplicate_received",
+                        Some(&device),
+                        now,
+                    )?;
+                    (existing, true)
+                } else {
+                    // Another device committed this file first. This device
+                    // has now delivered the same bytes itself and they were
+                    // compared with the file on disk: it gets a record of its
+                    // own, which ages from now. Nothing recorded for the
+                    // other device is ever used to answer for this one.
+                    let (claim, new) = inner.ledger.record_claim(
+                        &existing,
+                        &device,
+                        &active.source_name,
+                        durable,
+                        now,
+                    )?;
+                    if !new {
+                        inner.ledger.mark_verified(
+                            existing.id,
+                            "duplicate_received",
+                            Some(&device),
+                            now,
+                        )?;
+                    }
+                    (claim, durable || !new)
+                }
+            }
+            None => {
+                let record = inner.ledger.record_commit(
+                    &NewFile {
+                        device: &device,
+                        rel_path: &rel_path,
+                        path_key: &rel.collision_key(),
+                        hash: stream_hash,
+                        size: declared,
+                        mtime_unix_ns: active.mtime_unix_ns,
+                        source_name: &active.source_name,
+                        dir_synced,
+                        verified_unbuffered,
+                        adopted,
+                        partial: Some(active.slot.temp_rel()),
+                        durable,
+                    },
                     now,
                 )?;
-                existing
+                active.slot.intent_closed();
+                (record, durable)
             }
-            None => inner.ledger.record_commit(
-                &NewFile {
-                    device: &active.device,
-                    rel_path: &rel_path,
-                    path_key: &rel.collision_key(),
-                    hash: stream_hash,
-                    size: active.declared,
-                    mtime_unix_ns: active.mtime_unix_ns,
-                    source_name: &active.source_name,
-                    dir_synced,
-                    verified_unbuffered,
-                    adopted,
-                },
-                now,
-            )?,
         };
         // The ledger now counts the file; only then is the reservation released.
         drop(active);
@@ -584,171 +575,11 @@ impl IncomingFile {
             size: record.size,
             seq: record.committed_seq,
             session: record.committed_session,
+            durable: record_durable,
             dir_synced,
             verified_unbuffered,
             mtime_applied: mtime_applied && !adopted,
+            neutralised,
         })
-    }
-}
-
-fn write_all(active: &mut ActiveFile, data: &[u8]) -> Result<(), StoreError> {
-    let received = active.written.saturating_add(data.len() as u64);
-    if received > active.declared {
-        return Err(StoreError::SizeMismatch {
-            declared: active.declared,
-            received,
-        });
-    }
-    let temp = active
-        .temp
-        .as_mut()
-        .expect("an open incoming file has its handle");
-    let mut offset = 0;
-    while offset < data.len() {
-        let n = match temp.write(&data[offset..]) {
-            Ok(0) => {
-                let stuck = io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "the file system accepted no more bytes",
-                );
-                return Err(StoreError::write("write", &active.temp_path, stuck));
-            }
-            Ok(n) => n.min(data.len() - offset),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(StoreError::write("write", &active.temp_path, e)),
-        };
-        // Only bytes the file system accepted enter the stream hash.
-        active.hasher.update(&data[offset..offset + n]);
-        offset += n;
-        active.written += n as u64;
-        let mut in_flight = lock(&active.inner.in_flight);
-        in_flight.bytes_remaining = in_flight.bytes_remaining.saturating_sub(n as u64);
-    }
-    Ok(())
-}
-
-impl Inner {
-    /// Gives the verified temp file its final name, or finds that an identical
-    /// file is already there.
-    fn place(&self, active: &mut ActiveFile, hash: &ContentHash) -> Result<Placed, StoreError> {
-        let _serialised = lock(&self.commit_lock);
-        let dir_key = active.dir_rel.collision_key();
-        self.load_dir_names(&dir_key, &active.dir_abs, false)?;
-
-        let mut n = 1u32;
-        let mut raced = false;
-        // `rounds` bounds the loop even against a file system whose listing,
-        // stat and rename disagree with each other indefinitely.
-        let mut rounds = 0u32;
-        while n <= MAX_NAME_ATTEMPTS && rounds < 4 * MAX_NAME_ATTEMPTS {
-            rounds += 1;
-            let candidate = active.name.with_collision_suffix(n);
-            let key = candidate.collision_key();
-
-            if let Some(existing) = self.cached_name(&dir_key, &key) {
-                let existing_path = active.dir_abs.join(&existing);
-                match self
-                    .fs
-                    .stat(&existing_path)
-                    .map_err(|e| StoreError::io("examine", &existing_path, e))?
-                {
-                    // The listing is stale: the name is free again.
-                    None => self.forget_name(&dir_key, &key),
-                    Some(stat) => {
-                        if let Some(adopted) = self.try_adopt(active, &existing, &stat, hash)? {
-                            return Ok(adopted);
-                        }
-                        n += 1;
-                        raced = false;
-                        continue;
-                    }
-                }
-            } else if raced {
-                // The file system insists the name exists although a fresh
-                // listing does not show it. Believe the file system.
-                n += 1;
-                raced = false;
-                continue;
-            }
-
-            let target = active.dir_abs.join(candidate.as_str());
-            match self.fs.rename_noreplace(&active.temp_path, &target) {
-                Ok(()) => {
-                    active.renamed = true;
-                    self.remember_name(&dir_key, key, candidate.as_str());
-                    // "Where possible": a file system that cannot flush a
-                    // directory does not fail the commit; the receipt and the
-                    // ledger say whether it happened.
-                    let dir_synced = self.fs.sync_dir(&active.dir_abs).is_ok();
-                    return Ok(Placed::Stored {
-                        name: candidate,
-                        dir_synced,
-                    });
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    // Someone created the name after the directory was listed.
-                    // Look again and reconsider this same candidate: it may be
-                    // the very file we are storing.
-                    self.load_dir_names(&dir_key, &active.dir_abs, true)?;
-                    raced = true;
-                }
-                Err(e) => return Err(StoreError::write("rename into place", target, e)),
-            }
-        }
-        Err(StoreError::TooManyCollisions {
-            dir: active.dir_rel.to_slash_string(),
-            name: active.name.as_str().to_owned(),
-        })
-    }
-
-    /// If the existing entry is a regular file with exactly the content being
-    /// stored, use it instead of creating ` (2)`. The content is compared by
-    /// reading the existing file from disk; the ledger's opinion is not enough.
-    fn try_adopt(
-        &self,
-        active: &ActiveFile,
-        existing: &str,
-        stat: &FileStat,
-        hash: &ContentHash,
-    ) -> Result<Option<Placed>, StoreError> {
-        if stat.kind != EntryKind::File
-            || stat.reparse
-            || stat.offline
-            || stat.size != active.declared
-        {
-            return Ok(None);
-        }
-        // A name the sanitiser would not have produced is never recorded.
-        let Some(name) = SafeName::from_stored(existing) else {
-            return Ok(None);
-        };
-        let rel = active.dir_rel.join(name.clone());
-        let record = self.ledger.file_by_path_key(&rel.collision_key())?;
-        if let Some(r) = &record {
-            if r.hash != *hash || r.rel_path != rel.to_slash_string() {
-                return Ok(None);
-            }
-        }
-        let path = active.dir_abs.join(existing);
-        let mut hasher = blake3::Hasher::new();
-        let read = self.fs.read_verify(&path, &mut |chunk| {
-            hasher.update(chunk);
-            ControlFlow::Continue(())
-        });
-        match read {
-            Ok(r)
-                if r.completed
-                    && r.bytes == active.declared
-                    && ContentHash::from(hasher.finalize()) == *hash =>
-            {
-                Ok(Some(Placed::Adopted {
-                    name,
-                    record,
-                    unbuffered: r.unbuffered,
-                }))
-            }
-            // Different content, or it cannot be read: not ours to adopt.
-            _ => Ok(None),
-        }
     }
 }

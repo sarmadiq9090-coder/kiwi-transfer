@@ -7,6 +7,14 @@
 //! memory cards, network shares, FAT/exFAT, virtual disks, anything that
 //! cannot be identified) is *copy-only*: files are stored and verified there
 //! with the same care, but the engine never confirms a deletion.
+//!
+//! The folder itself matters too. A folder that a cloud-sync program manages
+//! (OneDrive, Dropbox, Google Drive, ...) can turn a stored file into an
+//! online-only placeholder or delete it when it is deleted elsewhere; a
+//! folder Windows cleans up by itself (Downloads with Storage Sense, the temp
+//! folders, the recycle bin) loses files on a schedule. Both are copy-only,
+//! with a typed [`DestinationWarning`]. A folder other Windows accounts may
+//! write to is reported as a warning as well.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -113,6 +121,275 @@ pub enum CopyOnlyReason {
     DeviceUnidentified,
     /// The platform has no volume classification (anything but Windows).
     PlatformUnsupported,
+    /// The folder is inside a folder a cloud-sync program manages.
+    SyncFolder(SyncProvider),
+    /// The folder is inside a folder the system empties by itself.
+    ManagedFolder(ManagedFolder),
+}
+
+/// A program that keeps a folder in step with a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SyncProvider {
+    /// Microsoft OneDrive.
+    OneDrive,
+    /// Dropbox.
+    Dropbox,
+    /// Google Drive.
+    GoogleDrive,
+    /// Apple iCloud Drive.
+    ICloud,
+    /// Nextcloud or ownCloud.
+    Nextcloud,
+    /// Syncthing.
+    Syncthing,
+    /// Resilio Sync.
+    Resilio,
+    /// A Windows cloud-files sync root or placeholder of a provider that
+    /// could not be named.
+    CloudFiles,
+}
+
+/// A folder the operating system empties without being asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ManagedFolder {
+    /// The user's Downloads folder (Windows Storage Sense can delete old
+    /// files there).
+    Downloads,
+    /// A temp folder.
+    Temp,
+    /// The recycle bin.
+    RecycleBin,
+}
+
+/// Something about the destination folder the user should be told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DestinationWarning {
+    /// The folder is inside a cloud-synced folder. Files are stored here, but
+    /// a deletion is never confirmed.
+    SyncFolder {
+        /// The program that manages the folder.
+        provider: SyncProvider,
+        /// What gave it away.
+        evidence: String,
+    },
+    /// The folder is inside a folder the system empties by itself. Files are
+    /// stored here, but a deletion is never confirmed.
+    ManagedFolder {
+        /// Which kind.
+        kind: ManagedFolder,
+        /// The folder in question.
+        folder: PathBuf,
+    },
+    /// Accounts other than the current user, the system and the
+    /// administrators may write to (and so delete from) the folder.
+    WritableByOthers {
+        /// Who, as far as they could be named.
+        principals: Vec<String>,
+    },
+    /// The folder's access list could not be read, so nothing is known about
+    /// who else may write to it.
+    AccessListUnreadable(String),
+}
+
+impl fmt::Display for DestinationWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SyncFolder { provider, evidence } => write!(
+                f,
+                "the destination is inside a folder synced by {provider:?} ({evidence})"
+            ),
+            Self::ManagedFolder { kind, folder } => write!(
+                f,
+                "the destination is inside {folder:?}, which the system empties by itself ({kind:?})"
+            ),
+            Self::WritableByOthers { principals } => write!(
+                f,
+                "other accounts may change or delete files in the destination: {}",
+                principals.join(", ")
+            ),
+            Self::AccessListUnreadable(why) => {
+                write!(f, "the destination's access list could not be read ({why})")
+            }
+        }
+    }
+}
+
+/// Marker files and folders sync programs leave in the folders they manage.
+const SYNC_MARKERS: &[(SyncProvider, &str)] = &[
+    (SyncProvider::Dropbox, ".dropbox"),
+    (SyncProvider::Dropbox, ".dropbox.cache"),
+    (SyncProvider::GoogleDrive, ".tmp.driveupload"),
+    (SyncProvider::GoogleDrive, ".tmp.drivedownload"),
+    (SyncProvider::Nextcloud, ".owncloudsync.log"),
+    (SyncProvider::Nextcloud, ".nextcloudsync.log"),
+    (SyncProvider::Nextcloud, ".sync-exclude.lst"),
+    (SyncProvider::Syncthing, ".stfolder"),
+    (SyncProvider::Syncthing, ".stignore"),
+    (SyncProvider::Resilio, ".sync/ID"),
+];
+
+/// Where the known dangerous folders are. Taken from the environment by
+/// [`HazardEnv::from_system`]; tests supply their own.
+#[derive(Debug, Clone, Default)]
+pub struct HazardEnv {
+    /// Roots of cloud-synced folders known from the environment.
+    pub sync_roots: Vec<(SyncProvider, PathBuf)>,
+    /// Folders the system empties by itself.
+    pub managed: Vec<(ManagedFolder, PathBuf)>,
+    /// Sync markers are looked for in the destination and every folder above
+    /// it, up to and including this one (`None`: up to the volume root).
+    pub ceiling: Option<PathBuf>,
+    /// Read the destination's access list.
+    pub check_access: bool,
+}
+
+impl HazardEnv {
+    /// What this machine's environment says.
+    pub fn from_system() -> HazardEnv {
+        let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+        let resolved = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+        let mut env = HazardEnv {
+            check_access: true,
+            ..HazardEnv::default()
+        };
+        for name in ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"] {
+            if let Some(root) = var(name) {
+                env.sync_roots
+                    .push((SyncProvider::OneDrive, resolved(root)));
+            }
+        }
+        let home = var("USERPROFILE").or_else(|| var("HOME"));
+        if let Some(home) = &home {
+            for name in ["iCloudDrive", "iCloud Drive"] {
+                env.sync_roots
+                    .push((SyncProvider::ICloud, resolved(home.join(name))));
+            }
+            env.managed
+                .push((ManagedFolder::Downloads, resolved(home.join("Downloads"))));
+        }
+        let mut temps = vec![std::env::temp_dir()];
+        temps.extend(var("TEMP"));
+        temps.extend(var("TMP"));
+        temps.extend(var("LOCALAPPDATA").map(|p| p.join("Temp")));
+        temps.extend(var("SystemRoot").map(|p| p.join("Temp")));
+        if cfg!(unix) {
+            temps.push(PathBuf::from("/tmp"));
+            temps.push(PathBuf::from("/var/tmp"));
+        }
+        for temp in temps {
+            env.managed.push((ManagedFolder::Temp, resolved(temp)));
+        }
+        env
+    }
+}
+
+/// The components of a path, folded the way a case-insensitive file system
+/// compares names, without the verbatim prefix.
+fn folded_components(path: &Path) -> Vec<String> {
+    display_path(path)
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty())
+        .map(crate::sanitize::collision_key)
+        .collect()
+}
+
+/// Whether `child` is `parent` or lies below it.
+fn is_same_or_under(child: &Path, parent: &Path) -> bool {
+    let (child, parent) = (folded_components(child), folded_components(parent));
+    !parent.is_empty() && child.len() >= parent.len() && child[..parent.len()] == parent[..]
+}
+
+/// Looks for the reasons a folder should not hold anybody's only copy.
+fn detect_hazards(root: &Path, env: &HazardEnv) -> Vec<DestinationWarning> {
+    let mut out: Vec<DestinationWarning> = Vec::new();
+    let mut seen: Vec<SyncProvider> = Vec::new();
+    let mut sync = |out: &mut Vec<DestinationWarning>, provider: SyncProvider, evidence: String| {
+        if !seen.contains(&provider) {
+            seen.push(provider);
+            out.push(DestinationWarning::SyncFolder { provider, evidence });
+        }
+    };
+
+    for (provider, sync_root) in &env.sync_roots {
+        if is_same_or_under(root, sync_root) {
+            let evidence = format!("it is inside {}", display_path(sync_root));
+            sync(&mut out, *provider, evidence);
+        }
+    }
+    let mut dir = Some(root);
+    while let Some(d) = dir {
+        if let Some(ceiling) = &env.ceiling {
+            if !is_same_or_under(d, ceiling) {
+                break;
+            }
+        }
+        for (provider, marker) in SYNC_MARKERS {
+            let mut path = d.to_path_buf();
+            for part in marker.split('/') {
+                path.push(part);
+            }
+            if std::fs::symlink_metadata(&path).is_ok() {
+                let evidence = format!("{marker} exists in {}", display_path(d));
+                sync(&mut out, *provider, evidence);
+            }
+        }
+        if let Some(evidence) = sys::cloud_evidence(d) {
+            let evidence = format!("{} has {evidence}", display_path(d));
+            sync(&mut out, SyncProvider::CloudFiles, evidence);
+        }
+        dir = d.parent();
+    }
+
+    for (kind, folder) in &env.managed {
+        if is_same_or_under(root, folder) {
+            out.push(DestinationWarning::ManagedFolder {
+                kind: *kind,
+                folder: folder.clone(),
+            });
+            break;
+        }
+    }
+    let in_bin = folded_components(root)
+        .iter()
+        .any(|part| part == "$recycle.bin" || part == "recycler");
+    if in_bin {
+        out.push(DestinationWarning::ManagedFolder {
+            kind: ManagedFolder::RecycleBin,
+            folder: root.to_path_buf(),
+        });
+    }
+    out
+}
+
+/// Who else may write to the folder, as a warning (or nothing).
+fn access_warning(root: &Path) -> Option<DestinationWarning> {
+    match sys::other_writers(root) {
+        Ok(principals) if principals.is_empty() => None,
+        Ok(principals) => Some(DestinationWarning::WritableByOthers { principals }),
+        Err(e) => Some(DestinationWarning::AccessListUnreadable(e.to_string())),
+    }
+}
+
+/// The volume's verdict, narrowed by what is known about the folder.
+fn narrow(volume_verdict: FinalMoveSupport, warnings: &[DestinationWarning]) -> FinalMoveSupport {
+    if volume_verdict != FinalMoveSupport::Supported {
+        return volume_verdict;
+    }
+    for warning in warnings {
+        match warning {
+            DestinationWarning::SyncFolder { provider, .. } => {
+                return FinalMoveSupport::CopyOnly(CopyOnlyReason::SyncFolder(*provider))
+            }
+            DestinationWarning::ManagedFolder { kind, .. } => {
+                return FinalMoveSupport::CopyOnly(CopyOnlyReason::ManagedFolder(*kind))
+            }
+            _ => {}
+        }
+    }
+    FinalMoveSupport::Supported
 }
 
 impl fmt::Display for CopyOnlyReason {
@@ -137,6 +414,14 @@ impl fmt::Display for CopyOnlyReason {
             Self::PlatformUnsupported => {
                 f.write_str("volume classification is only implemented on Windows")
             }
+            Self::SyncFolder(provider) => write!(
+                f,
+                "the destination is inside a folder synced by {provider:?}"
+            ),
+            Self::ManagedFolder(kind) => write!(
+                f,
+                "the destination is inside a folder the system empties by itself ({kind:?})"
+            ),
         }
     }
 }
@@ -264,6 +549,10 @@ pub struct Destination {
     volume: VolumeInfo,
     class: VolumeClass,
     final_move: FinalMoveSupport,
+    warnings: Vec<DestinationWarning>,
+    env: HazardEnv,
+    /// The volume facts were supplied by a test and are not re-read.
+    volume_forced: bool,
 }
 
 impl Destination {
@@ -296,23 +585,50 @@ impl Destination {
             path: resolved.clone(),
             source,
         })?;
-        let (class, final_move) = classify(&volume);
+        let (class, volume_verdict) = classify(&volume);
+        let env = HazardEnv::from_system();
+        let mut warnings = detect_hazards(&resolved, &env);
+        if env.check_access {
+            warnings.extend(access_warning(&resolved));
+        }
         Ok(Destination {
+            final_move: narrow(volume_verdict, &warnings),
             root: resolved,
             volume,
             class,
-            final_move,
+            warnings,
+            env,
+            volume_forced: false,
         })
     }
 
     /// Replaces what the platform said about the volume. Test builds only.
     #[cfg(any(test, feature = "test-util"))]
     pub fn with_volume_for_testing(mut self, volume: VolumeInfo) -> Destination {
-        let (class, final_move) = classify(&volume);
+        let (class, volume_verdict) = classify(&volume);
         self.volume = volume;
         self.class = class;
-        self.final_move = final_move;
+        self.final_move = narrow(volume_verdict, &self.warnings);
+        self.volume_forced = true;
         self
+    }
+
+    /// Replaces where the dangerous folders are looked for, and looks again.
+    pub(crate) fn with_hazard_env(mut self, env: HazardEnv) -> Destination {
+        let mut warnings = detect_hazards(&self.root, &env);
+        if env.check_access {
+            warnings.extend(access_warning(&self.root));
+        }
+        self.final_move = narrow(classify(&self.volume).1, &warnings);
+        self.warnings = warnings;
+        self.env = env;
+        self
+    }
+
+    /// What the user should be told about this folder: it is cloud-synced, it
+    /// is emptied by the system, or other accounts may write to it.
+    pub fn warnings(&self) -> &[DestinationWarning] {
+        &self.warnings
     }
 
     /// The resolved root. On Windows this is a verbatim (`\\?\`) path, which
@@ -364,16 +680,39 @@ impl Destination {
         if !meta.is_dir() || sys::is_reparse(&meta) {
             return Err(DestinationError::NotADirectory(self.root.clone()));
         }
-        let volume = sys::probe_volume(&self.root).map_err(|source| DestinationError::Probe {
-            path: self.root.clone(),
-            source,
-        })?;
-        let (class, final_move) = classify(&volume);
+        let volume = if self.volume_forced {
+            self.volume.clone()
+        } else {
+            sys::probe_volume(&self.root).map_err(|source| DestinationError::Probe {
+                path: self.root.clone(),
+                source,
+            })?
+        };
+        let (class, volume_verdict) = classify(&volume);
+        // The folder is looked at again as well: a sync program may have been
+        // pointed at it since. The access list is not read again; who may
+        // write is a note for the user, not part of the verdict.
+        let mut warnings = detect_hazards(&self.root, &self.env);
+        warnings.extend(
+            self.warnings
+                .iter()
+                .filter(|w| {
+                    matches!(
+                        w,
+                        DestinationWarning::WritableByOthers { .. }
+                            | DestinationWarning::AccessListUnreadable(_)
+                    )
+                })
+                .cloned(),
+        );
         Ok(Destination {
             root: self.root.clone(),
+            final_move: narrow(volume_verdict, &warnings),
             volume,
             class,
-            final_move,
+            warnings,
+            env: self.env.clone(),
+            volume_forced: self.volume_forced,
         })
     }
 }

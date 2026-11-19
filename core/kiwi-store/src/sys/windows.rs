@@ -8,14 +8,24 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::time::Duration;
 
-use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
-    GetVolumePathNameW, MoveFileExW, SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN,
-    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_NO_BUFFERING,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
+use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
 };
+use windows_sys::Win32::Security::{
+    GetAce, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+    DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FindClose, FindFirstFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
+    GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, MoveFileExW, SetFileAttributesW,
+    FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+    FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_NO_BUFFERING, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    MOVEFILE_WRITE_THROUGH, WIN32_FIND_DATAW,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
 use crate::destination::{BusKind, DriveKind, VolumeInfo};
@@ -318,6 +328,206 @@ pub(crate) fn is_offline(meta: &Metadata) -> bool {
         != 0
 }
 
+const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
+const FILE_ATTRIBUTE_UNPINNED: u32 = 0x0010_0000;
+
+/// Signs that a directory is managed by a cloud-files provider (OneDrive
+/// Files On-Demand and the like): placeholder attributes, or a reparse tag
+/// from the cloud-files range.
+pub(crate) fn cloud_evidence(dir: &Path) -> Option<String> {
+    let attrs = std::fs::symlink_metadata(dir).ok()?.file_attributes();
+    let placeholder = FILE_ATTRIBUTE_OFFLINE
+        | FILE_ATTRIBUTE_RECALL_ON_OPEN
+        | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+        | FILE_ATTRIBUTE_PINNED
+        | FILE_ATTRIBUTE_UNPINNED;
+    if attrs & placeholder != 0 {
+        return Some(format!(
+            "cloud placeholder attributes (0x{:x})",
+            attrs & placeholder
+        ));
+    }
+    if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        let tag = reparse_tag(dir)?;
+        // IO_REPARSE_TAG_CLOUD and IO_REPARSE_TAG_CLOUD_1 .. _F.
+        if tag & 0xFFFF_0FFF == 0x9000_001A {
+            return Some(format!("a cloud-files reparse tag (0x{tag:08x})"));
+        }
+    }
+    None
+}
+
+/// The reparse tag of a path that is a reparse point.
+fn reparse_tag(path: &Path) -> Option<u32> {
+    let w = wide(path).ok()?;
+    // SAFETY: WIN32_FIND_DATAW is plain data; all-zero is a valid value.
+    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    // SAFETY: `w` is NUL-terminated and `data` is a valid out-pointer.
+    let handle = unsafe { FindFirstFileW(w.as_ptr(), &mut data) };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: the handle came from FindFirstFileW just above.
+    unsafe { FindClose(handle) };
+    (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(data.dwReserved0)
+}
+
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const INHERIT_ONLY_ACE: u8 = 0x08;
+/// Rights that let their holder change or remove what is in a folder:
+/// FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_DELETE_CHILD, DELETE,
+/// WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE.
+const WRITE_RIGHTS: u32 =
+    0x2 | 0x4 | 0x40 | 0x0001_0000 | 0x0004_0000 | 0x0008_0000 | 0x1000_0000 | 0x4000_0000;
+
+/// Accounts that are expected to have full access: SYSTEM, the
+/// Administrators group, CREATOR OWNER, OWNER RIGHTS and TrustedInstaller.
+const TRUSTED_SIDS: &[&str] = &[
+    "S-1-5-18",
+    "S-1-5-32-544",
+    "S-1-3-0",
+    "S-1-3-4",
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+];
+
+fn sid_to_string(sid: PSID) -> io::Result<String> {
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `sid` points at a valid SID; `text` receives a LocalAlloc'ed string.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: on success `text` is a NUL-terminated string that we own.
+    let out = unsafe {
+        let mut len = 0;
+        while *text.add(len) != 0 {
+            len += 1;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+        LocalFree(text.cast());
+        s
+    };
+    Ok(out)
+}
+
+fn current_user_sid() -> io::Result<String> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo-handle is always valid; `token` is a valid out-pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // TOKEN_USER followed by the SID it points at; 8-byte aligned storage.
+    let mut buf = [0u64; 32];
+    let mut returned = 0u32;
+    // SAFETY: the buffer is valid for its stated size; the token is open.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buf) as u32,
+            &mut returned,
+        )
+    };
+    let err = io::Error::last_os_error();
+    // SAFETY: the token handle is open and owned here.
+    unsafe { CloseHandle(token) };
+    if ok == 0 {
+        return Err(err);
+    }
+    // SAFETY: on success the buffer starts with a TOKEN_USER whose SID
+    // pointer points into the same buffer.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    sid_to_string(sid)
+}
+
+fn describe_sid(sid: &str) -> String {
+    let name = match sid {
+        "S-1-1-0" => "Everyone",
+        "S-1-5-11" => "Authenticated Users",
+        "S-1-5-32-545" => "Users",
+        "S-1-5-32-546" => "Guests",
+        "S-1-5-4" => "Interactive users",
+        "S-1-5-7" => "Anonymous",
+        _ => return sid.to_owned(),
+    };
+    format!("{name} ({sid})")
+}
+
+/// Who besides the current user, the system and the administrators may write
+/// to (or delete from) `path`, according to its access control list. Deny
+/// entries are not evaluated: an account listed here may still be denied,
+/// never the other way round.
+pub(crate) fn other_writers(path: &Path) -> io::Result<Vec<String>> {
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            // SAFETY: the descriptor was allocated by GetNamedSecurityInfoW.
+            unsafe { LocalFree(self.0.cast()) };
+        }
+    }
+
+    let w = wide(path)?;
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `w` is NUL-terminated; the out-pointers are valid; the others may be null.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            w.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc as i32));
+    }
+    let _descriptor = Descriptor(descriptor);
+    if dacl.is_null() {
+        return Ok(vec![
+            "Everyone (the folder has no access list at all)".to_owned()
+        ]);
+    }
+    let me = current_user_sid()?;
+    let mut out = Vec::new();
+    // SAFETY: `dacl` points into the descriptor, which lives until the end of this function.
+    let count = unsafe { (*dacl).AceCount };
+    for index in 0..u32::from(count) {
+        let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: `dacl` is valid and `ace` is a valid out-pointer.
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+            continue;
+        }
+        // SAFETY: every ACE starts with an ACE_HEADER.
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE || header.AceFlags & INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
+        // SAFETY: an ACE of this type is an ACCESS_ALLOWED_ACE.
+        let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+        if allowed.Mask & WRITE_RIGHTS == 0 {
+            continue;
+        }
+        // The SID starts where the `SidStart` field is.
+        let sid: PSID = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+        let text = sid_to_string(sid)?;
+        if text != me && !TRUSTED_SIDS.contains(&text.as_str()) {
+            out.push(describe_sid(&text));
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// True for files carrying the hidden or the system attribute.
+pub(crate) fn is_hidden(meta: &Metadata) -> bool {
+    meta.file_attributes() & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0
+}
+
 /// Creates a new file for writing; fails if the name exists.
 pub(crate) fn create_temp(path: &Path) -> io::Result<File> {
     // Others may read (antivirus, indexer) but not write or delete while the
@@ -403,6 +613,46 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
             return Err(err);
         }
         std::thread::sleep(Duration::from_millis(40 * attempt));
+    }
+}
+
+/// Flushes a file under its present name (`FlushFileBuffers`). On NTFS and
+/// ReFS this forces the log to disk, and with it the rename that gave the
+/// file this name: `MOVEFILE_WRITE_THROUGH` promises that only for a move
+/// done as copy and delete, not for a rename within a volume.
+pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        // Write access is what FlushFileBuffers asks for; nothing is written.
+        let opened = OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path);
+        match opened {
+            Ok(file) => {
+                let meta = file.metadata()?;
+                if is_reparse(&meta) || !meta.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "not a regular file",
+                    ));
+                }
+                return file.sync_all();
+            }
+            Err(err) => {
+                // A scanner or indexer may briefly hold the freshly renamed file.
+                let transient = matches!(
+                    err.raw_os_error(),
+                    Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+                );
+                attempt += 1;
+                if !transient || attempt >= 6 {
+                    return Err(err);
+                }
+                std::thread::sleep(Duration::from_millis(40 * attempt));
+            }
+        }
     }
 }
 

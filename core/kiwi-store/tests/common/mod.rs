@@ -5,14 +5,15 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use kiwi_store::destination::{BusKind, DriveKind};
 use kiwi_store::testing::{FaultFs, ManualClock};
 use kiwi_store::{
-    CommitReceipt, ContentHash, DeviceId, DeviceLimits, FileRequest, Seams, Store, StoreConfig,
-    StoreError, VolumeInfo, STORE_DIR, TEMP_PREFIX,
+    CommitReceipt, ContentHash, DeviceId, DeviceLimits, FileRequest, HazardEnv, Seams, Store,
+    StoreConfig, StoreError, VolumeInfo, STORE_DIR, TEMP_PREFIX,
 };
 
 /// 2027-01-15T08:00:00Z, in milliseconds.
@@ -30,6 +31,12 @@ pub struct World {
     pub clock: Arc<ManualClock>,
     pub volume: Option<VolumeInfo>,
     pub configure: fn(&mut StoreConfig),
+    /// Where sync folders and system-managed folders are looked for. By
+    /// default: nowhere above the test's own directory, so the machine the
+    /// tests run on cannot change their outcome.
+    pub hazards: HazardEnv,
+    /// Volume serial numbers of the stand-in disks (see [`World::disk`]).
+    pub serials: Arc<Mutex<HashMap<PathBuf, u64>>>,
 }
 
 fn no_change(_: &mut StoreConfig) {}
@@ -57,12 +64,37 @@ impl World {
             root: std::fs::canonicalize(&root).unwrap(),
             ledger_dir,
             outside: std::fs::canonicalize(&outside).unwrap(),
-            base,
             fs: FaultFs::new(),
             clock: ManualClock::new(T0),
             volume: Some(fixed_ntfs()),
             configure: no_change,
+            hazards: HazardEnv {
+                ceiling: Some(std::fs::canonicalize(&base).unwrap()),
+                ..HazardEnv::default()
+            },
+            serials: Arc::new(Mutex::new(HashMap::new())),
+            base,
         }
+    }
+
+    /// A directory that stands in for a second disk: `<base>/<name>`, with
+    /// its own volume serial number. Created if absent.
+    pub fn disk(&self, name: &str) -> PathBuf {
+        let dir = self.base.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut serials = self.serials.lock().unwrap();
+        let next = 0xD15C_0000 + serials.len() as u64;
+        serials.entry(dir.clone()).or_insert(next);
+        dir
+    }
+
+    /// Pretends the volume behind a stand-in disk was exchanged for another.
+    pub fn set_serial(&self, disk: &Path, serial: u64) {
+        self.serials
+            .lock()
+            .unwrap()
+            .insert(disk.to_path_buf(), serial);
     }
 
     pub fn config(&self) -> StoreConfig {
@@ -77,7 +109,25 @@ impl World {
             fs: Some(Arc::new(self.fs.clone())),
             clock: Some(self.clock.clone()),
             volume: self.volume.clone(),
+            volume_probe: Some(self.volume_probe()),
+            hazards: Some(self.hazards.clone()),
         }
+    }
+
+    /// What the "platform" says about the volume of a mirror: an external
+    /// USB disk whose serial number is the one registered for the stand-in
+    /// disk the path lies on.
+    pub fn volume_probe(&self) -> kiwi_store::VolumeProbe {
+        let serials = Arc::clone(&self.serials);
+        Arc::new(move |path: &Path| {
+            let serials = serials.lock().unwrap();
+            let serial = serials
+                .iter()
+                .find(|(disk, _)| path.starts_with(disk))
+                .map(|(_, serial)| *serial)
+                .unwrap_or(0x0BAD_D15C);
+            Ok(usb_ntfs(serial))
+        })
     }
 
     pub fn try_open(&self) -> Result<Store, StoreError> {
@@ -188,6 +238,20 @@ pub fn fixed_ntfs() -> VolumeInfo {
         hot_plug: Some(false),
         bus: Some(BusKind::Sata),
         volume_root: "test".to_owned(),
+    }
+}
+
+/// What the platform reports for an external USB disk with NTFS.
+pub fn usb_ntfs(serial: u64) -> VolumeInfo {
+    VolumeInfo {
+        drive: DriveKind::Fixed,
+        filesystem: "NTFS".to_owned(),
+        serial: Some(serial),
+        read_only: false,
+        removable_media: Some(false),
+        hot_plug: Some(true),
+        bus: Some(BusKind::Usb),
+        volume_root: "test-usb".to_owned(),
     }
 }
 

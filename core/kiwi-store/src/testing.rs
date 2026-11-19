@@ -44,8 +44,12 @@ pub enum Op {
     ReadVerify,
     /// [`Fs::rename_noreplace`].
     Rename,
+    /// [`Fs::sync_file`].
+    SyncFile,
     /// [`Fs::sync_dir`].
     SyncDir,
+    /// [`Fs::read_small`].
+    ReadSmall,
     /// [`Fs::remove_file`].
     RemoveFile,
     /// [`Fs::checkpoint`].
@@ -92,6 +96,8 @@ impl Action {
 
 #[derive(Default)]
 struct State {
+    /// Directory trees on which every operation fails (an unplugged disk).
+    dead: Vec<(PathBuf, io::ErrorKind)>,
     rules: Vec<(When, Action)>,
     counts: HashMap<Op, usize>,
     global: usize,
@@ -140,6 +146,17 @@ impl FaultFs {
         self.state().rules.clear();
     }
 
+    /// From now on every operation on `tree` or below it fails with `kind`,
+    /// as if the disk holding it had been unplugged.
+    pub fn kill_tree(&self, tree: &Path, kind: io::ErrorKind) {
+        self.state().dead.push((tree.to_path_buf(), kind));
+    }
+
+    /// Undoes every [`FaultFs::kill_tree`].
+    pub fn revive_trees(&self) {
+        self.state().dead.clear();
+    }
+
     /// Resets the operation counters and the log (rules stay).
     pub fn reset_counters(&self) {
         let mut s = self.state();
@@ -179,7 +196,14 @@ impl FaultFs {
     /// Applies the generic part of an action. `Ok(action)` hands back what the
     /// operation itself has to interpret.
     fn before(state: &Mutex<State>, op: Op, path: &Path) -> io::Result<Option<Action>> {
-        match Self::intercept(state, op, path) {
+        let action = Self::intercept(state, op, path);
+        {
+            let s = state.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some((_, kind)) = s.dead.iter().find(|(tree, _)| path.starts_with(tree)) {
+                return Err(io::Error::new(*kind, format!("the disk is gone ({op:?})")));
+            }
+        }
+        match action {
             Some(Action::Fail(kind)) => {
                 Err(io::Error::new(kind, format!("injected fault at {op:?}")))
             }
@@ -276,9 +300,19 @@ impl Fs for FaultFs {
         self.inner.rename_noreplace(from, to)
     }
 
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        Self::before(&self.state, Op::SyncFile, path)?;
+        self.inner.sync_file(path)
+    }
+
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         Self::before(&self.state, Op::SyncDir, dir)?;
         self.inner.sync_dir(dir)
+    }
+
+    fn read_small(&self, path: &Path, max_len: usize) -> io::Result<Vec<u8>> {
+        Self::before(&self.state, Op::ReadSmall, path)?;
+        self.inner.read_small(path, max_len)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -293,23 +327,47 @@ impl Fs for FaultFs {
 }
 
 /// A clock that only moves when told to.
+///
+/// It has two hands. The wall clock can be set to anything. The monotonic
+/// clock follows every forward movement of the wall clock made with
+/// [`ManualClock::set`] or [`ManualClock::advance_ms`] and never runs
+/// backwards; [`ManualClock::jump_wall_ms`] moves the wall clock alone, which
+/// is what a clock that was set ahead by mistake looks like.
 #[derive(Debug, Default)]
-pub struct ManualClock(AtomicI64);
+pub struct ManualClock {
+    wall: AtomicI64,
+    monotonic: AtomicI64,
+}
 
 impl ManualClock {
     /// A clock reading `unix_ms`.
     pub fn new(unix_ms: i64) -> Arc<ManualClock> {
-        Arc::new(ManualClock(AtomicI64::new(unix_ms)))
+        Arc::new(ManualClock {
+            wall: AtomicI64::new(unix_ms),
+            monotonic: AtomicI64::new(0),
+        })
     }
 
-    /// Sets the time.
+    /// Sets the time. Real time passes with it if it moves forward.
     pub fn set(&self, unix_ms: i64) {
-        self.0.store(unix_ms, Ordering::SeqCst);
+        let before = self.wall.swap(unix_ms, Ordering::SeqCst);
+        if unix_ms > before {
+            self.monotonic.fetch_add(unix_ms - before, Ordering::SeqCst);
+        }
     }
 
-    /// Moves the time by `ms` (negative values move it backwards).
+    /// Moves the time by `ms` (negative values move the wall clock backwards;
+    /// real time never runs backwards).
     pub fn advance_ms(&self, ms: i64) {
-        self.0.fetch_add(ms, Ordering::SeqCst);
+        self.wall.fetch_add(ms, Ordering::SeqCst);
+        if ms > 0 {
+            self.monotonic.fetch_add(ms, Ordering::SeqCst);
+        }
+    }
+
+    /// Moves the wall clock by `ms` without any real time passing.
+    pub fn jump_wall_ms(&self, ms: i64) {
+        self.wall.fetch_add(ms, Ordering::SeqCst);
     }
 
     /// Moves the time forward by whole hours.
@@ -320,6 +378,10 @@ impl ManualClock {
 
 impl Clock for ManualClock {
     fn now_unix_ms(&self) -> i64 {
-        self.0.load(Ordering::SeqCst)
+        self.wall.load(Ordering::SeqCst)
+    }
+
+    fn monotonic_ms(&self) -> u64 {
+        u64::try_from(self.monotonic.load(Ordering::SeqCst)).unwrap_or(0)
     }
 }

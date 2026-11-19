@@ -104,6 +104,29 @@ pub(crate) fn is_offline(_meta: &Metadata) -> bool {
     false
 }
 
+/// Unix has no placeholder attributes or reparse tags to look at.
+pub(crate) fn cloud_evidence(_dir: &Path) -> Option<String> {
+    None
+}
+
+/// Who besides the owner may write to `path`, judged by its mode bits.
+pub(crate) fn other_writers(path: &Path) -> io::Result<Vec<String>> {
+    let meta = std::fs::metadata(path)?;
+    let mut out = Vec::new();
+    if meta.mode() & 0o020 != 0 {
+        out.push(format!("group {}", meta.gid()));
+    }
+    if meta.mode() & 0o002 != 0 {
+        out.push("everyone".to_owned());
+    }
+    Ok(out)
+}
+
+/// Unix has no hidden attribute (a leading dot is only a convention).
+pub(crate) fn is_hidden(_meta: &Metadata) -> bool {
+    false
+}
+
 /// Creates a new file for writing; fails if the name exists.
 pub(crate) fn create_temp(path: &Path) -> io::Result<File> {
     OpenOptions::new()
@@ -206,6 +229,21 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     std::fs::hard_link(from, to)?;
     let _ = std::fs::remove_file(from);
     Ok(())
+}
+
+/// Flushes a file's data and metadata to disk.
+pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    file.sync_all()
 }
 
 /// Flushes a directory's entries to disk.

@@ -16,11 +16,19 @@
 //!   the b-tree structure, not the cell contents; this closes that gap.
 //! * Every change appends an event whose `seq` comes from an `AUTOINCREMENT`
 //!   key: strictly increasing, never reused, independent of the clock.
-//! * A session counter is incremented durably on every open.
+//! * A session counter is incremented durably on every open and on every
+//!   explicit new session.
+//! * A commit high-water mark (`commit_hwm`) records the highest commit
+//!   sequence number ever issued; a peer holding a receipt above it proves a
+//!   rollback.
+//! * Records that may be written without an immediate flush (plain copies in a
+//!   batch, mirror bookkeeping, temp-file intents) are written with
+//!   `synchronous=NORMAL`; the next durable write flushes them too.
 //! * `PRAGMA user_version` carries the schema version; migrations run inside
 //!   a transaction; a ledger from a newer build is refused untouched.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -34,12 +42,12 @@ use crate::sanitize::{collision_key, SafeName};
 pub const LEDGER_FILE: &str = "ledger.db";
 
 /// Newest schema version this build reads and writes.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// SQLite `application_id` of a Kiwi Transfer ledger ("KWST").
 const APPLICATION_ID: i64 = 0x4B57_5354;
 
-const MIGRATIONS: &[(u32, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
+const MIGRATIONS: &[(u32, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
 
 const SCHEMA_V1: &str = "
 CREATE TABLE meta (
@@ -118,6 +126,72 @@ CREATE TABLE scan_state (
 );
 ";
 
+const SCHEMA_V3: &str = "
+ALTER TABLE devices ADD COLUMN detached_seq INTEGER;
+ALTER TABLE devices ADD COLUMN commit_hwm INTEGER NOT NULL DEFAULT 0;
+UPDATE devices SET commit_hwm = COALESCE(
+    (SELECT MAX(committed_seq) FROM files WHERE files.device_id = devices.device_id), 0);
+INSERT INTO meta(key, value)
+    SELECT 'commit_hwm', CAST(COALESCE(MAX(committed_seq), 0) AS TEXT) FROM files;
+
+CREATE TABLE file_refs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id           INTEGER NOT NULL REFERENCES files(id),
+    device_id         TEXT NOT NULL REFERENCES devices(device_id),
+    source_name       TEXT NOT NULL,
+    committed_seq     INTEGER NOT NULL,
+    committed_session INTEGER NOT NULL,
+    committed_unix_ms INTEGER NOT NULL,
+    row_check         BLOB NOT NULL CHECK (length(row_check) = 32),
+    UNIQUE (file_id, device_id)
+);
+CREATE INDEX file_refs_by_device ON file_refs(device_id);
+
+CREATE TABLE partials (
+    location        INTEGER NOT NULL,
+    path_key        TEXT NOT NULL,
+    rel_path        TEXT NOT NULL,
+    created_session INTEGER NOT NULL,
+    created_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY (location, path_key)
+) WITHOUT ROWID;
+
+CREATE TABLE mirrors (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid               TEXT NOT NULL UNIQUE,
+    root              TEXT NOT NULL,
+    label             TEXT NOT NULL,
+    volume_serial     TEXT,
+    active            INTEGER NOT NULL,
+    added_seq         INTEGER NOT NULL,
+    removed_seq       INTEGER,
+    last_seen_seq     INTEGER NOT NULL,
+    last_seen_session INTEGER NOT NULL,
+    last_seen_unix_ms INTEGER NOT NULL,
+    io_errors         INTEGER NOT NULL DEFAULT 0,
+    mismatches        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE mirror_files (
+    mirror_id        INTEGER NOT NULL REFERENCES mirrors(id),
+    file_id          INTEGER NOT NULL REFERENCES files(id),
+    rel_path         TEXT NOT NULL,
+    state            INTEGER NOT NULL CHECK (state IN (1, 2, 3)),
+    copied_seq       INTEGER NOT NULL,
+    verified_seq     INTEGER NOT NULL,
+    verified_unix_ms INTEGER NOT NULL,
+    unbuffered       INTEGER NOT NULL,
+    PRIMARY KEY (mirror_id, file_id)
+) WITHOUT ROWID;
+CREATE INDEX mirror_files_by_file ON mirror_files(file_id);
+
+CREATE TABLE mirror_scan_state (
+    mirror_id INTEGER PRIMARY KEY REFERENCES mirrors(id),
+    upper_id  INTEGER NOT NULL,
+    cursor_id INTEGER NOT NULL
+);
+";
+
 const EXPECTED_TABLES: &[&str] = &[
     "meta",
     "sessions",
@@ -125,7 +199,15 @@ const EXPECTED_TABLES: &[&str] = &[
     "devices",
     "files",
     "scan_state",
+    "file_refs",
+    "partials",
+    "mirrors",
+    "mirror_files",
+    "mirror_scan_state",
 ];
+
+const DEVICE_COLUMNS: &str = "device_id, display_name, folder_name, max_bytes, max_files, \
+     max_file_bytes, used_bytes, used_files, detached_seq, commit_hwm";
 
 const FILE_COLUMNS: &str =
     "id, device_id, rel_path, hash, size, mtime_unix_ns, source_name, state, \
@@ -229,6 +311,12 @@ pub struct DeviceRecord {
     pub used_bytes: u64,
     /// Files currently counted against the device.
     pub used_files: u64,
+    /// The device was unpaired. Its records and files are kept, scanned and
+    /// mirrored like any others; it only cannot receive or confirm anything
+    /// until it is registered again.
+    pub detached: bool,
+    /// Highest commit sequence number ever issued to this device.
+    pub commit_hwm: u64,
 }
 
 /// Why final move is blocked.
@@ -246,6 +334,12 @@ pub enum BlockKind {
     MarkerMissing,
     /// Blocked by an explicit call.
     Manual,
+    /// A peer holds a receipt the ledger does not know: the ledger was rolled
+    /// back (restored from a backup or a system image).
+    LedgerRollback,
+    /// A disk (the destination or a mirror) returned I/O errors or many
+    /// mismatching files.
+    DiskFailing,
 }
 
 impl BlockKind {
@@ -257,6 +351,8 @@ impl BlockKind {
             BlockKind::LedgerLost => "ledger_lost",
             BlockKind::MarkerMissing => "marker_missing",
             BlockKind::Manual => "manual",
+            BlockKind::LedgerRollback => "ledger_rollback",
+            BlockKind::DiskFailing => "disk_failing",
         }
     }
 
@@ -268,6 +364,8 @@ impl BlockKind {
             "ledger_lost" => BlockKind::LedgerLost,
             "marker_missing" => BlockKind::MarkerMissing,
             "manual" => BlockKind::Manual,
+            "ledger_rollback" => BlockKind::LedgerRollback,
+            "disk_failing" => BlockKind::DiskFailing,
             _ => return None,
         })
     }
@@ -278,8 +376,9 @@ impl BlockKind {
             BlockKind::IntegrityProblems
             | BlockKind::LedgerReset
             | BlockKind::LedgerLost
-            | BlockKind::MarkerMissing => 2,
-            BlockKind::MassChange => 3,
+            | BlockKind::MarkerMissing
+            | BlockKind::DiskFailing => 2,
+            BlockKind::MassChange | BlockKind::LedgerRollback => 3,
         }
     }
 }
@@ -348,6 +447,12 @@ pub(crate) struct NewFile<'a> {
     pub verified_unbuffered: bool,
     /// The file was already on disk with identical content and is being adopted.
     pub adopted: bool,
+    /// Relative path of the temp file this commit came from; its intent row
+    /// is removed in the same transaction.
+    pub partial: Option<&'a str>,
+    /// Flush the record to the device before returning. `false` is for plain
+    /// copies in a batch: the record becomes durable with the next flush.
+    pub durable: bool,
 }
 
 /// Progress of a resumable integrity scan.
@@ -370,11 +475,25 @@ pub(crate) struct ScanState {
 pub(crate) struct Ledger {
     conn: Mutex<Connection>,
     path: PathBuf,
-    session: u64,
-    session_start_seq: u64,
+    /// Written only while `conn` is locked, so a row and the session it
+    /// carries always agree.
+    session: AtomicU64,
+    session_start_seq: AtomicU64,
+    /// Commit records written without a flush since the last durable write.
+    pending_batched: AtomicU64,
+    /// `synchronous=FULL` could not be restored after a relaxed write. Every
+    /// later write is refused: "durable" would no longer mean anything.
+    sync_broken: AtomicBool,
     #[cfg(test)]
     fresh: bool,
 }
+
+mod claims;
+mod mirror;
+
+pub(crate) use claims::Restored;
+pub(crate) use mirror::{MirrorCopy, MirrorFileRow, NewMirror};
+pub use mirror::{MirrorFileState, MirrorRecord};
 
 type Result<T> = std::result::Result<T, LedgerError>;
 
@@ -390,7 +509,7 @@ impl Ledger {
     /// Opens the ledger and starts a session in one step.
     #[cfg(test)]
     pub(crate) fn open(dir: &Path, now_ms: i64) -> Result<Ledger> {
-        let mut ledger = Ledger::open_unstarted(dir)?;
+        let ledger = Ledger::open_unstarted(dir)?;
         ledger.start_session(now_ms)?;
         Ok(ledger)
     }
@@ -494,51 +613,57 @@ impl Ledger {
         Ok(Ledger {
             conn: Mutex::new(conn),
             path,
-            session: 0,
-            session_start_seq: 0,
+            session: AtomicU64::new(0),
+            session_start_seq: AtomicU64::new(0),
+            pending_batched: AtomicU64::new(0),
+            sync_broken: AtomicBool::new(false),
             #[cfg(test)]
             fresh,
         })
     }
 
-    /// Starts this open's session: bumps the counter and logs it, durably.
-    /// Must be called exactly once, before anything is written.
-    pub(crate) fn start_session(&mut self, now_ms: i64) -> Result<()> {
-        debug_assert_eq!(self.session, 0, "a session is started once");
-        let path = self.path.clone();
-        let map = |e: rusqlite::Error| map_sqlite(&path, e);
-        let conn = self
-            .conn
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let tx = conn.transaction().map_err(map)?;
-        let previous = match meta_get(&tx, "session_counter").map_err(map)? {
+    /// Starts a session: bumps the counter and logs it, durably. Called once
+    /// when the store is opened and again for every explicit new session.
+    /// Returns the new session number.
+    ///
+    /// Being a flushed write, it also makes every batched record durable.
+    pub(crate) fn start_session(&self, now_ms: i64) -> Result<u64> {
+        let mut conn = self.lock();
+        self.check_sync()?;
+        let tx = conn.transaction().map_err(|e| self.map(e))?;
+        let previous = match meta_get(&tx, "session_counter").map_err(|e| self.map(e))? {
             None => 0,
-            Some(text) => text.parse::<u64>().map_err(|_| LedgerError::Corrupt {
-                path: path.clone(),
-                detail: format!("the session counter is not a number ({text:?})"),
+            Some(text) => text.parse::<u64>().map_err(|_| {
+                self.corrupt(format!("the session counter is not a number ({text:?})"))
             })?,
         };
-        let session = previous + 1;
-        meta_set(&tx, "session_counter", &session.to_string()).map_err(map)?;
-        let seq =
-            append_event(&tx, session, now_ms, "session_start", None, None, None).map_err(map)?;
+        // The counter in the file is the authority, but it must never fall
+        // behind what this process has already handed out.
+        let session = previous.max(self.session.load(Ordering::SeqCst)) + 1;
+        meta_set(&tx, "session_counter", &session.to_string()).map_err(|e| self.map(e))?;
+        let seq = append_event(&tx, session, now_ms, "session_start", None, None, None)
+            .map_err(|e| self.map(e))?;
         tx.execute(
             "INSERT INTO sessions(session, started_seq, started_unix_ms) VALUES (?1, ?2, ?3)",
             params![to_i64(session), to_i64(seq), now_ms],
         )
-        .map_err(map)?;
+        .map_err(|e| self.map(e))?;
         // Usage counters are derived data; recompute them so they can never drift.
         tx.execute_batch(
             "UPDATE devices SET
-                 used_bytes = (SELECT COALESCE(SUM(size), 0) FROM files WHERE files.device_id = devices.device_id AND state <> 2),
-                 used_files = (SELECT COUNT(*) FROM files WHERE files.device_id = devices.device_id AND state <> 2);",
+                 used_bytes = (SELECT COALESCE(SUM(size), 0) FROM files WHERE files.device_id = devices.device_id AND state <> 2)
+                            + (SELECT COALESCE(SUM(f.size), 0) FROM file_refs r JOIN files f ON f.id = r.file_id
+                               WHERE r.device_id = devices.device_id AND f.state <> 2),
+                 used_files = (SELECT COUNT(*) FROM files WHERE files.device_id = devices.device_id AND state <> 2)
+                            + (SELECT COUNT(*) FROM file_refs r JOIN files f ON f.id = r.file_id
+                               WHERE r.device_id = devices.device_id AND f.state <> 2);",
         )
-        .map_err(map)?;
-        tx.commit().map_err(map)?;
-        self.session = session;
-        self.session_start_seq = seq;
-        Ok(())
+        .map_err(|e| self.map(e))?;
+        tx.commit().map_err(|e| self.map(e))?;
+        self.session.store(session, Ordering::SeqCst);
+        self.session_start_seq.store(seq, Ordering::SeqCst);
+        self.pending_batched.store(0, Ordering::SeqCst);
+        Ok(session)
     }
 
     /// Moves a damaged ledger (and its journal files) aside so a fresh one
@@ -597,12 +722,109 @@ impl Ledger {
 
     /// This open's session number (1 for the first open of a new ledger).
     pub(crate) fn session(&self) -> u64 {
-        self.session
+        self.session.load(Ordering::SeqCst)
     }
 
     /// Sequence number of this session's start event.
     pub(crate) fn session_start_seq(&self) -> u64 {
-        self.session_start_seq
+        self.session_start_seq.load(Ordering::SeqCst)
+    }
+
+    /// Refuses to write once the flush setting could not be restored.
+    fn check_sync(&self) -> Result<()> {
+        if self.sync_broken.load(Ordering::SeqCst) {
+            return Err(LedgerError::Database {
+                message: "the ledger could not be switched back to flushed writes".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Runs `body` in a transaction that is committed **without** a flush
+    /// (`synchronous=NORMAL`). The write is atomic and ordered like any
+    /// other, but a power loss may undo it together with everything after it;
+    /// the next flushed write makes it durable. Used only for records whose
+    /// loss costs work, never safety.
+    fn relaxed<T>(
+        &self,
+        conn: &mut Connection,
+        body: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.check_sync()?;
+        conn.execute_batch("PRAGMA synchronous=NORMAL")
+            .map_err(|e| self.map(e))?;
+        let outcome = (|| {
+            let tx = conn.transaction().map_err(|e| self.map(e))?;
+            let value = body(&tx)?;
+            tx.commit().map_err(|e| self.map(e))?;
+            Ok(value)
+        })();
+        let restored = conn
+            .execute_batch("PRAGMA synchronous=FULL")
+            .and_then(|()| conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0)));
+        if !matches!(restored, Ok(2)) {
+            self.sync_broken.store(true, Ordering::SeqCst);
+            return Err(LedgerError::Database {
+                message: "the ledger could not be switched back to flushed writes".to_owned(),
+            });
+        }
+        outcome
+    }
+
+    /// Runs `body` in a transaction that is flushed to the device when it
+    /// commits, or in a relaxed one (see [`Ledger::relaxed`]).
+    fn write<T>(
+        &self,
+        durable: bool,
+        body: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let mut conn = self.lock();
+        if durable {
+            self.check_sync()?;
+            let tx = conn.transaction().map_err(|e| self.map(e))?;
+            let value = body(&tx)?;
+            tx.commit().map_err(|e| self.map(e))?;
+            Ok(value)
+        } else {
+            self.relaxed(&mut conn, body)
+        }
+    }
+
+    /// Commit records written without a flush since the last flush.
+    pub(crate) fn pending_batched(&self) -> u64 {
+        self.pending_batched.load(Ordering::SeqCst)
+    }
+
+    /// Makes everything written so far durable. Returns the commit
+    /// high-water mark, which is durable when this returns.
+    pub(crate) fn flush(&self, now_ms: i64) -> Result<u64> {
+        let mut conn = self.lock();
+        self.check_sync()?;
+        let pending = self.pending_batched.load(Ordering::SeqCst);
+        let tx = conn.transaction().map_err(|e| self.map(e))?;
+        // A flushed commit syncs the whole write-ahead log, and with it every
+        // relaxed transaction before it. The event is what there is to commit.
+        let detail = format!("{pending} batched records");
+        append_event(
+            &tx,
+            self.session(),
+            now_ms,
+            "ledger_flushed",
+            None,
+            None,
+            Some(&detail),
+        )
+        .map_err(|e| self.map(e))?;
+        let hwm = read_hwm(&tx).map_err(|e| self.map(e))?;
+        tx.commit().map_err(|e| self.map(e))?;
+        self.pending_batched.store(0, Ordering::SeqCst);
+        Ok(hwm)
+    }
+
+    /// The highest commit sequence number ever issued by this ledger.
+    pub(crate) fn commit_hwm(&self) -> Result<u64> {
+        let conn = self.lock();
+        read_hwm(&conn).map_err(|e| self.map(e))
     }
 
     /// True if the database had no schema before this open.
@@ -622,7 +844,7 @@ impl Ledger {
         meta_set(&tx, "destination_id", id).map_err(|e| self.map(e))?;
         append_event(
             &tx,
-            self.session,
+            self.session(),
             now_ms,
             "destination_bound",
             None,
@@ -644,7 +866,7 @@ impl Ledger {
     ) -> Result<u64> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(|e| self.map(e))?;
-        let seq = append_event(&tx, self.session, now_ms, kind, device, file_id, detail)
+        let seq = append_event(&tx, self.session(), now_ms, kind, device, file_id, detail)
             .map_err(|e| self.map(e))?;
         tx.commit().map_err(|e| self.map(e))?;
         Ok(seq)
@@ -682,7 +904,7 @@ impl Ledger {
         let detail = format!("{note} ({} files re-stamped)", future.len());
         let seq = append_event(
             &tx,
-            self.session,
+            self.session(),
             now_ms,
             "clock_acknowledged",
             None,
@@ -697,17 +919,27 @@ impl Ledger {
                 &rec.hash,
                 rec.size,
                 seq,
-                self.session,
+                self.session(),
                 now_ms,
             );
             tx.execute(
                 "UPDATE files SET committed_seq = ?2, committed_session = ?3, committed_unix_ms = ?4, row_check = ?5 WHERE id = ?1",
-                params![rec.id, to_i64(seq), to_i64(self.session), now_ms, check.as_slice()],
+                params![rec.id, to_i64(seq), to_i64(self.session()), now_ms, check.as_slice()],
             )
             .map_err(|e| self.map(e))?;
         }
+        // The same for other devices' claims on shared files.
+        let restamped_refs = claims::restamp_refs(
+            &tx,
+            "r.committed_unix_ms > ?1",
+            &[&now_ms],
+            seq,
+            self.session(),
+            now_ms,
+        )
+        .map_err(|e| self.map(e))?;
         tx.commit().map_err(|e| self.map(e))?;
-        Ok(future.len() as u64)
+        Ok(future.len() as u64 + restamped_refs)
     }
 
     // ----- devices -------------------------------------------------------
@@ -740,16 +972,27 @@ impl Ledger {
             limits.max_file_bytes.map(to_i64),
         );
         if exists {
+            let was_detached: bool = tx
+                .query_row(
+                    "SELECT detached_seq IS NOT NULL FROM devices WHERE device_id = ?1",
+                    [device_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| self.map(e))?;
             tx.execute(
-                "UPDATE devices SET display_name = ?2, max_bytes = ?3, max_files = ?4, max_file_bytes = ?5 WHERE device_id = ?1",
+                "UPDATE devices SET display_name = ?2, max_bytes = ?3, max_files = ?4, max_file_bytes = ?5, detached_seq = NULL WHERE device_id = ?1",
                 params![device_id, display_name, max_bytes, max_files, max_file_bytes],
             )
             .map_err(|e| self.map(e))?;
             append_event(
                 &tx,
-                self.session,
+                self.session(),
                 now_ms,
-                "device_updated",
+                if was_detached {
+                    "device_reattached"
+                } else {
+                    "device_updated"
+                },
                 Some(device_id),
                 None,
                 None,
@@ -775,7 +1018,7 @@ impl Ledger {
             };
             let seq = append_event(
                 &tx,
-                self.session,
+                self.session(),
                 now_ms,
                 "device_registered",
                 Some(device_id),
@@ -812,10 +1055,9 @@ impl Ledger {
     pub(crate) fn devices(&self) -> Result<Vec<DeviceRecord>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare(
-                "SELECT device_id, display_name, folder_name, max_bytes, max_files, max_file_bytes, used_bytes, used_files
-                 FROM devices ORDER BY device_id",
-            )
+            .prepare(&format!(
+                "SELECT {DEVICE_COLUMNS} FROM devices ORDER BY device_id"
+            ))
             .map_err(|e| self.map(e))?;
         let rows = stmt
             .query_map([], device_from_row)
@@ -831,85 +1073,74 @@ impl Ledger {
     /// file it described is gone: the no-replace rename could not otherwise
     /// have succeeded).
     pub(crate) fn record_commit(&self, new: &NewFile<'_>, now_ms: i64) -> Result<FileRecord> {
-        let mut conn = self.lock();
-        let tx = conn.transaction().map_err(|e| self.map(e))?;
-
-        let stale: Option<(i64, String, i64, i64, Vec<u8>)> = tx
-            .query_row(
-                "SELECT id, device_id, state, size, hash FROM files WHERE path_key = ?1",
-                [new.path_key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()
-            .map_err(|e| self.map(e))?;
-        if let Some((old_id, old_device, old_state, old_size, old_hash)) = stale {
-            let detail = format!("replaced by a new commit; old hash {}", hex(&old_hash));
-            append_event(
-                &tx,
-                self.session,
-                now_ms,
-                "record_superseded",
-                Some(&old_device),
-                Some(old_id),
-                Some(&detail),
-            )
-            .map_err(|e| self.map(e))?;
-            if FileState::from_code(old_state).is_some_and(FileState::occupies_space) {
-                adjust_usage(&tx, &old_device, -old_size, -1).map_err(|e| self.map(e))?;
-            }
-            tx.execute("DELETE FROM files WHERE id = ?1", [old_id])
+        let session = self.session();
+        let (id, seq) = self.write(new.durable, |tx| {
+            // A stale row for the same path describes a file that is gone
+            // (the no-replace rename could not have succeeded otherwise).
+            claims::supersede_stale(tx, session, now_ms, new.path_key, None)
                 .map_err(|e| self.map(e))?;
-        }
 
-        let kind = if new.adopted { "adopt" } else { "commit" };
-        let seq = append_event(
-            &tx,
-            self.session,
-            now_ms,
-            kind,
-            Some(new.device),
-            None,
-            Some(new.rel_path),
-        )
-        .map_err(|e| self.map(e))?;
-        let check = row_check(
-            new.device,
-            new.rel_path,
-            &new.hash,
-            new.size,
-            seq,
-            self.session,
-            now_ms,
-        );
-        tx.execute(
-            "INSERT INTO files(device_id, rel_path, path_key, hash, size, mtime_unix_ns, source_name, state, state_seq,
-                               committed_seq, committed_session, committed_unix_ms, dir_synced, verified_unbuffered, row_check)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
+            let kind = if new.adopted { "adopt" } else { "commit" };
+            let seq = append_event(
+                tx,
+                session,
+                now_ms,
+                kind,
+                Some(new.device),
+                None,
+                Some(new.rel_path),
+            )
+            .map_err(|e| self.map(e))?;
+            let check = row_check(
                 new.device,
                 new.rel_path,
-                new.path_key,
-                new.hash.as_bytes().as_slice(),
-                to_i64(new.size),
-                new.mtime_unix_ns,
-                new.source_name,
-                to_i64(seq),
-                to_i64(self.session),
+                &new.hash,
+                new.size,
+                seq,
+                session,
                 now_ms,
-                new.dir_synced,
-                new.verified_unbuffered,
-                check.as_slice(),
-            ],
-        )
-        .map_err(|e| self.map(e))?;
-        let id = tx.last_insert_rowid();
-        tx.execute(
-            "UPDATE events SET file_id = ?1 WHERE seq = ?2",
-            params![id, to_i64(seq)],
-        )
-        .map_err(|e| self.map(e))?;
-        adjust_usage(&tx, new.device, to_i64(new.size), 1).map_err(|e| self.map(e))?;
-        tx.commit().map_err(|e| self.map(e))?;
+            );
+            tx.execute(
+                "INSERT INTO files(device_id, rel_path, path_key, hash, size, mtime_unix_ns, source_name, state, state_seq,
+                                   committed_seq, committed_session, committed_unix_ms, dir_synced, verified_unbuffered, row_check)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    new.device,
+                    new.rel_path,
+                    new.path_key,
+                    new.hash.as_bytes().as_slice(),
+                    to_i64(new.size),
+                    new.mtime_unix_ns,
+                    new.source_name,
+                    to_i64(seq),
+                    to_i64(session),
+                    now_ms,
+                    new.dir_synced,
+                    new.verified_unbuffered,
+                    check.as_slice(),
+                ],
+            )
+            .map_err(|e| self.map(e))?;
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "UPDATE events SET file_id = ?1 WHERE seq = ?2",
+                params![id, to_i64(seq)],
+            )
+            .map_err(|e| self.map(e))?;
+            adjust_usage(tx, new.device, to_i64(new.size), 1).map_err(|e| self.map(e))?;
+            raise_hwm(tx, new.device, seq).map_err(|e| self.map(e))?;
+            if let Some(partial) = new.partial {
+                tx.execute(
+                    "DELETE FROM partials WHERE location = 0 AND path_key = ?1",
+                    [path_key(partial)],
+                )
+                .map_err(|e| self.map(e))?;
+            }
+            Ok((id, seq))
+        })?;
+        if !new.durable {
+            self.pending_batched.fetch_add(1, Ordering::SeqCst);
+        }
 
         Ok(FileRecord {
             id,
@@ -921,7 +1152,7 @@ impl Ledger {
             source_name: new.source_name.to_owned(),
             state: FileState::Committed,
             committed_seq: seq,
-            committed_session: self.session,
+            committed_session: session,
             committed_unix_ms: now_ms,
             dir_synced: new.dir_synced,
             verified_unbuffered: new.verified_unbuffered,
@@ -988,6 +1219,7 @@ impl Ledger {
     }
 
     /// All rows with this content hash, oldest commit first.
+    #[cfg(test)]
     pub(crate) fn files_by_hash(&self, hash: &ContentHash) -> Result<Vec<FileRecord>> {
         let conn = self.lock();
         let sql =
@@ -1002,13 +1234,6 @@ impl Ledger {
             .query_files(&conn, &sql, &[&path_key])?
             .into_iter()
             .next())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn file_by_id(&self, id: i64) -> Result<Option<FileRecord>> {
-        let conn = self.lock();
-        let sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE id = ?1");
-        Ok(self.query_files(&conn, &sql, &[&id])?.into_iter().next())
     }
 
     /// Whether any row (in any state) is recorded under this path key.
@@ -1091,7 +1316,7 @@ impl Ledger {
         };
         let seq = append_event(
             &tx,
-            self.session,
+            self.session(),
             now_ms,
             kind,
             Some(&device),
@@ -1105,8 +1330,12 @@ impl Ledger {
         )
         .map_err(|e| self.map(e))?;
         match (old.occupies_space(), new_state.occupies_space()) {
-            (true, false) => adjust_usage(&tx, &device, -size, -1).map_err(|e| self.map(e))?,
-            (false, true) => adjust_usage(&tx, &device, size, 1).map_err(|e| self.map(e))?,
+            (true, false) => {
+                adjust_usage_all(&tx, file_id, &device, -size, -1).map_err(|e| self.map(e))?
+            }
+            (false, true) => {
+                adjust_usage_all(&tx, file_id, &device, size, 1).map_err(|e| self.map(e))?
+            }
             _ => {}
         }
         tx.commit().map_err(|e| self.map(e))?;
@@ -1124,12 +1353,20 @@ impl Ledger {
     ) -> Result<u64> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(|e| self.map(e))?;
-        let seq = append_event(&tx, self.session, now_ms, kind, device, Some(file_id), None)
-            .map_err(|e| self.map(e))?;
+        let seq = append_event(
+            &tx,
+            self.session(),
+            now_ms,
+            kind,
+            device,
+            Some(file_id),
+            None,
+        )
+        .map_err(|e| self.map(e))?;
         let updated = tx
             .execute(
                 "UPDATE files SET last_verified_seq = ?2, last_verified_session = ?3 WHERE id = ?1",
-                params![file_id, to_i64(seq), to_i64(self.session)],
+                params![file_id, to_i64(seq), to_i64(self.session())],
             )
             .map_err(|e| self.map(e))?;
         if updated != 1 {
@@ -1153,7 +1390,7 @@ impl Ledger {
             Some(current) if current.kind.severity() >= kind.severity() => {
                 append_event(
                     &tx,
-                    self.session,
+                    self.session(),
                     now_ms,
                     "block_noted",
                     None,
@@ -1166,7 +1403,7 @@ impl Ledger {
             _ => {
                 let seq = append_event(
                     &tx,
-                    self.session,
+                    self.session(),
                     now_ms,
                     "block_set",
                     None,
@@ -1177,14 +1414,14 @@ impl Ledger {
                 meta_set(&tx, "block_kind", kind.code()).map_err(|e| self.map(e))?;
                 meta_set(&tx, "block_reason", reason).map_err(|e| self.map(e))?;
                 meta_set(&tx, "block_seq", &seq.to_string()).map_err(|e| self.map(e))?;
-                meta_set(&tx, "block_session", &self.session.to_string())
+                meta_set(&tx, "block_session", &self.session().to_string())
                     .map_err(|e| self.map(e))?;
                 meta_set(&tx, "block_unix_ms", &now_ms.to_string()).map_err(|e| self.map(e))?;
                 BlockInfo {
                     kind,
                     reason: reason.to_owned(),
                     set_seq: seq,
-                    set_session: self.session,
+                    set_session: self.session(),
                     set_unix_ms: now_ms,
                 }
             }
@@ -1207,7 +1444,7 @@ impl Ledger {
             let detail = format!("{note} (was: {})", current.reason);
             append_event(
                 &tx,
-                self.session,
+                self.session(),
                 now_ms,
                 "block_cleared",
                 None,
@@ -1381,13 +1618,14 @@ fn device_from_row(r: &Row<'_>) -> rusqlite::Result<DeviceRecord> {
         },
         used_bytes: to_u64(r.get(6)?),
         used_files: to_u64(r.get(7)?),
+        detached: r.get::<_, Option<i64>>(8)?.is_some(),
+        commit_hwm: to_u64(r.get(9)?),
     })
 }
 
 fn read_device(conn: &Connection, device_id: &str) -> rusqlite::Result<Option<DeviceRecord>> {
     conn.query_row(
-        "SELECT device_id, display_name, folder_name, max_bytes, max_files, max_file_bytes, used_bytes, used_files
-         FROM devices WHERE device_id = ?1",
+        &format!("SELECT {DEVICE_COLUMNS} FROM devices WHERE device_id = ?1"),
         [device_id],
         device_from_row,
     )
@@ -1405,6 +1643,44 @@ fn adjust_usage(
         params![device, bytes, files],
     )
     .map(|_| ())
+}
+
+/// Adjusts the usage of a file's owner and of every device holding a claim on it.
+fn adjust_usage_all(
+    tx: &Transaction<'_>,
+    file_id: i64,
+    owner: &str,
+    bytes: i64,
+    files: i64,
+) -> rusqlite::Result<()> {
+    adjust_usage(tx, owner, bytes, files)?;
+    tx.execute(
+        "UPDATE devices SET used_bytes = MAX(0, used_bytes + ?2), used_files = MAX(0, used_files + ?3)
+         WHERE device_id IN (SELECT device_id FROM file_refs WHERE file_id = ?1)",
+        params![file_id, bytes, files],
+    )
+    .map(|_| ())
+}
+
+/// The commit high-water mark: the highest commit sequence number ever issued.
+fn read_hwm(conn: &Connection) -> rusqlite::Result<u64> {
+    Ok(meta_get(conn, "commit_hwm")?
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0))
+}
+
+/// Raises the global and the device's high-water marks to `seq`. They never go down.
+fn raise_hwm(tx: &Transaction<'_>, device: &str, seq: u64) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES ('commit_hwm', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(excluded.value AS INTEGER) > CAST(value AS INTEGER)",
+        [seq.to_string()],
+    )?;
+    tx.execute(
+        "UPDATE devices SET commit_hwm = MAX(commit_hwm, ?2) WHERE device_id = ?1",
+        params![device, to_i64(seq)],
+    )?;
+    Ok(())
 }
 
 fn meta_get(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1579,6 +1855,8 @@ mod tests {
             dir_synced: true,
             verified_unbuffered: true,
             adopted: false,
+            partial: None,
+            durable: true,
         }
     }
 

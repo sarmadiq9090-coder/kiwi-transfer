@@ -8,8 +8,8 @@ use std::path::Path;
 
 use common::*;
 use kiwi_store::{
-    BlockKind, CancelToken, CommitOutcome, ContentHash, DedupeScope, DeletionDenied,
-    NotVerifiedReason, StoreError, StoredStatus,
+    BlockKind, CancelToken, CommitOutcome, ContentHash, DeletionDenied, NotVerifiedReason,
+    StoreError, StoredStatus,
 };
 
 /// A path without the verbatim prefix, for handing to `cmd`.
@@ -159,7 +159,7 @@ fn a_directory_swapped_for_a_junction_after_the_commit_fails_every_check() {
     let report = store.recovery_report().unwrap();
     assert_eq!(report.reparse_points_skipped, vec!["Pixel 8/DCIM"]);
 
-    match store.is_safely_stored(&hash).unwrap() {
+    match store.is_safely_stored(&phone(), &hash).unwrap() {
         StoredStatus::NotVerified(NotVerifiedReason::ReparsePoint(at)) => {
             assert!(
                 plain(&at).replace('\\', "/").ends_with("/Pixel 8/DCIM"),
@@ -168,10 +168,7 @@ fn a_directory_swapped_for_a_junction_after_the_commit_fails_every_check() {
         }
         other => panic!("unexpected: {other:?}"),
     }
-    assert!(store
-        .find_duplicate(&hash, DedupeScope::AnyDevice)
-        .unwrap()
-        .is_none());
+    assert!(store.find_duplicate(&phone(), &hash).unwrap().is_none());
     let block = store
         .final_move_block()
         .unwrap()
@@ -179,13 +176,13 @@ fn a_directory_swapped_for_a_junction_after_the_commit_fails_every_check() {
     assert_eq!(block.kind, BlockKind::IntegrityProblems);
     assert!(block.reason.contains("junction"), "{}", block.reason);
     assert!(matches!(
-        store.verify_for_deletion(&hash, 1),
+        store.verify_for_deletion(&phone(), &hash, 1),
         Err(DeletionDenied::Blocked(_))
     ));
     // Clearing the block does not make the junction acceptable; it blocks again.
     store.clear_final_move_block("test").unwrap();
     assert!(matches!(
-        store.verify_for_deletion(&hash, 1),
+        store.verify_for_deletion(&phone(), &hash, 1),
         Err(DeletionDenied::NotVerified(
             NotVerifiedReason::ReparsePoint(_)
         ))
@@ -214,7 +211,7 @@ fn a_directory_swapped_for_a_junction_after_the_commit_fails_every_check() {
     store
         .clear_final_move_block("the junction was removed")
         .unwrap();
-    assert!(store.verify_for_deletion(&hash, 1).is_ok());
+    assert!(store.verify_for_deletion(&phone(), &hash, 1).is_ok());
 }
 
 #[test]
@@ -264,16 +261,20 @@ fn recovery_and_scan_never_enter_a_junction() {
     link_dir(&w.path("Linked"), &w.outside);
     std::fs::create_dir_all(w.path("Pixel 8")).unwrap();
     link_dir(&w.path("Pixel 8/Linked Too"), &w.outside);
-    // Real debris, inside the root.
+    // A look-alike inside the root: named like debris, but not the engine's.
     std::fs::write(
         w.path("Pixel 8/.kiwi-tmp-1-2-0123456789abcdef.part"),
-        b"ours",
+        b"not ours either",
     )
     .unwrap();
 
     let store = w.open();
     let report = store.recovery_report().unwrap();
-    assert_eq!(report.orphan_temps_removed, 1);
+    assert_eq!(report.orphan_temps_removed, 0);
+    assert_eq!(
+        report.unowned_temps,
+        vec!["Pixel 8/.kiwi-tmp-1-2-0123456789abcdef.part"]
+    );
     let mut skipped = report.reparse_points_skipped.clone();
     skipped.sort();
     assert_eq!(skipped, vec!["Linked", "Pixel 8/Linked Too"]);
@@ -364,7 +365,7 @@ fn file_links_are_never_read_adopted_or_deleted() {
         bytes,
         "through the link the content looks right"
     );
-    match store.is_safely_stored(&hash).unwrap() {
+    match store.is_safely_stored(&phone(), &hash).unwrap() {
         StoredStatus::NotVerified(NotVerifiedReason::ReparsePoint(_)) => {}
         other => panic!("unexpected: {other:?}"),
     }

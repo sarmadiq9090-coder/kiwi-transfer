@@ -1,19 +1,24 @@
 //! The storage engine: one destination root, one ledger.
 
 mod incoming;
+mod mirror;
+mod pipeline;
 mod recovery;
 mod scan;
 mod verify;
 
 pub use incoming::{CommitOutcome, CommitReceipt, FileRequest, IncomingFile};
+pub use mirror::{
+    CopyCounts, MirrorAbsent, MirrorError, MirrorFailure, MirrorId, MirrorInfo, MirrorOptions,
+    MirrorPending, MirrorPolicy, MirrorPresence, MirrorRun, MirrorRunReport, MirrorScan,
+    MirrorScanReport, Repair, RepairDirection, UnmirroredCommit, WrongDisk, MIRROR_MARKER_FILE,
+};
 pub use recovery::RecoveryReport;
 pub use scan::{
     CancelToken, FindingKind, ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict,
     MAX_LISTED_FINDINGS,
 };
-pub use verify::{
-    DedupeScope, DeletionDenied, DeletionProof, NotVerifiedReason, StoredFile, StoredStatus,
-};
+pub use verify::{DeletionDenied, DeletionProof, NotVerifiedReason, StoredFile, StoredStatus};
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -22,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::destination::{Destination, DriveKind};
+use crate::destination::{Destination, DriveKind, HazardEnv, VolumeInfo};
 use crate::error::{LedgerError, StoreError};
 use crate::fsops::{Clock, EntryKind, Fs, RealFs, SystemClock};
 use crate::ledger::{
@@ -106,6 +111,8 @@ pub struct StoreConfig {
     pub defer_recovery: bool,
     /// What the integrity checks treat as alarming.
     pub scan_policy: ScanPolicy,
+    /// When a disk counts as failing during mirror runs and scans.
+    pub mirror_policy: MirrorPolicy,
 }
 
 impl StoreConfig {
@@ -120,6 +127,7 @@ impl StoreConfig {
             min_wall_age_secs: MIN_WALL_AGE_SECS,
             defer_recovery: false,
             scan_policy: ScanPolicy::default(),
+            mirror_policy: MirrorPolicy::default(),
         }
     }
 }
@@ -144,6 +152,10 @@ pub enum OpenNote {
     MarkerRecreated,
 }
 
+/// Asks the platform about the volume holding a path. Replaced in tests to
+/// stand in for disks that are not there.
+pub type VolumeProbe = Arc<dyn Fn(&Path) -> io::Result<VolumeInfo> + Send + Sync>;
+
 /// Seams for tests. Never available in a shipping build.
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Default)]
@@ -153,7 +165,11 @@ pub struct Seams {
     /// Replaces the system clock.
     pub clock: Option<Arc<dyn Clock>>,
     /// Replaces what the platform says about the destination volume.
-    pub volume: Option<crate::destination::VolumeInfo>,
+    pub volume: Option<VolumeInfo>,
+    /// Replaces what the platform says about the volume of a mirror.
+    pub volume_probe: Option<VolumeProbe>,
+    /// Replaces where cloud-synced and system-managed folders are looked for.
+    pub hazards: Option<HazardEnv>,
 }
 
 #[cfg(not(any(test, feature = "test-util")))]
@@ -161,7 +177,38 @@ pub struct Seams {
 pub(crate) struct Seams {
     pub(crate) fs: Option<Arc<dyn Fs>>,
     pub(crate) clock: Option<Arc<dyn Clock>>,
-    pub(crate) volume: Option<crate::destination::VolumeInfo>,
+    pub(crate) volume: Option<VolumeInfo>,
+    pub(crate) volume_probe: Option<VolumeProbe>,
+    pub(crate) hazards: Option<HazardEnv>,
+}
+
+/// When a session began in this process, on the clock that cannot be set.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SessionMark {
+    /// Sequence number of the session's start event.
+    pub(crate) start_seq: u64,
+    /// [`Clock::monotonic_ms`] at that moment.
+    pub(crate) monotonic_ms: u64,
+}
+
+/// Answer of [`Store::check_peer_commit_seq`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RollbackCheck {
+    /// The ledger knows every commit the peer holds a receipt for.
+    Consistent {
+        /// Highest commit sequence number ever issued to the device.
+        device_commit_hwm: u64,
+    },
+    /// The peer holds a receipt the ledger never issued: the ledger was
+    /// rolled back. Final move is now blocked.
+    RolledBack {
+        /// The highest commit sequence number the peer holds a receipt for.
+        peer_commit_seq: u64,
+        /// Highest commit sequence number the ledger remembers issuing to it.
+        device_commit_hwm: u64,
+        /// The block that was set.
+        block: BlockInfo,
+    },
 }
 
 #[derive(Default)]
@@ -177,8 +224,12 @@ pub(crate) struct InFlight {
 pub(crate) struct Inner {
     pub(crate) cfg: StoreConfig,
     pub(crate) dest: Destination,
-    pub(crate) volume_is_forced: bool,
     pub(crate) fs: Arc<dyn Fs>,
+    pub(crate) volume_probe: VolumeProbe,
+    /// The sessions begun in this process, oldest first.
+    pub(crate) session_marks: Mutex<Vec<SessionMark>>,
+    /// One mirror run or mirror scan at a time.
+    pub(crate) mirror_lock: Mutex<()>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) ledger: Ledger,
     pub(crate) in_flight: Mutex<InFlight>,
@@ -223,6 +274,9 @@ impl std::fmt::Debug for Store {
 
 impl Store {
     /// Opens the destination and its ledger and starts a new session.
+    ///
+    /// A long-running program opens the store once and calls
+    /// [`Store::new_session`] at the start of every later transfer session.
     ///
     /// Fails with [`LedgerError::Corrupt`] if the ledger is damaged; see
     /// [`Store::reset_corrupt_ledger`]. Unless
@@ -285,12 +339,17 @@ impl Store {
         after_reset: Option<(String, Vec<PathBuf>)>,
     ) -> Result<Store, StoreError> {
         let mut dest = Destination::open(&cfg.root)?;
-        let volume_is_forced = seams.volume.is_some();
         if let Some(volume) = seams.volume {
             dest = force_volume(dest, volume);
         }
+        if let Some(env) = seams.hazards {
+            dest = dest.with_hazard_env(env);
+        }
         let fs: Arc<dyn Fs> = seams.fs.unwrap_or_else(|| Arc::new(RealFs));
         let clock: Arc<dyn Clock> = seams.clock.unwrap_or_else(|| Arc::new(SystemClock));
+        let volume_probe: VolumeProbe = seams
+            .volume_probe
+            .unwrap_or_else(|| Arc::new(|path: &Path| sys::probe_volume(path)));
 
         // The bookkeeping directory inside the root: lock and identity marker.
         let store_dir = dest.root().join(STORE_DIR);
@@ -330,7 +389,7 @@ impl Store {
         let ledger_lock = acquire(&ledger_dir.join(LEDGER_LOCK_FILE))?;
 
         let now = clock.now_unix_ms();
-        let mut ledger = Ledger::open_unstarted(&ledger_dir)?;
+        let ledger = Ledger::open_unstarted(&ledger_dir)?;
 
         // Bind the ledger to the destination folder. A ledger that belongs to
         // another folder is refused before a session is started in it.
@@ -347,6 +406,10 @@ impl Store {
             }
         }
         ledger.start_session(now)?;
+        let first_mark = SessionMark {
+            start_seq: ledger.session_start_seq(),
+            monotonic_ms: clock.monotonic_ms(),
+        };
         let mut notes = Vec::new();
         match (marker, ledger_id) {
             (None, None) => {
@@ -411,8 +474,10 @@ impl Store {
             inner: Arc::new(Inner {
                 cfg,
                 dest,
-                volume_is_forced,
                 fs,
+                volume_probe,
+                session_marks: Mutex::new(vec![first_mark]),
+                mirror_lock: Mutex::new(()),
                 clock,
                 ledger,
                 in_flight: Mutex::new(InFlight::default()),
@@ -438,11 +503,44 @@ impl Store {
         &self.inner.dest
     }
 
-    /// This open's session number. It grows by one every time the store is
-    /// opened and is what "an earlier session" means in
-    /// [`Store::verify_for_deletion`].
+    /// The current session's number. It grows by one every time the store is
+    /// opened and with every [`Store::new_session`], and is what "an earlier
+    /// session" means in [`Store::verify_for_deletion`].
     pub fn session(&self) -> u64 {
         self.inner.ledger.session()
+    }
+
+    /// Ends the current session and begins the next one. Returns its number.
+    ///
+    /// A session is one meeting between the PC and a phone. A program that
+    /// runs for weeks opens the store once and calls this at the start of
+    /// every transfer session, so that "stored in an earlier session" does
+    /// not have to wait for a restart.
+    ///
+    /// The counter is in the ledger and survives restarts; the call does not
+    /// return before the new session is on the device, and with it every
+    /// batched record (see [`IncomingFile::finish_batched`]).
+    ///
+    /// What it means for [`Store::verify_for_deletion`]:
+    ///
+    /// * a file recorded before this call belongs to an earlier session from
+    ///   now on; a file whose transfer began before the call and is finished
+    ///   after it belongs to the new session;
+    /// * `min_age_sessions = n` is satisfied once `n` sessions have begun
+    ///   since the one that recorded the file, by whichever of
+    ///   [`Store::open`] and `new_session`;
+    /// * calling this again and again buys nothing: the 24 hours are counted
+    ///   separately, on the wall clock, and for files stored while this
+    ///   process has been running also on a clock that cannot be set, so a
+    ///   wall clock that jumps ahead does not shorten the wait.
+    pub fn new_session(&self) -> Result<u64, StoreError> {
+        let inner = &self.inner;
+        let session = inner.ledger.start_session(inner.now())?;
+        lock(&inner.session_marks).push(SessionMark {
+            start_seq: inner.ledger.session_start_seq(),
+            monotonic_ms: inner.clock.monotonic_ms(),
+        });
+        Ok(session)
     }
 
     /// What [`Store::open`] noticed.
@@ -493,9 +591,105 @@ impl Store {
         Ok(self.inner.ledger.device(id.as_str())?)
     }
 
-    /// All registered devices.
+    /// All registered devices, unpaired ones included.
     pub fn devices(&self) -> Result<Vec<DeviceRecord>, StoreError> {
         Ok(self.inner.ledger.devices()?)
+    }
+
+    /// Unpairs a device **without removing anything**.
+    ///
+    /// The device's ledger records and its files stay exactly as they are:
+    /// they may be the only copies of photos the phone has already deleted.
+    /// They are still scanned, still mirrored, still counted, and still shown
+    /// by [`Store::devices`] with [`DeviceRecord::detached`] set. The device
+    /// itself can no longer send files or have a deletion confirmed until it
+    /// is registered again ([`Store::register_device`] with the same id),
+    /// which brings everything back as it was.
+    ///
+    /// There is no call that removes a device's records or files.
+    ///
+    /// Returns false if the device is unknown or already unpaired.
+    pub fn detach_device(&self, id: &DeviceId, note: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .inner
+            .ledger
+            .detach_device(id.as_str(), note, self.inner.now())?)
+    }
+
+    /// The commit high-water mark: the highest commit sequence number
+    /// ([`CommitReceipt::seq`]) this ledger has ever issued, to any device.
+    /// It is stored in the ledger and never decreases.
+    ///
+    /// The transfer layer sends it to the phone when they connect; the phone
+    /// compares it with the highest sequence number it holds a receipt for.
+    /// A phone that holds a higher one has proof that this ledger was rolled
+    /// back (restored from a backup or a system image): see
+    /// [`Store::check_peer_commit_seq`]. The per-device value is
+    /// [`DeviceRecord::commit_hwm`].
+    pub fn commit_hwm(&self) -> Result<u64, StoreError> {
+        Ok(self.inner.ledger.commit_hwm()?)
+    }
+
+    /// Checks the highest commit sequence number a phone holds a receipt for
+    /// against what the ledger remembers issuing to it.
+    ///
+    /// If the phone's number is higher, the ledger has lost commits it once
+    /// acknowledged: it was rolled back. That is recorded, final move is
+    /// blocked ([`BlockKind::LedgerRollback`]) and
+    /// [`RollbackCheck::RolledBack`] is returned; the transfer layer should
+    /// treat the phone's receipts as void and offer everything again.
+    pub fn check_peer_commit_seq(
+        &self,
+        device: &DeviceId,
+        peer_commit_seq: u64,
+    ) -> Result<RollbackCheck, StoreError> {
+        let inner = &self.inner;
+        let record = inner
+            .ledger
+            .device(device.as_str())?
+            .ok_or_else(|| StoreError::UnknownDevice(device.as_str().to_owned()))?;
+        if peer_commit_seq <= record.commit_hwm {
+            return Ok(RollbackCheck::Consistent {
+                device_commit_hwm: record.commit_hwm,
+            });
+        }
+        let reason = format!(
+            "the ledger was rolled back: device {} holds a receipt for commit {peer_commit_seq},              but the highest commit the ledger remembers issuing to it is {}",
+            record.device_id, record.commit_hwm
+        );
+        let block = inner
+            .ledger
+            .block(BlockKind::LedgerRollback, &reason, inner.now())?;
+        Ok(RollbackCheck::RolledBack {
+            peer_commit_seq,
+            device_commit_hwm: record.commit_hwm,
+            block,
+        })
+    }
+
+    /// Reports a ledger rollback that the caller detected by other means
+    /// (for example a receipt whose hash the ledger does not know). Final
+    /// move is blocked until [`Store::clear_final_move_block`].
+    pub fn report_rollback(&self, detail: &str) -> Result<BlockInfo, StoreError> {
+        let reason = format!("the ledger was rolled back: {detail}");
+        Ok(self
+            .inner
+            .ledger
+            .block(BlockKind::LedgerRollback, &reason, self.inner.now())?)
+    }
+
+    /// Flushes the ledger: every record written by
+    /// [`IncomingFile::finish_batched`] so far is on the device when this
+    /// returns. Returns the commit high-water mark, which is then durable:
+    /// every receipt with a sequence number up to it may be acknowledged to
+    /// the phone.
+    pub fn flush_batch(&self) -> Result<u64, StoreError> {
+        Ok(self.inner.ledger.flush(self.inner.now())?)
+    }
+
+    /// How many batched records are waiting for [`Store::flush_batch`].
+    pub fn pending_batch(&self) -> u64 {
+        self.inner.ledger.pending_batched()
     }
 
     /// The persistent final-move block, if set.
@@ -575,7 +769,7 @@ impl Inner {
         )
     }
 
-    /// Walks from the root down `dir`, refusing reparse points and anything
+    /// Walks from `root` (the destination or a mirror) down `dir`, refusing reparse points and anything
     /// that is not a directory. With `create`, missing directories are made
     /// (reusing an existing directory whose name differs only by case).
     ///
@@ -584,10 +778,11 @@ impl Inner {
     /// false.
     pub(crate) fn walk_dirs(
         &self,
+        root: &Path,
         dir: &SafeRelPath,
         create: bool,
     ) -> Result<Option<(PathBuf, SafeRelPath)>, StoreError> {
-        let mut path = self.root().to_path_buf();
+        let mut path = root.to_path_buf();
         for part in dir.components() {
             let parent = path.clone();
             path.push(part.as_str());
@@ -648,7 +843,7 @@ impl Inner {
             expected: path.clone(),
             resolved: resolved.clone(),
         };
-        let below = resolved.strip_prefix(self.root()).map_err(|_| mismatch())?;
+        let below = resolved.strip_prefix(root).map_err(|_| mismatch())?;
         let mut actual = Vec::with_capacity(dir.depth());
         for component in below.components() {
             let name = component.as_os_str().to_str().ok_or_else(mismatch)?;
@@ -663,7 +858,7 @@ impl Inner {
             return Err(mismatch());
         }
         let actual = SafeRelPath::from_components(actual);
-        Ok(Some((actual.under(self.root()), actual)))
+        Ok(Some((actual.under(root), actual)))
     }
 
     /// Loads (or reloads) the names in a directory into the cache.
@@ -715,6 +910,15 @@ impl Inner {
     }
 }
 
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // A clean shutdown leaves no batched record at the mercy of a power cut.
+        if self.ledger.pending_batched() > 0 {
+            let _ = self.ledger.flush(self.clock.now_unix_ms());
+        }
+    }
+}
+
 fn acquire(lock_path: &Path) -> Result<File, StoreError> {
     match sys::acquire_lock(lock_path) {
         Ok(f) => Ok(f),
@@ -726,12 +930,12 @@ fn acquire(lock_path: &Path) -> Result<File, StoreError> {
 }
 
 #[cfg(any(test, feature = "test-util"))]
-fn force_volume(dest: Destination, volume: crate::destination::VolumeInfo) -> Destination {
+fn force_volume(dest: Destination, volume: VolumeInfo) -> Destination {
     dest.with_volume_for_testing(volume)
 }
 
 #[cfg(not(any(test, feature = "test-util")))]
-fn force_volume(dest: Destination, _volume: crate::destination::VolumeInfo) -> Destination {
+fn force_volume(dest: Destination, _volume: VolumeInfo) -> Destination {
     dest
 }
 
@@ -754,7 +958,7 @@ fn write_marker(path: &Path, id: &str) -> Result<(), StoreError> {
     write().map_err(|e| StoreError::write("write the destination marker", path, e))
 }
 
-fn new_destination_id() -> String {
+pub(crate) fn new_destination_id() -> String {
     format!("{:016x}{:016x}", random_u64(), random_u64())
 }
 
@@ -823,7 +1027,7 @@ mod tests {
 
     #[test]
     fn temp_names_are_recognised_and_unique() {
-        use super::incoming::is_temp_name;
+        use super::pipeline::is_temp_name;
         assert!(is_temp_name(".kiwi-tmp-1-0-0123456789abcdef.part"));
         for not in [
             ".kiwi-tmp-.part",
@@ -831,6 +1035,12 @@ mod tests {
             "x.kiwi-tmp-1.part",
             "a.part",
             ".KIWI-TMP-1.part",
+            ".kiwi-tmp-1.part",
+            ".kiwi-tmp-notes.part",
+            ".kiwi-tmp-1-0-0123456789abcde.part",
+            ".kiwi-tmp-1-0-0123456789ABCDEF.part",
+            ".kiwi-tmp-1-0-0123456789abcdef-1.part",
+            ".kiwi-tmp-1-0-0123456789abcdef.part.jpg",
             "",
         ] {
             assert!(!is_temp_name(not), "{not:?}");

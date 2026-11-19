@@ -6,11 +6,29 @@
 //! 1. compares every record believed intact with the disk (existence and
 //!    size only; content is the integrity scan's job) and marks what is gone
 //!    or obviously different, and
-//! 2. walks the destination, never following a reparse point, and deletes
-//!    orphaned temp files.
+//! 2. deletes orphaned temp files, and
+//! 3. walks the destination, never following a reparse point, to report what
+//!    it finds there.
 //!
-//! The pass deletes nothing but files carrying the engine's temp-file name,
-//! and never one that belongs to a transfer in progress.
+//! # What is deleted, and why that can never be a stored file
+//!
+//! A file is deleted only if **all** of this holds:
+//!
+//! * the ledger has an intent row for it: the engine noted creating exactly
+//!   this file as a temp file (the row is written after the file is created,
+//!   and removed in the same transaction that records the commit, so a file
+//!   that was committed has none, even if a power failure undid its rename
+//!   and left it under its temp name);
+//! * its name has the exact shape of a temp-file name, which no stored file
+//!   can have (the sanitiser never produces a name starting with `.kiwi-`,
+//!   and a ledger row carrying one is refused when it is read);
+//! * no ledger record names its path;
+//! * it does not belong to a transfer in progress;
+//! * it is a plain file, reached through plain directories only.
+//!
+//! A file that merely *looks* like a temp file (somebody else made it, or its
+//! intent row was lost) is reported in [`RecoveryReport::unowned_temps`] and
+//! left alone.
 //!
 //! One crash window needs no repair here: a file that got its final name but
 //! not its ledger record. It is complete and verified (it was renamed only
@@ -20,14 +38,14 @@
 
 use std::path::{Path, PathBuf};
 
-use super::incoming::is_temp_name;
+use super::pipeline::{is_temp_name, PRIMARY};
 use super::scan::{CancelToken, ChangeEvidence, MissingIndex};
 use super::verify::Probe;
 use super::{lock, Inner, Store, STORE_DIR};
 use crate::error::StoreError;
 use crate::fsops::{DirEntryInfo, EntryKind};
 use crate::ledger::{path_key, FileState};
-use crate::sanitize::{collision_key, SafeRelPath, MAX_DEPTH};
+use crate::sanitize::{collision_key, SafeName, SafeRelPath, MAX_DEPTH};
 
 /// Most paths listed individually in a [`RecoveryReport`].
 const MAX_LISTED: usize = 200;
@@ -43,6 +61,12 @@ pub struct RecoveryReport {
     pub orphan_temp_bytes: u64,
     /// Orphaned temp files that could not be deleted (they will be retried).
     pub orphan_temps_left: Vec<String>,
+    /// Files that are named like temp files but that the engine has no
+    /// record of creating. They are never deleted; listed so the user can
+    /// decide. (At most 200 are listed; `unowned_temp_count` is complete.)
+    pub unowned_temps: Vec<String>,
+    /// How many such files there are.
+    pub unowned_temp_count: u64,
     /// Reparse points found in the destination. They were not followed.
     pub reparse_points_skipped: Vec<String>,
     /// Directories that could not be listed.
@@ -81,7 +105,100 @@ fn join_rel(dir_rel: &[String], name: &str) -> String {
     }
 }
 
+/// What became of the temp files the ledger has intent rows for.
+#[derive(Debug, Default)]
+pub(crate) struct TempCleanup {
+    pub removed: u64,
+    pub removed_bytes: u64,
+    /// Could not be deleted, or could not be reached safely; retried next time.
+    pub left: Vec<String>,
+}
+
 impl Inner {
+    /// Deletes the orphaned temp files at one location (the destination or a
+    /// mirror): those the ledger has an intent row for. See the module
+    /// documentation for why this cannot touch a stored file.
+    pub(crate) fn clean_partials(
+        &self,
+        location: i64,
+        root: &Path,
+    ) -> Result<TempCleanup, StoreError> {
+        let mut out = TempCleanup::default();
+        for rel in self.ledger.partials(location)? {
+            // The row is read from the ledger, which is not trusted: every
+            // directory on the way must be a name the sanitiser would have
+            // produced, and the file name must be a temp-file name.
+            let mut parts: Vec<&str> = rel.split('/').collect();
+            let name = parts.pop().unwrap_or("");
+            let dirs: Option<Vec<SafeName>> =
+                parts.iter().map(|p| SafeName::from_stored(p)).collect();
+            let (Some(dirs), true) = (dirs, is_temp_name(name)) else {
+                self.ledger.remove_partial(location, &rel)?;
+                continue;
+            };
+            let dir_rel = SafeRelPath::from_components(dirs);
+            let path = dir_rel.under(root).join(name);
+            // A transfer in progress owns its temp file.
+            if lock(&self.in_flight).temps.contains(&path) {
+                continue;
+            }
+            // A path the ledger records as a stored file is never deleted,
+            // whatever else is true. (It cannot happen; it is checked anyway.)
+            if location == PRIMARY && self.ledger.path_key_exists(&path_key(&rel))? {
+                self.ledger.remove_partial(location, &rel)?;
+                continue;
+            }
+            // Only through plain directories: a link on the way could lead
+            // the delete somewhere else.
+            let mut dir = root.to_path_buf();
+            let mut reachable = Some(true);
+            for part in dir_rel.components() {
+                dir.push(part.as_str());
+                match self.fs.stat(&dir) {
+                    Ok(Some(s)) if s.kind == EntryKind::Dir && !s.reparse => {}
+                    Ok(None) => {
+                        reachable = Some(false);
+                        break;
+                    }
+                    _ => {
+                        reachable = None;
+                        break;
+                    }
+                }
+            }
+            let stat = match reachable {
+                Some(true) => self.fs.stat(&path),
+                // The directory is gone, and the temp file with it.
+                Some(false) => Ok(None),
+                None => {
+                    if out.left.len() < MAX_LISTED {
+                        out.left.push(rel);
+                    }
+                    continue;
+                }
+            };
+            match stat {
+                Ok(None) => self.ledger.remove_partial(location, &rel)?,
+                Ok(Some(s)) if s.kind == EntryKind::File && !s.reparse => {
+                    if self.delete_own_temp(&path) {
+                        out.removed += 1;
+                        out.removed_bytes += s.size;
+                        self.ledger.remove_partial(location, &rel)?;
+                    } else if out.left.len() < MAX_LISTED {
+                        out.left.push(rel);
+                    }
+                }
+                // Not a plain file (any more), or it cannot be examined.
+                _ => {
+                    if out.left.len() < MAX_LISTED {
+                        out.left.push(rel);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Walks every directory below the root, skipping the engine's own
     /// bookkeeping directory and never entering a reparse point. Returns
     /// false if it was cancelled.
@@ -199,8 +316,17 @@ impl Store {
             }
         }
 
-        // 2. The disk: orphaned temp files, and files that look like renamed
-        //    copies of the ones just found missing.
+        // 2. Orphaned temp files: exactly those the ledger has an intent row for.
+        if !cancelled && !cancel.is_cancelled() {
+            let cleanup = inner.clean_partials(PRIMARY, inner.root())?;
+            report.orphan_temps_removed = cleanup.removed;
+            report.orphan_temp_bytes = cleanup.removed_bytes;
+            report.orphan_temps_left = cleanup.left;
+        }
+
+        // 3. The disk: files that look like temp files but are not the
+        //    engine's, and files that look like renamed copies of the ones
+        //    just found missing. Nothing is deleted or adopted here.
         let missing = MissingIndex::new(&ledger.missing_since(started_seq)?);
         let mut ledger_error = None;
         let walked = cancelled
@@ -211,27 +337,24 @@ impl Store {
                     entry,
                 } => {
                     if is_temp_name(&entry.name) {
-                        if !entry.exact {
-                            return;
-                        }
                         let path = dir_abs.join(&entry.name);
-                        // A transfer in progress owns its temp file.
-                        if lock(&inner.in_flight).temps.contains(&path) {
+                        let rel = join_rel(dir_rel, &entry.name);
+                        // A transfer in progress owns its temp file; one that
+                        // still has its intent row was listed above.
+                        if lock(&inner.in_flight).temps.contains(&path)
+                            || report.orphan_temps_left.contains(&rel)
+                        {
                             return;
                         }
-                        match inner.fs.remove_file(&path) {
-                            Ok(()) => {
-                                report.orphan_temps_removed += 1;
-                                report.orphan_temp_bytes += entry.stat.size;
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(_) => {
-                                if report.orphan_temps_left.len() < MAX_LISTED {
-                                    report
-                                        .orphan_temps_left
-                                        .push(join_rel(dir_rel, &entry.name));
+                        match ledger.has_partial(PRIMARY, &rel) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                report.unowned_temp_count += 1;
+                                if report.unowned_temps.len() < MAX_LISTED {
+                                    report.unowned_temps.push(rel);
                                 }
                             }
+                            Err(e) => ledger_error = Some(e),
                         }
                     } else if !missing.is_empty() && ledger_error.is_none() {
                         let dir_key = path_key(&dir_rel.join("/"));
@@ -268,9 +391,10 @@ impl Store {
         report.mass_change = inner.judge_mass_change(&evidence)?;
 
         let summary = format!(
-            "temps removed {} ({} bytes), records checked {}, missing {}, changed {}, rename-suspects {}, reparse points {}",
+            "temps removed {} ({} bytes), unowned temp-like files left alone {}, records checked {}, missing {}, changed {}, rename-suspects {}, reparse points {}",
             report.orphan_temps_removed,
             report.orphan_temp_bytes,
+            report.unowned_temp_count,
             report.records_checked,
             report.newly_missing,
             report.newly_changed,

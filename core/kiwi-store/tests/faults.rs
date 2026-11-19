@@ -96,7 +96,10 @@ fn check_invariants(
             assert_eq!(receipt.hash, hash, "{context}");
             assert!(recorded >= 1, "{context}: success without a ledger record");
             assert!(
-                store.is_safely_stored(&hash).unwrap().is_verified(),
+                store
+                    .is_safely_stored(&phone(), &hash)
+                    .unwrap()
+                    .is_verified(),
                 "{context}"
             );
         }
@@ -105,7 +108,7 @@ fn check_invariants(
             // told it is safe.
             assert!(
                 matches!(
-                    store.is_safely_stored(&hash).unwrap(),
+                    store.is_safely_stored(&phone(), &hash).unwrap(),
                     StoredStatus::NotVerified(NotVerifiedReason::NoRecord)
                 ),
                 "{context}: a failed commit must leave no record"
@@ -139,6 +142,7 @@ fn fail_every_operation(label: &str, prepare: fn(&World)) {
         Op::Sync,
         Op::ReadVerify,
         Op::Rename,
+        Op::SyncFile,
         Op::SyncDir,
     ] {
         assert!(
@@ -169,18 +173,29 @@ fn fail_every_operation(label: &str, prepare: fn(&World)) {
             Err(_) => failed += 1,
         }
         // Only steps that are explicitly "where possible" may fail without
-        // failing the commit: the mtime, the directory flush, and reading an
-        // *existing* file to see whether it is identical (if that cannot be
-        // read, it is simply not adopted).
-        if result.is_ok() {
+        // failing the commit: the mtime, the two flushes after the rename
+        // (the receipt says whether they happened), and reading an *existing*
+        // file to see whether it is identical (if that cannot be read, it is
+        // simply not adopted). The read under the final name is not one of
+        // them: the payload's own name is not an "existing file".
+        if let Ok(receipt) = &result {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let reads_existing_file = *op == Op::ReadVerify
-                && !path
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with(kiwi_store::TEMP_PREFIX));
+                && !name.starts_with(kiwi_store::TEMP_PREFIX)
+                && name != "IMG_0001.jpg";
             assert!(
-                matches!(op, Op::SetMtime | Op::SyncDir) || reads_existing_file,
+                matches!(op, Op::SetMtime | Op::SyncDir | Op::SyncFile) || reads_existing_file,
                 "{context}: the commit succeeded although a required step failed"
             );
+            if matches!(op, Op::SyncDir | Op::SyncFile) {
+                assert!(
+                    !receipt.dir_synced,
+                    "{context}: the receipt must not claim a flush that failed"
+                );
+            }
         }
 
         // The phone retries. Whatever state the failure left, the retry must
@@ -206,7 +221,10 @@ fn fail_every_operation(label: &str, prepare: fn(&World)) {
             "{context}: the retry must not create a second copy"
         );
         assert!(
-            store.is_safely_stored(&hash).unwrap().is_verified(),
+            store
+                .is_safely_stored(&phone(), &hash)
+                .unwrap()
+                .is_verified(),
             "{context}"
         );
 
@@ -215,7 +233,10 @@ fn fail_every_operation(label: &str, prepare: fn(&World)) {
         let store = w.open();
         assert!(store.recovery_report().unwrap().completed);
         assert!(
-            store.is_safely_stored(&hash).unwrap().is_verified(),
+            store
+                .is_safely_stored(&phone(), &hash)
+                .unwrap()
+                .is_verified(),
             "{context}: after restart"
         );
         assert!(
@@ -466,7 +487,10 @@ fn a_byte_that_changes_on_disk_before_the_read_back_is_caught() {
         w.files()
     );
     assert_eq!(store.stats().unwrap().files_committed, 0);
-    assert!(!store.is_safely_stored(&good).unwrap().is_verified());
+    assert!(!store
+        .is_safely_stored(&phone(), &good)
+        .unwrap()
+        .is_verified());
 
     // The same for a file that lost its tail, and one that grew.
     w.fs.clear_rules();
@@ -606,7 +630,10 @@ fn a_crash_before_the_rename_leaves_only_a_temp_file_and_recovery_removes_it() {
     assert_eq!(report.orphan_temps_removed, 1);
     assert_eq!(report.orphan_temp_bytes, bytes.len() as u64);
     assert!(w.files().is_empty());
-    assert!(!store.is_safely_stored(&hash).unwrap().is_verified());
+    assert!(!store
+        .is_safely_stored(&phone(), &hash)
+        .unwrap()
+        .is_verified());
     assert!(store.final_move_block().unwrap().is_none());
 
     // The phone still has the file and sends it again.
@@ -634,14 +661,14 @@ fn a_crash_between_rename_and_ledger_leaves_a_complete_file_that_a_retry_adopts(
         assert_eq!(std::fs::read(w.path(STORED)).unwrap(), bytes);
         assert_eq!(store.stats().unwrap().files_committed, 0);
         assert!(matches!(
-            store.is_safely_stored(&hash).unwrap(),
+            store.is_safely_stored(&phone(), &hash).unwrap(),
             StoredStatus::NotVerified(NotVerifiedReason::NoRecord)
         ));
     }
     let store = w.open();
     assert_eq!(store.recovery_report().unwrap().orphan_temps_removed, 0);
     assert!(matches!(
-        store.is_safely_stored(&hash).unwrap(),
+        store.is_safely_stored(&phone(), &hash).unwrap(),
         StoredStatus::NotVerified(NotVerifiedReason::NoRecord)
     ));
 
@@ -654,7 +681,10 @@ fn a_crash_between_rename_and_ledger_leaves_a_complete_file_that_a_retry_adopts(
         "its age counts from the session that recorded it"
     );
     assert_eq!(w.files(), vec![STORED], "no ' (2)' copy");
-    assert!(store.is_safely_stored(&hash).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &hash)
+        .unwrap()
+        .is_verified());
 }
 
 #[test]
@@ -703,7 +733,10 @@ fn a_target_that_appears_with_identical_content_is_adopted() {
     assert_eq!(receipt.outcome, CommitOutcome::AlreadyPresent);
     assert_eq!(receipt.rel_path, STORED);
     assert_eq!(w.files(), vec![STORED]);
-    assert!(store.is_safely_stored(&receipt.hash).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &receipt.hash)
+        .unwrap()
+        .is_verified());
 }
 
 #[test]

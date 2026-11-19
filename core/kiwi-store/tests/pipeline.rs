@@ -87,7 +87,7 @@ fn stores_a_file_end_to_end() {
     assert_eq!(commit.file_id, Some(receipt.file_id));
     assert!(events.windows(2).all(|p| p[0].seq < p[1].seq));
 
-    match store.is_safely_stored(&hash).unwrap() {
+    match store.is_safely_stored(&phone(), &hash).unwrap() {
         StoredStatus::Verified(file) => {
             assert_eq!(file.rel_path, receipt.rel_path);
             assert_eq!(file.abs_path, receipt.abs_path);
@@ -112,7 +112,10 @@ fn large_file_in_awkward_chunks() {
     incoming.write(&[]).unwrap();
     let receipt = incoming.finish(None).unwrap();
     assert_eq!(std::fs::read(&receipt.abs_path).unwrap(), bytes);
-    assert!(store.is_safely_stored(&receipt.hash).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &receipt.hash)
+        .unwrap()
+        .is_verified());
 }
 
 #[test]
@@ -123,7 +126,7 @@ fn empty_files_are_files_too() {
     assert_eq!(receipt.size, 0);
     assert_eq!(std::fs::metadata(&receipt.abs_path).unwrap().len(), 0);
     assert!(store
-        .is_safely_stored(&ContentHash::of_bytes(b""))
+        .is_safely_stored(&phone(), &ContentHash::of_bytes(b""))
         .unwrap()
         .is_verified());
 }
@@ -259,7 +262,7 @@ fn an_identical_file_the_user_copied_by_hand_is_adopted() {
         .unwrap();
     assert!(
         !store
-            .is_safely_stored(&ContentHash::of_bytes(&bytes))
+            .is_safely_stored(&phone(), &ContentHash::of_bytes(&bytes))
             .unwrap()
             .is_verified(),
         "unknown until received"
@@ -277,7 +280,10 @@ fn an_identical_file_the_user_copied_by_hand_is_adopted() {
             .unwrap(),
         before
     );
-    assert!(store.is_safely_stored(&receipt.hash).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &receipt.hash)
+        .unwrap()
+        .is_verified());
     assert!(store
         .events_after(0, 100)
         .unwrap()
@@ -582,7 +588,10 @@ fn paths_far_beyond_260_characters_work() {
     let receipt = put(&store, &name, &bytes);
     assert!(receipt.abs_path.as_os_str().len() > 1_200);
     assert_eq!(std::fs::read(&receipt.abs_path).unwrap(), bytes);
-    assert!(store.is_safely_stored(&receipt.hash).unwrap().is_verified());
+    assert!(store
+        .is_safely_stored(&phone(), &receipt.hash)
+        .unwrap()
+        .is_verified());
     // A second file with the same long name still gets a suffix that fits.
     let second = put(&store, &name, b"other");
     assert!(second.rel_path.ends_with(" (2).jpg"));
@@ -608,7 +617,10 @@ fn unicode_names_survive() {
         let receipt = put(&store, name, &bytes);
         assert_eq!(receipt.rel_path, format!("Pixel 8/{name}"));
         assert_eq!(std::fs::read(&receipt.abs_path).unwrap(), bytes);
-        assert!(store.is_safely_stored(&receipt.hash).unwrap().is_verified());
+        assert!(store
+            .is_safely_stored(&phone(), &receipt.hash)
+            .unwrap()
+            .is_verified());
     }
 }
 

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use super::incoming::is_temp_name;
+use super::pipeline::is_temp_name;
 use super::recovery::Visit;
 use super::verify::Probe;
 use super::{Inner, Store};
@@ -189,15 +189,24 @@ pub struct ScanReport {
 }
 
 /// Averages reads down to a byte rate and notices cancellation.
-struct Throttle<'a> {
-    rate: Option<u64>,
-    started: Instant,
-    bytes: u64,
-    cancel: &'a CancelToken,
+pub(crate) struct Throttle<'a> {
+    pub(crate) rate: Option<u64>,
+    pub(crate) started: Instant,
+    pub(crate) bytes: u64,
+    pub(crate) cancel: &'a CancelToken,
 }
 
-impl Throttle<'_> {
-    fn tick(&mut self, n: usize) -> ControlFlow<()> {
+impl<'a> Throttle<'a> {
+    pub(crate) fn new(rate: Option<u64>, cancel: &'a CancelToken) -> Self {
+        Throttle {
+            rate,
+            started: Instant::now(),
+            bytes: 0,
+            cancel,
+        }
+    }
+
+    pub(crate) fn tick(&mut self, n: usize) -> ControlFlow<()> {
         if self.cancel.is_cancelled() {
             return ControlFlow::Break(());
         }
@@ -398,6 +407,7 @@ impl Store {
         };
         let mut this_call = 0u64;
         let mut stopped = false;
+        let mut io_errors = 0u64;
 
         'records: loop {
             let batch = ledger.files_after(state.cursor_id, state.upper_id, 64)?;
@@ -454,6 +464,19 @@ impl Store {
                     Probe::Unreadable(why) => {
                         state.unreadable += 1;
                         findings.push(FindingKind::Unreadable, path, why.as_str(), true);
+                    }
+                    Probe::IoError(why) => {
+                        state.unreadable += 1;
+                        io_errors += 1;
+                        findings.push(FindingKind::Unreadable, path, why.as_str(), true);
+                        // A disk that returns errors is failing, whatever the
+                        // files that can still be read look like.
+                        if io_errors == inner.cfg.mirror_policy.io_errors_to_block.max(1) {
+                            let reason = format!(
+                                "the destination disk returned {io_errors} I/O errors during an integrity scan (last: {why})"
+                            );
+                            ledger.block(BlockKind::DiskFailing, &reason, inner.now())?;
+                        }
                     }
                     Probe::Reparse(at) => {
                         state.suspicious += 1;

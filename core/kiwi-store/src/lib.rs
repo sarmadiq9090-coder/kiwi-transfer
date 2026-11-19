@@ -12,7 +12,7 @@
 //! day later, it calls [`Store::verify_for_deletion`].
 //!
 //! ```no_run
-//! use kiwi_store::{ContentHash, DedupeScope, DeviceId, DeviceLimits, FileRequest, Store, StoreConfig};
+//! use kiwi_store::{ContentHash, DeviceId, DeviceLimits, FileRequest, Store, StoreConfig};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let store = Store::open(StoreConfig::new(r"E:\Photos\Kiwi", r"C:\ProgramData\KiwiTransfer\ledger"))?;
@@ -22,7 +22,7 @@
 //! let data = b"...jpeg bytes...";
 //! let hash = ContentHash::of_bytes(data); // in reality: the hash the phone claims
 //!
-//! if store.find_duplicate(&hash, DedupeScope::Device(&phone))?.is_none() {
+//! if store.find_duplicate(&phone, &hash)?.is_none() {
 //!     let mut incoming = store.begin_file(FileRequest {
 //!         device: &phone,
 //!         name: "DCIM/Camera/IMG_0001.jpg",
@@ -36,8 +36,9 @@
 //!     println!("stored as {}", receipt.rel_path);
 //! }
 //!
-//! // In a later session, at least 24 hours later:
-//! match store.verify_for_deletion(&hash, 1) {
+//! // In a later session (a later `Store::open` or `Store::new_session`), at
+//! // least 24 hours later:
+//! match store.verify_for_deletion(&phone, &hash, 1) {
 //!     Ok(proof) => println!("the phone may delete its copy of {}", proof.file.rel_path),
 //!     Err(why) => println!("keep the phone's copy: {why}"),
 //! }
@@ -63,21 +64,29 @@ pub mod template;
 pub mod testing;
 
 pub use destination::{
-    CopyOnlyReason, Destination, DestinationError, FinalMoveSupport, VolumeClass, VolumeInfo,
+    CopyOnlyReason, Destination, DestinationError, DestinationWarning, FinalMoveSupport, HazardEnv,
+    ManagedFolder, SyncProvider, VolumeClass, VolumeInfo,
 };
 pub use error::{LedgerError, QuotaKind, StoreError};
 pub use hash::ContentHash;
 pub use ledger::{
     BlockInfo, BlockKind, DeviceLimits, DeviceRecord, EventRecord, FileState, LedgerStats,
+    MirrorFileState,
 };
-pub use sanitize::{sanitize_component, sanitize_rel_path, SafeName, SafeRelPath, SanitizeError};
+pub use sanitize::{
+    is_shell_active, restore_neutralised_name, sanitize_component, sanitize_rel_path, SafeName,
+    SafeRelPath, SanitizeError, NEUTRAL_SUFFIX, SHELL_ACTIVE_EXTENSIONS, SHELL_ACTIVE_NAMES,
+};
 #[cfg(any(test, feature = "test-util"))]
 pub use store::Seams;
 pub use store::{
-    CancelToken, CommitOutcome, CommitReceipt, DedupeScope, DeletionDenied, DeletionProof,
-    DeviceId, FileRequest, FindingKind, IncomingFile, NotVerifiedReason, OpenNote, RecoveryReport,
-    ScanFinding, ScanOptions, ScanPolicy, ScanReport, ScanVerdict, Store, StoreConfig, StoredFile,
-    StoredStatus, DEFAULT_SAFETY_MARGIN_BYTES, MAX_LISTED_FINDINGS, MAX_PATH_UTF16,
-    MIN_WALL_AGE_SECS, STORE_DIR, TEMP_PREFIX, TEMP_SUFFIX,
+    CancelToken, CommitOutcome, CommitReceipt, CopyCounts, DeletionDenied, DeletionProof, DeviceId,
+    FileRequest, FindingKind, IncomingFile, MirrorAbsent, MirrorError, MirrorFailure, MirrorId,
+    MirrorInfo, MirrorOptions, MirrorPending, MirrorPolicy, MirrorPresence, MirrorRun,
+    MirrorRunReport, MirrorScan, MirrorScanReport, NotVerifiedReason, OpenNote, RecoveryReport,
+    Repair, RepairDirection, RollbackCheck, ScanFinding, ScanOptions, ScanPolicy, ScanReport,
+    ScanVerdict, Store, StoreConfig, StoredFile, StoredStatus, UnmirroredCommit, VolumeProbe,
+    WrongDisk, DEFAULT_SAFETY_MARGIN_BYTES, MAX_LISTED_FINDINGS, MAX_PATH_UTF16, MIN_WALL_AGE_SECS,
+    MIRROR_MARKER_FILE, STORE_DIR, TEMP_PREFIX, TEMP_SUFFIX,
 };
 pub use template::{CaptureTime, CivilDate, Template, TemplateError};
