@@ -143,6 +143,21 @@ h2.h{font-size:26px;line-height:1.3;font-weight:700;margin:8px 0 8px}
 .seg button.on{background:var(--accent-soft);color:var(--on-accent-soft);font-weight:700}
 .seg svg.i{width:18px;height:18px;stroke-width:2.4}
 
+/* added after 1.0 approval: keep-on-phone summary, copies line, permission note, keep marks */
+.badge.warn{background:var(--warn);color:var(--surface);box-shadow:0 0 0 5px var(--warn-soft)}
+.split{display:grid;grid-template-columns:1fr 1fr}
+.split>div{display:flex;gap:10px;align-items:center;padding:12px 16px}.split>div+div{border-inline-start:1px solid var(--line)}
+.split svg.i{color:var(--accent)}.split .cap{display:block;line-height:1.3}.split b{display:block;font-size:17px;line-height:1.35}
+.copies{display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;padding:9px 16px;border-top:1px solid var(--line);font-size:13px;color:var(--text-2)}
+.card>.copies:first-child{border-top:0}
+.cdot{width:10px;height:10px;border-radius:50%;flex:none}.cdot.two{background:var(--accent)}.cdot.one{background:var(--surface);border:2px solid var(--warn)}.cdot.one{margin-inline-start:10px}
+.perm{margin:-4px 18px 12px;padding:10px 12px 10px 14px;border-radius:16px;background:var(--surface-2);font-size:13px;color:var(--text-2);line-height:1.5;display:flex;gap:10px;align-items:center}.perm .btn{flex:none}
+.row.c{min-height:52px}
+.tile .mark,.legend .mark{width:24px;height:24px;border-radius:50%;background:rgb(0 0 0/.5);color:#fff;display:grid;place-items:center;flex:none}
+.tile .mark{position:absolute;top:6px;inset-inline-end:6px}.tile .mark svg.i,.legend .mark svg.i{width:14px;height:14px;stroke-width:2.4}
+.legend{display:flex;flex-direction:column;gap:8px;font-size:14px;color:var(--text-2)}.legend>span{display:flex;gap:10px;align-items:center}
+.legend .mark{background:var(--surface-3);color:var(--text)}
+.index .new{font-size:10px;font-weight:700;color:var(--on-accent-soft);background:var(--accent-soft);border-radius:8px;padding:0 6px;margin-inline-start:6px}
 /* camera viewfinder */
 .vf{position:relative;height:330px;border-radius:28px;background:#0E120C;overflow:hidden;margin:14px 0 18px}
 .vf::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 40% 30%,#2A3326,#0E120C 70%)}
@@ -214,7 +229,10 @@ const P = {
   doc:'M6 3h8l4 4v14H6ZM14 3v4h4', camera:'M4 8h3l2-3h6l2 3h3v11H4Z|c12,13,3.5', video:'M5 6h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2ZM16 10l5-3v10l-5-3',
   sun:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4|c12,12,4', moon:'M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z',
   plus:'M12 5v14M5 12h14', download:'M12 4v11M7 10l5 5 5-5M5 20h14', palette:'M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-1.5-1-2.5 1-1.5 2-1.5h2a4 4 0 0 0 4-4c0-4.4-4-8-9-8Z|c7.5,11,1|c10,7,1|c15,7.5,1',
-  qr:'M4 4h6v6H4ZM14 4h6v6h-6ZM4 14h6v6H4ZM14 14h2v2h-2ZM18 18h2v2h-2ZM14 18h2', more:'M12 5h.01M12 12h.01M12 19h.01', sparkle:'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z'
+  qr:'M4 4h6v6H4ZM14 4h6v6h-6ZM4 14h6v6H4ZM14 14h2v2h-2ZM18 18h2v2h-2ZM14 18h2', more:'M12 5h.01M12 12h.01M12 19h.01', sparkle:'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z',
+  pin:'M12 16v5.5M8.5 3.5h7l-1 5.5 3 3V14h-11v-2l3-3Z', heart:'M12 20s-7.5-4.6-7.5-10.2A4.1 4.1 0 0 1 12 7.4a4.1 4.1 0 0 1 7.5 2.4C19.5 15.4 12 20 12 20Z',
+  contacts:'M7 3h11a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H7ZM4.5 7.5h2.5M4.5 12h2.5M4.5 16.5h2.5M9.8 16.5a3.2 3.2 0 0 1 6.4 0|c13,10.5,2.4', calendar:'M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1ZM4 10h16M8.5 3v4M15.5 3v4',
+  apps:'M5 4.5h4.5a.5.5 0 0 1 .5.5v4.5a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V5a.5.5 0 0 1 .5-.5ZM14.5 4.5H19a.5.5 0 0 1 .5.5v4.5a.5.5 0 0 1-.5.5h-4.5a.5.5 0 0 1-.5-.5V5a.5.5 0 0 1 .5-.5ZM5 14h4.5a.5.5 0 0 1 .5.5V19a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5v-4.5A.5.5 0 0 1 5 14ZM16.75 14v5.5M14 16.75h5.5', chat:'M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H10l-5 4v-4a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 5 4.5Z'
 };
 function I(n, cls='') {
   const parts = (P[n]||'').split('|');
@@ -231,7 +249,7 @@ function tileSvg(i){ const [h,s,l]=HUES[i%HUES.length]; const d = S.t==='dark'?-
 const tile = (i, extra='') => `<div class="tile ${extra}">${tileSvg(i)}</div>`;
 
 /* ---------- building blocks ---------- */
-const steps = n => `<span class="steps" style="position:absolute;inset-inline:0;margin:auto;width:max-content" aria-label="${T(`الخطوة ${n} من 3`,`Step ${n} of 3`)}">${[1,2,3].map(i=>`<i class="${i===n?'on':''}"></i>`).join('')}</span>`;
+const steps = n => `<span class="steps" style="position:absolute;inset-inline:0;margin:auto;width:max-content" aria-label="${T(`الخطوة ${n} من 4`,`Step ${n} of 4`)}">${[1,2,3,4].map(i=>`<i class="${i===n?'on':''}"></i>`).join('')}</span>`;
 const bar = (title, {back=null, acts='', sub=''}={}) => `<div class="appbar">${back?`<button class="ib" data-go="${back}" aria-label="${T('رجوع','Back')}">${I('back','flip')}</button>`:'<span style="width:8px"></span>'}<div class="t">${title}${sub?`<small>${sub}</small>`:''}</div>${acts}</div>`;
 const foot = (primary, secondary='') => `<div class="foot">${primary}${secondary}</div>`;
 const btn = (label, go='', cls='filled', icon='') => `<button class="btn ${cls}" ${go?`data-go="${go}"`:''}>${icon?I(icon):''}${label}</button>`;
@@ -239,7 +257,54 @@ const row = (ic, title, sub='', trail='', go='') => `<button class="row" ${go?`d
 const chev = `<span class="chev">${I('chev','flip')}</span>`;
 const sw = on => `<span class="sw" role="switch" aria-checked="${on}" data-toggle></span>`;
 
-/* ---------- screens ---------- */
+/* ---------- shared sample data (synthetic) ---------- */
+const COPIES = () => T('نسختان: 4,812 · نسخة واحدة: 37','Two copies: 4,812 · One copy: 37');
+const KEEP_OPTS = () => [T('أسبوع','1 week'),T('شهر','1 month'),T('3 أشهر','3 months'),T('سنة','1 year')];
+const keepList = (on=1) => `<div class="card list">${KEEP_OPTS().map((o,i)=>`<button class="row c"><span class="radio ${i===on?'on':''}"></span><span class="tx"><b>${o}</b></span></button>`).join('')}
+  <button class="row c"><span class="radio"></span><span class="tx"><b>${T('مدة أخرى…','Custom…')}</b></span>${chev}</button></div>`;
+const copiesLine = (go='') => `<div class="copies" ${go?`data-go="${go}" role="button"`:''}><span class="cdot two"></span>${T('نسختان: 4,812','Two copies: 4,812')}<span class="cdot one"></span>${T('نسخة واحدة: 37','One copy: 37')}</div>`;
+function home(mode){
+  const due = mode==='code';
+  return `${bar('Kiwi Transfer', {acts:`<button class="ib" data-go="history" aria-label="${T('السجل','History')}">${I('history')}</button><button class="ib" data-go="settings" aria-label="${T('الإعدادات','Settings')}">${I('settings')}</button>`})}
+    <div class="content"><div class="hero" style="padding-top:8px">
+      <div class="art" style="width:112px;height:112px;margin:4px auto 14px">${I('pc','big')}<span class="badge ${due?'warn':''}" style="bottom:8px;inset-inline-end:8px;width:38px;height:38px">${I(due?'key':'check')}</span></div>
+      <h2 class="h" style="font-size:28px">${due?T('النسخ مستمر','Backups continue'):T('صورك في أمان على حاسوبك','Your photos are safe on your PC')}</h2>
+      <p class="lead">${due?T('مرّ أسبوع دون رمز التأكيد. حتى تكتبه يتوقف النقل النهائي، والتصفّح والإرجاع، والاستلام من الحاسوب.','A week passed without the weekly code. Until you enter it, final moves, browsing and restoring, and receiving from the PC are paused.'):T('آخر نسخ اليوم 9:41 ص · 2,184 عنصراً','Last backup today 9:41 AM · 2,184 items')}</p>
+      ${due?'':`<div class="chip" style="margin-top:10px;height:32px"><span class="dot"></span>${T(`${PC()} · متصل`, `${PC()} · connected`)}</div>`}
+    </div>
+    <div class="card" style="margin-top:18px">
+      <div class="split" data-go="keep" role="button">
+        <div>${I('phone')}<span><span class="cap">${T('على هاتفك','On your phone')}</span><b>${T('آخر شهر','Last month')}</b></span></div>
+        <div>${I('pc')}<span><span class="cap">${T('على حاسوبك','On your PC')}</span><b>${T('كل شيء','Everything')}</b></span></div>
+      </div>
+      ${copiesLine()}
+    </div>
+    ${due?'':`<div class="card list" style="margin-top:12px">
+      ${row('storage',T('تفريغ مساحة','Free up space'),T('يمكنك توفير 3.2 GB','You can free 3.2 GB'),chev,'freeup')}
+      ${row('image',T('صور الحاسوب','Photos on your PC'),T('تصفّح وأعد ما تريد','Browse and bring back'),chev,'browse')}
+    </div>`}</div>
+    ${foot(due?btn(T('اكتب رمز الأسبوع','Enter this week’s code'),'weekly','filled','key'):btn(T('انسخ الآن','Back up now'),'backup'))}`;
+}
+function settings(adv){
+  const g = (t, rows) => `<div class="sec">${t}</div><div class="card list">${rows}</div>`;
+  return `${bar(T('الإعدادات','Settings'), {back:'home'})}
+  <div class="content">
+   ${g(T('النسخ','Backup'), row('folder',T('ماذا يُنسخ','What to back up'),T('الكاميرا، لقطات الشاشة','Camera, Screenshots'),chev,'folders')+row('wifi',T('متى','When'),T('تلقائياً حين يجيب حاسوبك على هذه الشبكة','Automatically when your PC answers on this network'),chev)+row('phone',T('أبقِ على هاتفي','Keep on my phone'),T('آخر شهر','Last month'),chev,'keep'))}
+   ${g(T('بياناتك','Your data'), row('contacts',T('نسخة احتياطية لبياناتك','Back up your data'),T('جهات الاتصال، التقويم','Contacts, Calendar'),chev,'data')+row('restore',T('استرجع إلى الهاتف','Restore to phone'),T('من نسخة على حاسوبك','From a copy on your PC'),chev,'restore'))}
+   ${g(T('الحاسوب','PC'), row('pc',PC(),T('مربوط · آخر اتصال 9:41 ص','Paired · last seen 9:41 AM'),chev)+row('plus',T('ربط حاسوب آخر','Pair another PC'),'',chev,'onb2'))}
+   ${g(T('المساحة','Space'), row('storage',T('تفريغ مساحة','Free up space'),'3.2 GB',chev,'freeup')+row('trash',T('سلة المهملات','Trash'),T('12 عنصراً','12 items'),chev,'trash'))}
+   ${g(T('المظهر','Appearance'), row('globe',T('اللغة','Language'),T('العربية','English'),chev)+row('palette',T('المظهر','Theme'),T('حسب النظام','System'),chev))}
+   ${g(T('المساعدة','Help'), row('wifi',T('لا أجد حاسوبي','Can’t find my PC'),'',chev,'trouble')+row('flag',T('الإبلاغ عن مشكلة','Report a problem'),'',chev,'report')+row('info',T('حول التطبيق','About'),'1.0.0',chev,'about'))}
+   <div class="card list" style="margin-top:22px">${row('settings',T('خيارات متقدمة','Advanced'),adv?'':T('5 خيارات','5 options'),`<span class="chev">${I(adv?'collapse':'expand')}</span>`,adv?'settings':'settingsAdv')}
+   ${adv? row('',T('أثناء الشحن فقط','Only while charging'),'',sw(false))
+        + row('',T('مدة سلة المهملات','Trash period'),T('30 يوماً','30 days'),chev)
+        + row('',T('التأكيد الأسبوعي','Weekly check'),T('رمز من الحاسوب للنقل النهائي والتصفّح والاستلام','A code from your PC for final moves, browsing and receiving'),chev,'weekly')
+        + row('',T('الاستلام من الحاسوب','Receiving from your PC'),T(`اسأل كل مرة · يُقبل دائماً من ${PC()}`,`Ask each time · always accepted from ${PC()}`),chev)
+        + row('',T('سجل التشخيص','Diagnostic log'),T('محفوظ على الهاتف فقط','Kept on the phone only'),sw(false)) : ''}</div>
+  </div>`;
+}
+
+/* ---------- screens (nw: new or changed after the owner approved the 1.0 screens) ---------- */
 const SCREENS = [
  { g:['البداية','First launch'] },
  { id:'onb1', n:['الخطوة 1: ثبّت برنامج الحاسوب','Step 1: install the PC program'], r:()=>`
@@ -260,21 +325,30 @@ const SCREENS = [
      <div class="note">${I('lock')}<span>${T('الهاتف والحاسوب يتحدثان مباشرة على شبكتك. لا شيء يمرّ عبر الإنترنت.','Your phone and PC talk directly over your Wi‑Fi. Nothing goes through the internet.')}</span></div>
    </div>
    ${foot(btn(T('لا أجد حاسوبي','I can’t find my PC'),'trouble','text'))}`},
- { id:'onb2b', n:['الربط: انتظار موافقة الحاسوب','Pairing: waiting for the PC'], r:()=>`
+ { id:'onb2b', nw:1, n:['الربط: اكتب الرقم على الحاسوب','Pairing: type the number on the PC'], r:()=>`
    ${bar('', {back:'onb2', acts:steps(2)})}
    <div class="content"><div class="hero">
      <div class="art">${I('pc','big')}<span class="badge">${I('key')}</span></div>
-     <h2 class="h">${T('وافِق على الحاسوب','Approve on your PC')}</h2>
-     <p class="lead">${T(`تأكّد أن ${PC()} يعرض الرقم نفسه، ثم اضغط «السماح» هناك.`, `Check that ${PC()} shows the same number, then click Allow there.`)}</p>
+     <h2 class="h">${T('اكتب هذا الرقم على حاسوبك','Type this number on your PC')}</h2>
+     <p class="lead">${T(`يطلبه ${PC()} الآن. كتابته هناك تؤكد أن الهاتف هاتفك.`, `${PC()} is asking for it now. Typing it there proves this phone is yours.`)}</p>
      <div class="sas">482 913</div>
-     <div class="chip" style="margin-top:18px"><span class="spin"></span>${T('ننتظر موافقة الحاسوب…','Waiting for your PC…')}</div>
+     <div class="chip" style="margin-top:18px"><span class="spin"></span>${T('ننتظر الحاسوب…','Waiting for your PC…')}</div>
    </div></div>
    ${foot(btn(T('التالي','Next'),'onb3','tonal'), btn(T('إلغاء','Cancel'),'onb2','text'))}`},
- { id:'onb3', n:['الخطوة 3: ماذا تنسخ','Step 3: what to back up'], r:()=>`
+ { id:'newPhone', nw:1, n:['هاتف جديد: استرجاع كامل','New phone: full restore'], r:()=>`
+   ${bar('', {back:'onb2b', acts:steps(3)})}
+   <div class="content"><div class="hero">
+     <div class="art">${I('phone','big')}<span class="badge">${I('restore')}</span></div>
+     <h2 class="h">${T('وجدنا نسخة «هاتف سارة» على حاسوبك','We found a copy of “Sara’s phone” on your PC')}</h2>
+     <p class="lead">${T('آخر نسخ قبل يومين: 4,849 صورة وفيديو، وجهات الاتصال، والتقويم، و37 تطبيقاً.','Last backup 2 days ago: 4,849 photos and videos, contacts, calendar and 37 apps.')}</p>
+     <p class="cap" style="margin-top:14px">${T('يكمل هذا الهاتف في مجلد «هاتف سارة» نفسه على الحاسوب.','This phone carries on in the same “Sara’s phone” folder on the PC.')}</p>
+   </div></div>
+   ${foot(btn(T('استرجعها إلى هذا الهاتف','Restore it to this phone'),'restore'), btn(T('ابدأ كهاتف جديد','Start as a new phone'),'onb3','text'))}`},
+ { id:'onb3', nw:1, n:['الخطوة 3: ماذا تنسخ','Step 3: what to back up'], r:()=>`
    ${bar('', {back:'onb2', acts:steps(3)})}
    <div class="content">
      <h2 class="h">${T('ماذا تريد أن تنسخ؟','What should we back up?')}</h2>
-     <p class="lead">${T(`تُحفظ نسخة على ${PC()}، وتبقى الأصول على هاتفك.`, `A copy goes to ${PC()}. The originals stay on your phone.`)}</p>
+     <p class="lead">${T(`كل ما تختاره يُنسخ إلى ${PC()} فوراً.`, `Everything you choose is copied to ${PC()} straight away.`)}</p>
      <div class="card list" style="margin-top:20px">
        ${row('camera',T('الكاميرا','Camera'),T('1,204 عنصراً · 4.1 GB','1,204 items · 4.1 GB'),sw(true))}
        ${row('image',T('لقطات الشاشة','Screenshots'),T('412 عنصراً · 0.6 GB','412 items · 0.6 GB'),sw(true))}
@@ -283,22 +357,34 @@ const SCREENS = [
      </div>
      <p class="cap" style="margin-top:14px;text-align:center">${T('تستطيع تغيير هذا في أي وقت.','You can change this any time.')}</p>
    </div>
-   ${foot(btn(T('ابدأ النسخ','Start backup'),'backup'))}`},
+   ${foot(btn(T('التالي','Next'),'onb4'))}`},
+ { id:'onb4', nw:1, n:['الخطوة 4: كم يبقى على الهاتف','Step 4: how long to keep on the phone'], r:()=>`
+   ${bar('', {back:'onb3', acts:steps(4)})}
+   <div class="content">
+     <h2 class="h">${T('ماذا يبقى على هاتفك؟','What stays on your phone?')}</h2>
+     <p class="lead">${T('كل شيء يُنسخ إلى حاسوبك فوراً. الأقدم من شهر يُنقل من الهاتف بعد التأكد من نسخته.','Everything is copied to your PC straight away. Anything older than a month leaves the phone once its copy is checked.')}</p>
+     <div class="sec">${T('أبقِ على هاتفي آخر','Keep on my phone the last')}</div>
+     ${keepList(1)}
+     <div class="note" style="margin-top:12px">${I('pin')}<span>${T('المفضلة وما تعلّمه «أبقِه على الهاتف» لا يُنقل أبداً.','Favourites and anything you mark “Keep on phone” never leave.')}</span></div>
+   </div>
+   ${foot(btn(T('التالي','Next'),'move'))}`},
+ { id:'move', nw:1, n:['شرح النقل من الهاتف','Moving off the phone explained'], r:()=>`
+   ${bar(T('النقل من الهاتف','Moving off the phone'), {back:'onb4'})}
+   <div class="content">
+     <h2 class="h">${T('الأقدم من شهر يصبح على حاسوبك فقط','Anything older than a month lives only on your PC')}</h2>
+     <div class="list" style="margin-top:6px">
+       ${row('shield',T('لا يُحذف شيء قبل التأكد','Nothing is deleted until it’s checked'),T('نحذف من الهاتف فقط بعد أن يؤكد الحاسوب أن الملف وصل سليماً.','We delete from the phone only after the PC confirms the file arrived intact.'))}
+       ${row('trash',T('30 يوماً للتراجع','30 days to change your mind'),T('ما يُنقل ينتظر في سلة المهملات، وتستطيع إرجاعه.','What moves waits in the trash, and you can bring it back.'))}
+       ${row('key',T('رمز من الحاسوب كل أسبوع','A code from your PC each week'),T('إن مرّ الأسبوع دونه، يستمر النسخ ويتوقف النقل حتى تكتبه.','If a week passes without it, copying continues and moving waits until you enter it.'))}
+       ${row('copy:warn',T('احفظ نسخة ثانية','Keep a second copy'),T('اختر قرصاً ثانياً في برنامج الحاسوب. إن تلف أحدهما بقي الآخر.','Choose a second disk in the PC program. If one fails, the other remains.'))}
+     </div>
+     <button class="row" data-ack style="margin-top:6px;border-top:1px solid var(--line)"><span class="chk ${S.moveAck?'on':''}">${S.moveAck?I('check'):''}</span><span class="tx"><b style="font-weight:400;font-size:15px">${T('فهمت أن ما يُنقل يبقى على الحاسوب وحده','I understand what moves is kept on the PC alone')}</b></span></button>
+   </div>
+   ${foot(`<button class="btn filled" data-go="backup" ${S.moveAck?'':'disabled'}>${T('ابدأ النسخ','Start backup')}</button>`, btn(T('انسخ فقط الآن، وقرّر لاحقاً','Just copy for now, decide later'),'backup','text'))}`},
 
  { g:['الرئيسية','Home'] },
- { id:'home', n:['الرئيسية','Home'], r:()=>`
-   ${bar('Kiwi Transfer', {acts:`<button class="ib" data-go="history" aria-label="${T('السجل','History')}">${I('history')}</button><button class="ib" data-go="settings" aria-label="${T('الإعدادات','Settings')}">${I('settings')}</button>`})}
-   <div class="content"><div class="hero" style="padding-top:20px">
-     <div class="art">${I('pc','big')}<span class="badge">${I('check')}</span></div>
-     <h2 class="h" style="font-size:28px">${T('صورك في أمان على حاسوبك','Your photos are safe on your PC')}</h2>
-     <p class="lead">${T('آخر نسخ اليوم 9:41 ص · 2,184 عنصراً','Last backup today 9:41 AM · 2,184 items')}</p>
-     <div class="chip" style="margin-top:16px"><span class="dot"></span>${T(`${PC()} · متصل`, `${PC()} · connected`)}</div>
-   </div>
-   <div class="card list" style="margin-top:28px">
-     ${row('storage',T('تفريغ مساحة','Free up space'),T('يمكنك توفير 3.2 GB','You can free 3.2 GB'),chev,'freeup')}
-     ${row('image',T('صور الحاسوب','Photos on your PC'),T('تصفّح وأرجِع ما تريد','Browse and bring back'),chev,'browse')}
-   </div></div>
-   ${foot(btn(T('انسخ الآن','Back up now'),'backup'))}`},
+ { id:'home', nw:1, n:['الرئيسية','Home'], r:()=>home('ok')},
+ { id:'homeCode', nw:1, n:['الرئيسية: رمز الأسبوع مطلوب','Home: weekly code due'], r:()=>home('code')},
  { id:'backup', n:['النسخ جارٍ','Backup in progress'], r:()=>`
    ${bar(T('النسخ جارٍ','Backing up'), {back:'home'})}
    <div class="content"><div class="hero">
@@ -315,61 +401,72 @@ const SCREENS = [
    </div></div>
    ${foot(btn(T('إيقاف مؤقت','Pause'),'home','tonal','pause'))}`},
 
- { g:['ماذا يُنسخ','What to back up'] },
- { id:'folders', n:['اختيار المجلدات','Choose folders'], r:()=>`
+ { g:['ماذا يُنسخ وماذا يبقى','What is copied and kept'] },
+ { id:'keep', nw:1, n:['أبقِ على هاتفي','Keep on my phone'], r:()=>`
+   ${bar(T('أبقِ على هاتفي','Keep on my phone'), {back:'settings'})}
+   <div class="content">
+     <p class="lead">${T('كل شيء يُنسخ إلى حاسوبك فوراً. الأقدم من شهر يُنقل من الهاتف بعد التأكد من نسخته.','Everything is copied to your PC straight away. Anything older than a month leaves the phone once its copy is checked.')}</p>
+     <div class="sec">${T('أبقِ على هاتفي آخر','Keep on my phone the last')}</div>
+     ${keepList(1)}
+     <div class="card list" style="margin-top:12px">
+       ${row('folder',T('مدة خاصة لمجلد','A different period for a folder'),T('لقطات الشاشة: آخر أسبوع','Screenshots: last week'),chev,'folders')}
+       ${row('pin',T('ما لا يُنقل أبداً','What never moves'),T('المفضلة و12 عنصراً علّمتها','Favourites and 12 items you marked'),chev,'keepMark')}
+     </div>
+   </div>
+   ${foot(btn(T('تم','Done'),'settings'))}`},
+ { id:'keepMark', nw:1, n:['علامة «أبقِه على الهاتف»','The “Keep on phone” mark'], r:()=>`
+   ${bar(T('على هاتفك','On your phone'), {back:'keep', sub:T('الكاميرا · آخر شهر','Camera · last month')})}
+   <div class="content" style="padding-inline:12px">
+     <div class="tiles">${Array.from({length:12},(_,i)=>`<div class="tile ${[4,5].includes(i)?'on':''}">${tileSvg(i)}<span class="sel">${[4,5].includes(i)?I('check'):''}</span>${i===1||i===9?`<span class="mark">${I('pin')}</span>`:i===7?`<span class="mark">${I('heart')}</span>`:''}</div>`).join('')}</div>
+   </div>
+   <div class="scrim" style="background:rgb(20 32 15/.18)"></div><div class="sheet">
+     <div class="handle"></div>
+     <b style="font-size:20px;display:block">${T('عنصران محددان','2 items selected')}</b>
+     <p class="cap" style="margin:4px 0 14px">${T('أبقِهما على الهاتف ولن يُنقلا مهما مرّ من وقت. نسختهما على حاسوبك تبقى كما هي.','Keep them on the phone and they never move, however old they get. Their copy on your PC stays as it is.')}</p>
+     <div class="legend"><span><span class="mark">${I('pin')}</span>${T('أبقِه على الهاتف','Keep on phone')}</span><span><span class="mark">${I('heart')}</span>${T('المفضلة: لا تُنقل أيضاً','Favourites: never move either')}</span></div>
+     <div style="margin-top:14px">${btn(T('أبقِهما على الهاتف','Keep them on the phone'),'keep','filled','pin')}</div>
+   </div>`},
+ { id:'folders', nw:1, n:['اختيار المجلدات','Choose folders'], r:()=>`
    ${bar(T('ماذا يُنسخ','What to back up'), {back:'settings'})}
    <div class="content">
-     <p class="lead" style="margin-bottom:14px">${T('«نسخ» يُبقي الأصل على هاتفك. «نقل نهائي» يُفرّغ الهاتف بعد التأكد من الحاسوب.','“Copy” keeps the original on your phone. “Final move” clears it from the phone once the PC has it.')}</p>
+     <p class="lead" style="margin-bottom:14px">${T('كل مجلد يتبع «أبقِ على هاتفي آخر: شهر»، إلا إن اخترت له مدة أخرى.','Every folder follows “Keep on my phone the last: month”, unless you give it its own period.')}</p>
      <div class="card list">
-       ${[['camera',T('الكاميرا','Camera'),T('1,204 · 4.1 GB','1,204 · 4.1 GB'),'ok',T('نسخ','Copy')],
-          ['image',T('لقطات الشاشة','Screenshots'),'412 · 0.6 GB','ok',T('نسخ','Copy')],
-          ['folder',T('صور واتساب','WhatsApp images'),'2,031 · 1.9 GB','',T('متوقف','Off')],
+       ${[['camera',T('الكاميرا','Camera'),T('1,204 · 4.1 GB','1,204 · 4.1 GB'),'ok',T('آخر شهر','Last month')],
+          ['image',T('لقطات الشاشة','Screenshots'),'412 · 0.6 GB','ok',T('آخر أسبوع','Last week')],
+          ['folder',T('صور واتساب','WhatsApp images'),'2,031 · 1.9 GB','ok',T('نسخ فقط','Copy only')],
           ['video',T('فيديوهات واتساب','WhatsApp videos'),'164 · 2.7 GB','',T('متوقف','Off')],
           ['download',T('التنزيلات','Downloads'),'88 · 0.4 GB','',T('متوقف','Off')],
           ['doc',T('المستندات','Documents'),'37 · 0.1 GB','',T('متوقف','Off')],
           ['storage',T('بطاقة الذاكرة · DCIM','SD card · DCIM'),'318 · 1.2 GB','',T('متوقف','Off')]]
          .map(([ic,a,b,c,d])=>row(ic,a,b,`<span class="pill ${c}">${d}</span>`,'folder')).join('')}
      </div>
-     <p class="cap" style="margin-top:14px;text-align:center">${T('النقل النهائي متوقف في كل المجلدات إلى أن تشغّله بنفسك. مجلدات واتساب وبطاقة الذاكرة تُنسخ فقط.','Final move stays off in every folder until you turn it on. WhatsApp and SD‑card folders are copy only.')}</p>
+     <p class="cap" style="margin-top:14px;text-align:center">${T('مجلدات واتساب وبطاقة الذاكرة تُنسخ فقط، ولا يُنقل منها شيء.','WhatsApp and SD‑card folders are copy only: nothing moves off them.')}</p>
    </div>
    ${foot(btn(T('تم','Done'),'home'))}`},
- { id:'folder', base:'folders', n:['مجلد: نسخ أم نقل نهائي','Folder: copy or final move'], r:()=>`
+ { id:'folder', nw:1, base:'folders', n:['مجلد: مدة خاصة','Folder: its own period'], r:()=>`
    <div class="scrim" data-go="folders"></div><div class="sheet">
      <div class="handle"></div>
-     <div style="display:flex;gap:14px;align-items:center;margin-bottom:14px"><span class="lead-ic" style="width:48px;height:48px;border-radius:14px;background:var(--surface-2);display:grid;place-items:center;color:var(--accent)">${I('image')}</span><div><b style="font-size:20px">${T('لقطات الشاشة','Screenshots')}</b><div class="cap">412 · 0.6 GB</div></div></div>
+     <div style="display:flex;gap:14px;align-items:center;margin-bottom:10px"><span class="lead-ic" style="width:48px;height:48px;border-radius:14px;background:var(--surface-2);display:grid;place-items:center;color:var(--accent)">${I('image')}</span><div><b style="font-size:20px">${T('لقطات الشاشة','Screenshots')}</b><div class="cap">412 · 0.6 GB</div></div></div>
      <div class="list">
        ${row('',T('لا تنسخ','Don’t back up'),T('يبقى المجلد على الهاتف فقط','Stays on the phone only'),'<span class="radio"></span>')}
-       ${row('',T('نسخ','Copy'),T('نسخة على الحاسوب، والأصل يبقى على الهاتف','A copy on the PC; the original stays on the phone'),'<span class="radio on"></span>')}
-       ${row('',T('نقل نهائي','Final move'),T('يُحفظ على الحاسوب ثم يُحذف من الهاتف','Saved on the PC, then removed from the phone'),'<span class="radio"></span>','move')}
+       ${row('',T('كالإعداد العام: آخر شهر','Like everything: last month'),T('الأقدم من شهر يُنقل من الهاتف','Older than a month leaves the phone'),'<span class="radio"></span>')}
+       ${row('',T('مدة خاصة: آخر أسبوع','Its own period: last week'),T('الأقدم من أسبوع يُنقل من الهاتف','Older than a week leaves the phone'),'<span class="radio on"></span>')}
+       ${row('',T('أبقِ كل شيء على الهاتف','Keep everything on the phone'),T('نسخة على الحاسوب، ولا يُنقل شيء','A copy on the PC; nothing moves'),'<span class="radio"></span>')}
      </div>
      <div style="margin-top:12px">${btn(T('تم','Done'),'folders')}</div>
    </div>`},
- { id:'move', n:['شرح النقل النهائي','Final move explained'], r:()=>`
-   ${bar(T('النقل النهائي','Final move'), {back:'folder'})}
-   <div class="content">
-     <h2 class="h">${T('سيصبح حاسوبك النسخة الوحيدة','Your PC becomes the only copy')}</h2>
-     <p class="lead">${T('لقطات الشاشة تُنقل إلى الحاسوب وتُحذف من هاتفك لتوفير المساحة.','Screenshots move to your PC and leave your phone to save space.')}</p>
-     <div class="list" style="margin-top:10px">
-       ${row('shield',T('لا يُحذف شيء قبل التأكد','Nothing is deleted until it’s checked'),T('نحذف من الهاتف فقط بعد أن يؤكد الحاسوب أن الملف وصل سليماً.','We delete from the phone only after the PC confirms the file arrived intact.'))}
-       ${row('trash',T('30 يوماً للتراجع','30 days to change your mind'),T('ما يُحذف ينتظر في سلة المهملات، وتستطيع إرجاعه.','Deleted items wait in the trash, and you can bring them back.'))}
-       ${row('key',T('رمز من الحاسوب كل أسبوع','A code from your PC each week'),T('لنتأكد أن الملفات تذهب إلى حاسوبك أنت.','So files only ever go to your own PC.'))}
-       ${row('warn:warn',T('احتفظ بنسخة ثانية','Keep a second copy'),T('إن تلف قرص الحاسوب تضيع هذه الصور معه.','If the PC’s disk fails, these photos go with it.'))}
-     </div>
-     <button class="row" data-ack style="margin-top:6px;border-top:1px solid var(--line)"><span class="chk ${S.moveAck?'on':''}">${S.moveAck?I('check'):''}</span><span class="tx"><b style="font-weight:400;font-size:15px">${T('فهمت أن الحاسوب سيصبح النسخة الوحيدة','I understand my PC will hold the only copy')}</b></span></button>
-   </div>
-   ${foot(`<button class="btn filled" data-go="home" ${S.moveAck?'':'disabled'}>${T('شغّل النقل النهائي','Turn on final move')}</button>`, btn(T('ابقَ على النسخ','Keep copying'),'folders','text'))}`},
- { id:'weekly', n:['التأكيد الأسبوعي','Weekly check'], r:()=>`
+ { id:'weekly', nw:1, n:['التأكيد الأسبوعي','Weekly check'], r:()=>`
    ${bar(T('تأكيد أسبوعي','Weekly check'), {back:'home'})}
    <div class="content"><div class="hero">
      <h2 class="h" style="margin-top:20px">${T('اكتب الرقم الظاهر على حاسوبك','Enter the number on your PC')}</h2>
      <p class="lead">${T(`افتح Kiwi Transfer على ${PC()}، ستجد رقماً من خانتين.`, `Open Kiwi Transfer on ${PC()}. You’ll see a 2‑digit number.`)}</p>
      <div class="code"><span>4</span><span class="cur"></span></div>
-     <p class="cap">${T('نطلبه مرة في الأسبوع قبل النقل النهائي، لنتأكد أن صورك تذهب إلى حاسوبك أنت.','We ask once a week before final moves, to be sure your photos go to your own PC.')}</p>
+     <p class="cap">${T('نطلبه مرة في الأسبوع لنتأكد أن ملفاتك تذهب إلى حاسوبك أنت. إن مرّ الأسبوع دون تأكيد، يستمر النسخ، ويتوقف النقل النهائي، والتصفّح والإرجاع، والاستلام من الحاسوب، حتى تكتب الرمز.','We ask once a week to be sure your files go to your own PC. If the week passes without it, copying continues; final moves, browsing and restoring, and receiving from the PC pause until you enter the code.')}</p>
    </div></div>
    ${foot(`<button class="btn filled" data-go="home">${T('تأكيد','Confirm')}</button>`, btn(T('لا أرى رقماً','I don’t see a number'),'trouble','text'))}`},
 
  { g:['المساحة','Space'] },
- { id:'freeup', n:['تفريغ المساحة','Free up space'], r:()=>`
+ { id:'freeup', nw:1, n:['تفريغ المساحة','Free up space'], r:()=>`
    ${bar(T('تفريغ مساحة','Free up space'), {back:'home'})}
    <div class="content"><div class="hero">
      <p class="lead" style="margin-top:10px">${T('تستطيع توفير','You can free')}</p>
@@ -377,12 +474,12 @@ const SCREENS = [
      <p class="lead">${T(`1,912 صورة و64 فيديو محفوظة على ${PC()} وفُحصت.`, `1,912 photos and 64 videos are on ${PC()} and checked.`)}</p>
    </div>
    <div class="sec">${T('ما الذي يُحذف من الهاتف','What leaves the phone')}</div>
-   <div class="seg" style="margin:10px 0 14px"><button>${T('الكل','All')}</button><button class="on">${T('أقدم من شهر','Older than a month')}</button><button>${T('أقدم من سنة','Older than 1 year')}</button></div>
+   <div class="seg" style="margin:10px 0 14px"><button>${T('الكل','All')}</button><button class="on">${T('أقدم من أسبوع','Older than a week')}</button><button>${T('أقدم من سنة','Older than 1 year')}</button></div>
    <div class="card list">
      ${row('image',T('صور','Photos'),T('1,912 صورة','1,912 photos'),'<b dir="ltr">2.1 GB</b>')}
      ${row('video',T('فيديوهات','Videos'),T('64 فيديو','64 videos'),'<b dir="ltr">1.1 GB</b>')}
    </div>
-   <div class="note" style="margin-top:14px">${I('trash')}<span>${T('تنتظر في سلة المهملات 30 يوماً قبل أن تُحذف نهائياً.','They wait in the trash for 30 days before they’re gone for good.')}</span></div>
+   <div class="note" style="margin-top:14px">${I('trash')}<span>${T('تنتظر في سلة المهملات 30 يوماً. المفضلة وما علّمته «أبقِه على الهاتف» لا يُحذف.','They wait in the trash for 30 days. Favourites and items marked “Keep on phone” are never removed.')}</span></div>
    </div>
    ${foot(btn(T('وفّر 3.2 GB','Free up 3.2 GB'),'freeupc'))}`},
  { id:'freeupc', base:'freeup', n:['تفريغ المساحة: تأكيد','Free up space: confirm'], r:()=>`
@@ -401,6 +498,55 @@ const SCREENS = [
    </div>
    ${foot(btn(T('أرجِع الكل إلى الهاتف','Put all back on the phone'),'home','filled','restore'))}`},
 
+ { g:['بياناتك','Your data'] },
+ { id:'data', nw:1, n:['نسخة احتياطية لبياناتك','Back up your data'], r:()=>`
+   ${bar(T('نسخة احتياطية لبياناتك','Back up your data'), {back:'settings'})}
+   <div class="content">
+     <p class="lead" style="margin-bottom:14px">${T('تُحفظ على حاسوبك فقط. شغّل ما تريد.','Saved on your PC only. Turn on what you want.')}</p>
+     <div class="card list">
+       ${row('contacts',T('جهات الاتصال','Contacts'),T('شغّلتها الآن','Just turned on'),sw(true))}
+       <div class="perm"><span>${T('نحتاج إذن «جهات الاتصال» لنحفظ نسخة منها على حاسوبك. لا تُرسل إلى أي مكان آخر.','We need the Contacts permission to save a copy on your PC. They go nowhere else.')}</span>${btn(T('اسمح','Allow'),'','tonal small')}</div>
+       ${row('calendar',T('التقويم','Calendar'),T('86 موعداً · اليوم 9:41 ص','86 events · today 9:41 AM'),sw(true))}
+       ${row('doc',T('الملفات','Files'),T('المستندات والتنزيلات','Documents and Downloads'),sw(false))}
+       ${row('chat',T('نسخ واتساب الاحتياطية','WhatsApp backups'),T('التي يصنعها واتساب','The ones WhatsApp makes'),sw(false))}
+       ${row('apps',T('التطبيقات','Apps'),T('القائمة وملفات التثبيت','The list and install files'),sw(false))}
+     </div>
+     <div class="note" style="margin-top:12px">${I('info')}<span>${T('بيانات التطبيقات وإعدادات النظام لا يمكن نسخها، فأندرويد لا يسمح بذلك.','App data and system settings can’t be backed up: Android doesn’t allow it.')}</span></div>
+   </div>
+   ${foot(btn(T('تم','Done'),'settings'))}`},
+ { id:'restore', nw:1, n:['استرجع إلى الهاتف: ماذا','Restore to phone: what'], r:()=>`
+   ${bar(T('استرجع إلى الهاتف','Restore to phone'), {back:'settings', sub:T(`من ${PC()} · هاتف سارة`,`From ${PC()} · Sara’s phone`)})}
+   <div class="content">
+     <p class="lead" style="margin-bottom:14px">${T('اختر ما تعيده إلى هذا الهاتف.','Choose what comes back to this phone.')}</p>
+     <div class="card list">
+       ${[['contacts',T('جهات الاتصال','Contacts'),T('412 جهة · تُدمج مع ما على الهاتف','412 contacts · merged with the phone’s'),1],
+          ['calendar',T('التقويم','Calendar'),T('86 موعداً · يُدمج مع ما على الهاتف','86 events · merged with the phone’s'),1],
+          ['image',T('الصور والفيديو','Photos and videos'),T('آخر شهر · 1,206 عناصر · 3.9 GB','Last month · 1,206 items · 3.9 GB'),1],
+          ['doc',T('الملفات','Files'),T('37 ملفاً · 0.1 GB','37 files · 0.1 GB'),0],
+          ['chat',T('نسخ واتساب الاحتياطية','WhatsApp backups'),T('أمس · 1.2 GB','Yesterday · 1.2 GB'),0],
+          ['apps',T('التطبيقات','Apps'),T('37 تطبيقاً · تؤكد تثبيت كل واحد','37 apps · you confirm each install'),1]]
+         .map(([ic,a,b,on])=>row(ic,a,b,`<span class="chk ${on?'on':''}">${on?I('check'):''}</span>`)).join('')}
+     </div>
+     <div class="note" style="margin-top:12px">${I('shield')}<span>${T('جهات الاتصال والتقويم تُدمج: لا يُحذف شيء من هاتفك.','Contacts and calendar are merged: nothing is deleted from your phone.')}</span></div>
+   </div>
+   ${foot(btn(T('استرجع','Restore'),'restoreRun','filled','restore'))}`},
+ { id:'restoreRun', nw:1, n:['الاسترجاع جارٍ','Restore in progress'], r:()=>`
+   ${bar(T('الاسترجاع جارٍ','Restoring'), {back:'home'})}
+   <div class="content"><div class="hero">
+     <h2 class="h" style="margin-top:18px">${T('412 من 1,206','412 of 1,206')}</h2>
+     <p class="lead">${T(`من ${PC()} · نحو 6 دقائق`, `From ${PC()} · about 6 min left`)}</p>
+     <div class="bar" style="width:100%;margin:22px 0 8px"><i style="width:34%"></i></div>
+   </div>
+   <div class="list" style="margin-top:8px">
+     ${row('contacts',T('جهات الاتصال','Contacts'),T('دُمجت 412 جهة','412 contacts merged'),`<span style="color:var(--accent)">${I('check')}</span>`)}
+     ${row('calendar',T('التقويم','Calendar'),T('دُمج 86 موعداً','86 events merged'),`<span style="color:var(--accent)">${I('check')}</span>`)}
+     ${row('image',T('الصور والفيديو','Photos and videos'),T('جارٍ الآن','In progress'),'<span class="spin"></span>')}
+     ${row('apps',T('التطبيقات','Apps'),T('بعد الصور. يسألك أندرويد عن كل تطبيق.','After the photos. Android asks you about each app.'),'')}
+   </div>
+   <p class="cap" style="margin-top:12px;text-align:center">${T('تستطيع إغلاق التطبيق، سنكمل في الخلفية.','You can close the app; we’ll keep going.')}</p>
+   </div>
+   ${foot(btn(T('إيقاف مؤقت','Pause'),'home','tonal','pause'))}`},
+
  { g:['النقل المباشر','Send and receive'] },
  { id:'share', n:['الإرسال من قائمة المشاركة','Send from the share sheet'], r:()=>`
    <div class="gal"><div class="tiles" style="padding-top:2px">${Array.from({length:18},(_,i)=>tile(i)).join('')}</div></div>
@@ -412,7 +558,7 @@ const SCREENS = [
      <div class="list">${row('pc',PC(),T('متصل','Connected'),`<span class="pill ok">${T('تغيير','Change')}</span>`)}</div>
      <div style="margin-top:10px">${btn(T('أرسل','Send'),'home','filled','send')}</div>
    </div>`},
- { id:'receive', base:'home', n:['الاستلام من الحاسوب','Receive from PC'], r:()=>`
+ { id:'receive', nw:1, base:'home', n:['الاستلام من الحاسوب','Receive from PC'], r:()=>`
    <div class="scrim"></div><div class="dialog" role="dialog">
      <span class="dic">${I('download')}</span>
      <h3>${T(`${PC()} يريد إرسال ملفين`, `${PC()} wants to send 2 files`)}</h3>
@@ -421,46 +567,47 @@ const SCREENS = [
        ${row('image',`<bdi dir="auto">${T('رسم-الحديقة','garden-sketch')}.png</bdi>`,'12.8 MB')}
      </div>
      <p class="cap">${T('ستُحفظ في: التنزيلات › Kiwi Transfer','They’ll be saved in Downloads › Kiwi Transfer')}</p>
-     <div class="acts"><button class="btn text small" data-go="home">${T('رفض','Decline')}</button><button class="btn filled small" data-go="home">${T('استلام','Accept')}</button></div>
+     <button class="row" style="min-height:48px;padding:6px 0;margin-top:6px;border-top:1px solid var(--line)"><span class="chk"></span><span class="tx"><b style="font-weight:400;font-size:15px">${T('اقبل دائماً من هذا الحاسوب','Always accept from this PC')}</b></span></button>
+     <div class="acts" style="margin-top:12px"><button class="btn text small" data-go="home">${T('رفض','Decline')}</button><button class="btn filled small" data-go="home">${T('استلام','Accept')}</button></div>
    </div>`},
- { id:'browse', n:['صور الحاسوب والإرجاع','Browse PC photos and restore'], r:()=>`
+ { id:'browse', nw:1, n:['صور الحاسوب والإعادة','Browse PC photos and restore'], r:()=>`
    ${bar(T('صور الحاسوب','Photos on your PC'), {back:'home', sub:PC()})}
    <div class="content" style="padding-inline:12px">
-     <div class="mh" style="margin-top:4px">${T('نوفمبر 2026','November 2026')}</div>
+     <div class="mh" style="margin-top:4px;display:flex;justify-content:space-between"><span>${T('نوفمبر 2026','November 2026')}</span><span class="cap" style="font-weight:700;color:var(--accent)">${T(`${S.sel.size} محددة`,`${S.sel.size} selected`)}</span></div>
      <div class="tiles">${Array.from({length:9},(_,i)=>`<div class="tile ${S.sel.has(i)?'on':''}" data-sel="${i}">${tileSvg(i)}<span class="sel">${S.sel.has(i)?I('check'):''}</span></div>`).join('')}</div>
      <div class="mh">${T('أكتوبر 2026','October 2026')}</div>
      <div class="tiles">${Array.from({length:6},(_,i)=>`<div class="tile" >${tileSvg(i+9)}<span class="sel"></span></div>`).join('')}</div>
    </div>
-   ${foot(btn(T(`أرجِع ${S.sel.size} إلى الهاتف`, `Restore ${S.sel.size} to phone`),'home','filled','restore'))}`},
- { id:'history', n:['السجل','History'], r:()=>`
+   ${foot(btn(T(`أعد ${S.sel.size} إلى الهاتف`, `Bring ${S.sel.size} back to phone`),'home','filled','restore'))}`},
+ { id:'history', nw:1, n:['السجل','History'], r:()=>`
    ${bar(T('السجل','History'), {back:'home'})}
    <div class="content">
+     <div class="card" style="margin-top:2px">${copiesLine()}</div>
      <div class="sec">${T('اليوم','Today')}</div>
      <div class="list">
        ${row('check',T('نُسخ 24 عنصراً','Backed up 24 items'),T(`9:41 ص · 182 MB · إلى ${PC()}`, `9:41 AM · 182 MB · to ${PC()}`))}
+       ${row('contacts',T('نسخة احتياطية: جهات الاتصال والتقويم','Backed up: contacts and calendar'),T('9:41 ص · 412 جهة · 86 موعداً','9:41 AM · 412 contacts · 86 events'))}
        ${row('download',T('استلام ملفين من الحاسوب','Received 2 files from PC'),T('8:15 ص · 14 MB','8:15 AM · 14 MB'))}
      </div>
      <div class="sec">${T('أمس','Yesterday')}</div>
      <div class="list">
-       ${row('storage',T('وُفّرت 3.2 GB','Freed 3.2 GB'),T('9:02 م · 1,976 عنصراً في سلة المهملات','9:02 PM · 1,976 items in the trash'))}
+       ${row('phone',T('نُقل 38 عنصراً أقدم من شهر','Moved 38 items older than a month'),T('9:02 م · في سلة المهملات 30 يوماً','9:02 PM · in the trash for 30 days'))}
        ${row('wifi',T('تعذّر الوصول إلى الحاسوب','Couldn’t reach your PC'),T('7:30 م · أعدنا المحاولة ونجحت 7:48 م','7:30 PM · retried, done at 7:48 PM'))}
        ${row('send',T('أُرسلت 3 صور','Sent 3 photos'),T('2:10 م · 8.4 MB','2:10 PM · 8.4 MB'))}
      </div>
-     <div class="sec">${T('15 نوفمبر','15 November')}</div>
-     <div class="list">${row('check',T('نُسخ 61 عنصراً','Backed up 61 items'),T('10:22 ص · 410 MB','10:22 AM · 410 MB'))}</div>
    </div>`},
 
  { g:['الإعدادات والمساعدة','Settings and help'] },
- { id:'settings', n:['الإعدادات','Settings'], r:()=>settings(false)},
- { id:'settingsAdv', n:['الإعدادات: خيارات متقدمة','Settings: advanced open'], r:()=>settings(true), scroll:520},
- { id:'trouble', n:['لا أجد حاسوبي','Can’t find your PC'], r:()=>`
+ { id:'settings', nw:1, n:['الإعدادات','Settings'], r:()=>settings(false)},
+ { id:'settingsAdv', nw:1, n:['الإعدادات: خيارات متقدمة','Settings: advanced open'], r:()=>settings(true), scroll:9999},
+ { id:'trouble', nw:1, n:['لا أجد حاسوبي','Can’t find your PC'], r:()=>`
    ${bar(T('لا أجد حاسوبي','Can’t find my PC'), {back:'home'})}
    <div class="content">
      <div class="chip" style="margin:2px 0 14px"><span class="spin"></span>${T(`نبحث عن ${PC()}…`, `Looking for ${PC()}…`)}</div>
      <div class="card list">
        ${row('wifi',T('هل الجهازان على شبكة Wi‑Fi نفسها؟','Are both on the same Wi‑Fi?'),T('هاتفك على: Home‑5G','Your phone is on: Home‑5G'))}
        ${row('pc',T('هل البرنامج مفتوح على الحاسوب؟','Is the program open on the PC?'),T('ابحث عن أيقونته بجانب الساعة.','Look for its icon next to the clock.'))}
-       ${row('shield',T('جدار حماية ويندوز','Windows firewall'),T('إن سألك ويندوز، اختر «السماح» على الشبكات الخاصة.','If Windows asks, choose Allow on private networks.'))}
+       ${row('shield',T('شبكة «عامة» في ويندوز','A “Public” network in Windows'),T('اضغط «اسمح على هذه الشبكة» في برنامج الحاسوب.','Click “Allow on this network” in the PC program.'))}
        ${row('router',T('عزل الأجهزة في الراوتر','Router device isolation'),T('شبكات الضيوف تمنع الأجهزة من رؤية بعضها. جرّب الشبكة الرئيسية.','Guest networks stop devices seeing each other. Try your main network.'))}
        ${row('battery',T('توفير البطارية','Battery saver'),T('اسمح للتطبيق بالعمل في الخلفية حتى لا يتوقف النسخ.','Let the app run in the background so backups don’t stop.'),`<span class="cap" style="color:var(--accent);font-weight:700">${T('فتح','Open')}</span>`)}
      </div>
@@ -480,16 +627,16 @@ const SCREENS = [
      ${row('check',T('إصلاح توقف النسخ عند إطفاء الشاشة','Fixed backups stopping when the screen turns off'))}
    </div></div>
    ${foot(btn(T('حدّث الآن','Update now'),'home'), btn(T('لاحقاً','Later'),'settings','text'))}`},
- { id:'report', n:['الإبلاغ عن مشكلة','Report a problem'], r:()=>`
+ { id:'report', nw:1, n:['الإبلاغ عن مشكلة','Report a problem'], r:()=>`
    ${bar(T('الإبلاغ عن مشكلة','Report a problem'), {back:'settings'})}
    <div class="content">
      <div class="field focus"><label>${T('ماذا حدث؟','What happened?')}</label>${T('النسخ يتوقف عند 80% كل مرة.','Backup stops at 80% every time.')}</div>
      <div class="list" style="margin-top:6px">${row('',T('أرفِق سجل التشخيص','Attach the diagnostic log'),T('يساعدنا على معرفة السبب','Helps us find the cause'),sw(true))}</div>
      <div class="sec" style="margin-top:8px">${T('هذا ما سيُرسل بالضبط','Exactly what will be sent')}</div>
      <div class="mono">Kiwi Transfer 1.0.0 (android, arm64)
-Android 14 · API 34 · RAM 8 GB
-Paired PCs: 1 · Folders: 2 copy, 0 move
-Last error: E_TIMEOUT after 412 MB
+Android 14 · API 34 · RAM 8 GB
+Paired PCs: 1 · Folders: 2 · Keep: 1 month
+Last error: E_TIMEOUT after 412 MB
 — log (last 40 lines, no file names) —
 09:40:12 conn ok rtt=8ms
 09:41:57 stream 3 reset by peer
@@ -497,7 +644,7 @@ Last error: E_TIMEOUT after 412 MB
      <div class="note" style="margin-top:12px">${I('lock')}<span>${T('لا نرسل صوراً ولا أسماء ملفات ولا موقعك. سترى الرسالة في تطبيق البريد قبل إرسالها.','No photos, file names or location. You’ll see the email in your mail app before it’s sent.')}</span></div>
    </div>
    ${foot(btn(T('افتح في تطبيق البريد','Open in mail app'),'settings','filled','mail'))}`},
- { id:'about', n:['حول التطبيق','About'], r:()=>`
+ { id:'about', nw:1, n:['حول التطبيق','About'], r:()=>`
    ${bar('', {back:'settings'})}
    <div class="content"><div class="hero">
      <div style="width:96px;height:96px;margin:18px 0 18px">${ICON}</div>
@@ -513,29 +660,12 @@ Last error: E_TIMEOUT after 412 MB
    </div></div>
    ${foot(btn(T('ابحث عن تحديث','Check for updates'),'update','tonal'))}`},
 ];
-function settings(adv){
-  const g = (t, rows) => `<div class="sec">${t}</div><div class="card list">${rows}</div>`;
-  return `${bar(T('الإعدادات','Settings'), {back:'home'})}
-  <div class="content">
-   ${g(T('النسخ','Backup'), row('folder',T('ماذا يُنسخ','What to back up'),T('الكاميرا، لقطات الشاشة','Camera, Screenshots'),chev,'folders')+row('wifi',T('متى','When'),T('تلقائياً على Wi‑Fi','Automatically on Wi‑Fi'),chev)+row('storage',T('النقل النهائي','Final move'),T('متوقف','Off'),chev,'move'))}
-   ${g(T('الحاسوب','PC'), row('pc',PC(),T('مربوط · آخر اتصال 9:41 ص','Paired · last seen 9:41 AM'),chev)+row('plus',T('ربط حاسوب آخر','Pair another PC'),'',chev,'onb2'))}
-   ${g(T('المساحة','Space'), row('storage',T('تفريغ مساحة','Free up space'),'3.2 GB',chev,'freeup')+row('trash',T('سلة المهملات','Trash'),T('12 عنصراً','12 items'),chev,'trash'))}
-   ${g(T('المظهر','Appearance'), row('globe',T('اللغة','Language'),T('العربية','English'),chev)+row('palette',T('المظهر','Theme'),T('حسب النظام','System'),chev))}
-   ${g(T('المساعدة','Help'), row('wifi',T('لا أجد حاسوبي','Can’t find my PC'),'',chev,'trouble')+row('flag',T('الإبلاغ عن مشكلة','Report a problem'),'',chev,'report')+row('info',T('حول التطبيق','About'),'1.0.0',chev,'about'))}
-   <div class="card list" style="margin-top:22px">${row('settings',T('خيارات متقدمة','Advanced'),adv?'':T('6 خيارات','6 options'),`<span class="chev">${I(adv?'collapse':'expand')}</span>`,adv?'settings':'settingsAdv')}
-   ${adv? row('',T('شبكات Wi‑Fi المسموحة','Allowed Wi‑Fi networks'),T('Home‑5G فقط','Home‑5G only'),chev)
-        + row('',T('أثناء الشحن فقط','Only while charging'),'',sw(false))
-        + row('',T('الفيديو على Wi‑Fi فقط','Videos on Wi‑Fi only'),'',sw(true))
-        + row('',T('مدة سلة المهملات','Trash period'),T('30 يوماً','30 days'),chev)
-        + row('',T('التأكيد الأسبوعي','Weekly check'),T('مطلوب للنقل النهائي','Required for final move'),chev,'weekly')
-        + row('',T('سجل التشخيص','Diagnostic log'),T('محفوظ على الهاتف فقط','Kept on the phone only'),sw(false)) : ''}</div>
-  </div>`;
-}
-const ICON = `<svg viewBox="0 0 256 256" width="100%" height="100%" aria-label="Kiwi Transfer"><path fill="#2F6249" d="M56.32 0H199.68A56.32 56.32 0 0 1 256 56.32V199.68A56.32 56.32 0 0 1 199.68 256H56.32A56.32 56.32 0 0 1 0 199.68V56.32A56.32 56.32 0 0 1 56.32 0Z"/><path fill="#123B2A" d="M56.32 1H199.68A55.32 55.32 0 0 1 255 56.32V199.68A55.32 55.32 0 0 1 199.68 255H56.32A55.32 55.32 0 0 1 1 199.68V56.32A55.32 55.32 0 0 1 56.32 1Z"/><path fill="#FFC27A" fill-rule="evenodd" d="M102 52H210A14 14 0 0 1 224 66V140A14 14 0 0 1 210 154H102A14 14 0 0 1 88 140V66A14 14 0 0 1 102 52ZM106 66V140H206V66Z"/><path fill="#FFC27A" d="M148 154H164V172H148ZM128 170H184A6 6 0 0 1 190 176V176A6 6 0 0 1 184 182H128A6 6 0 0 1 122 176V176A6 6 0 0 1 128 170Z"/><path fill="#B9F34A" d="M124 95H166V79L196 103L166 127V111H124A8 8 0 0 1 124 95Z"/><path fill="#123B2A" d="M44 80H96A20 20 0 0 1 116 100V196A20 20 0 0 1 96 216H44A20 20 0 0 1 24 196V100A20 20 0 0 1 44 80Z"/><path fill="#FFC27A" fill-rule="evenodd" d="M48 90H92A14 14 0 0 1 106 104V192A14 14 0 0 1 92 206H48A14 14 0 0 1 34 192V104A14 14 0 0 1 48 90ZM46 104V184H94V104Z"/><path fill="#FFC27A" d="M50 178L64 156L74 168L80 160L90 178Z"/><circle fill="#FFC27A" cx="80" cy="122" r="7"/><path fill="#B9F34A" d="M228.8 197.69L223.85 223.85L197.69 228.8L202.64 202.64Z"/></svg>`;
+const ICON = `<svg viewBox="0 0 256 256" width="100%" height="100%" aria-label="Kiwi Transfer"><path fill="#2F6249" d="M56.32 0H199.68A56.32 56.32 0 0 1 256 56.32V199.68A56.32 56.32 0 0 1 199.68 256H56.32A56.32 56.32 0 0 1 0 199.68V56.32A56.32 56.32 0 0 1 56.32 0Z"/><path fill="#123B2A" d="M56.32 1H199.68A55.32 55.32 0 0 1 255 56.32V199.68A55.32 55.32 0 0 1 199.68 255H56.32A55.32 55.32 0 0 1 1 199.68V56.32A55.32 55.32 0 0 1 56.32 1Z"/><path fill="#FFC27A" fill-rule="evenodd" d="M44 84H76A10 10 0 0 1 86 94V172A10 10 0 0 1 76 182H44A10 10 0 0 1 34 172V94A10 10 0 0 1 44 84ZM44 96V168H76V96Z"/><path fill="#B9F34A" d="M98 126H122V112L146 133L122 154V140H98A7 7 0 0 1 98 126Z"/><path fill="#FFC27A" fill-rule="evenodd" d="M166 92H214A10 10 0 0 1 224 102V154A10 10 0 0 1 214 164H166A10 10 0 0 1 156 154V102A10 10 0 0 1 166 92ZM168 104V152H212V104Z"/><path fill="#FFC27A" d="M184 164H196V176H184ZM172 174H208V184H172Z"/><path fill="#B9F34A" d="M228.8 197.69L223.85 223.85L197.69 228.8L202.64 202.64Z"/></svg>`;
 
 /* ---------- render ---------- */
 const byId = Object.fromEntries(SCREENS.filter(s=>s.id).map(s=>[s.id,s]));
 window.SCREEN_IDS = SCREENS.filter(s=>s.id).map(s=>s.id);
+window.NEW_IDS = SCREENS.filter(s=>s.nw).map(s=>s.id);
 let timer;
 function render(){
   const root = document.documentElement;
@@ -545,7 +675,7 @@ function render(){
   document.getElementById('langBtn').textContent = S.l==='ar'?'EN':'ع';
   document.getElementById('themeBtn').innerHTML = I(S.t==='light'?'moon':'sun');
   document.getElementById('sbi').innerHTML = I('wifi')+I('battery');
-  document.getElementById('index').innerHTML = SCREENS.map(s=>s.g?`<b>${T(...s.g)}</b>`:`<button data-go="${s.id}" aria-current="${s.id===S.s}">${T(...s.n)}</button>`).join('');
+  document.getElementById('index').innerHTML = SCREENS.map(s=>s.g?`<b>${T(...s.g)}</b>`:`<button data-go="${s.id}" aria-current="${s.id===S.s}">${T(...s.n)}${s.nw?`<span class="new">${T('جديد','new')}</span>`:''}</button>`).join('');
   const sc = byId[S.s] || byId.home;
   const base = sc.base ? byId[sc.base].r() : '';
   const v = document.getElementById('view');
