@@ -1000,8 +1000,10 @@ A request for a capability that is not active is answered with `E_UNSUPPORTED`.
   `more = false` has arrived. While it works on such a request the responder MUST send a part at least every
   30 s (a part may carry zero results); the requester treats 60 s without a part as a failure of every item
   not yet answered.
-- Every other request fails if no response arrives within `REQUEST_TIMEOUT` (60 s). A failed or timed-out
-  request never counts as a positive answer.
+- Every other request fails if no response arrives within `REQUEST_TIMEOUT` (60 s), with two exceptions:
+  `XFER_END` has no timeout of its own (the commit of a large file takes as long as the disk needs; the
+  request ends with its ack or with the connection), and an `OFFER` that waits for a person uses
+  `ACCEPT_TIMEOUT` (9.1). A failed or timed-out request never counts as a positive answer.
 - An unknown message type with `id > 0` is answered with `ERROR(E_UNSUPPORTED)`; with `id = 0` it is ignored.
 - A message that is not allowed in the current state is answered with `ERROR(E_STATE)`.
 
@@ -2554,10 +2556,10 @@ rotation.
        days. These items have one copy on the PC until it is."
     d. **Before the trash lets go.** For every `TRASHED` item whose latest `FmResult.copies` is 1 while
        `mirror` is not 0: at 7 days and again at 2 days before the item leaves the trash (API 30+: the
-       earlier of the two dates of 8.6 rule 5; API 24-29: the end of the trash period), the app notifies:
+       earlier of the two dates of 8.6, Android 11+ rule 5; API 24-29: the end of the trash period), the app notifies:
        "N items leave this phone for good on <date>. The PC has them on one disk only. Connect the second
        disk to the PC, or restore them." with one-tap restore. If the stage-2 check could not run at all,
-       the stronger warning of 8.6 rule 5 is shown instead.
+       the stronger warning of 8.6, Android 11+ rule 5, is shown instead.
     e. `mirror = 4` arrives together with `integrity_block`: the alert of 8.9.
 12. **Ledger copy.** At the end of each catch-up the PC SHOULD write a verified backup copy of its ledger
     to the second disk (`.kiwi-store\ledger-backup\`). It is never used automatically. A ledger restored
