@@ -1832,6 +1832,23 @@ the current time. The PC never opens the files.
    uploaded again, and they become eligible for final move only through the complete flow of section 8.
 7. The dialog on the PC offers to unpair the old phone (a lost phone should not stay paired).
 
+### 9.5 Rules for the surfaces around the protocol *(platform)*
+
+These are not wire rules, but the threat model relies on them:
+
+1. Android exported components: the launcher activity and the share target, nothing else. No exported
+   service, receiver or provider; pending intents are immutable; `usesCleartextTraffic` is false.
+2. Items shared into the app ("Send to PC") are read only through the content resolver with the sharing
+   app's grant. `file:` URIs, and URIs that resolve to the app's own provider or private directories, are
+   refused (another app must not be able to make Kiwi Transfer send its own private files).
+3. Buttons that give consent (turn on final move, "numbers match", accept files, free up space) ignore
+   touches while another window covers the app (protection against overlays).
+4. Notifications show counts and device names, never file names, and use private lock-screen visibility.
+5. The PC window (WebView2) loads only the program's own local files, blocks navigation and requests to any
+   remote origin, uses a content security policy without inline script, and receives peer text only as
+   plain text (5.8). The native host accepts a small, typed set of UI commands.
+6. The weekly code, the pairing QR and the SAS are shown only inside the program's own window (3.4).
+
 ---
 
 ## 10. Update check, problem report, and the complete endpoint list
