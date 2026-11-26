@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Versions chosen in the spike (docs/SPIKE-REPORT.md) and shared with Scan Kiwi.
 [versions]
-agp = "8.13.2"
-kotlin = "2.2.21"
+agp = "9.5.3"
+kotlin = "2.4.21"
 composeBom = "2025.12.01"
 activityCompose = "1.11.0"
 coreKtx = "1.17.0"
 junit = "4.13.2"
-coroutines = "1.10.2"
+coroutines = "1.11.0"
 lifecycle = "2.9.4"
 # Added when the Rust core is wired in (spike): jna = "5.17.0" (use its Apache-2.0 option); UniFFI 0.32.2 is on the Rust side.
 
